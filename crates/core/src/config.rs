@@ -81,6 +81,12 @@ pub struct MonadeckConfig {
     #[serde(default)]
     pub debug_gui: bool,
 
+    /// Apply monado's NVIDIA compositor mitigations when an NVIDIA GPU is present
+    /// (`U_PACING_COMP_TIME_FRACTION_PERCENT=95`, `XRT_COMPOSITOR_USE_PRESENT_WAIT=1`).
+    /// No-op on non-NVIDIA hardware, so it's safe to leave on by default.
+    #[serde(default = "default_true")]
+    pub nvidia_mitigation: bool,
+
     /// Lighthouse tracking driver. `steamvr` uses monado's steamvr_lh wrapper
     /// (enabled via `STEAMVR_LH_ENABLE=true`) and is needed for the Bigscreen
     /// Beyond; `vive`/`survive` use the FLOSS drivers (set via `LH_DRIVER`). An
@@ -111,6 +117,7 @@ impl Default for MonadeckConfig {
             min_frame_period: true,
             compute_compositor: true,
             debug_gui: false,
+            nvidia_mitigation: true,
             lighthouse_driver: default_lh_driver(),
             environment: BTreeMap::new(),
             plugins: Vec::new(),

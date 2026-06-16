@@ -25,9 +25,7 @@ pub struct AmdGpu {
 }
 
 fn is_amd(device_dir: &Path) -> bool {
-    fs::read_to_string(device_dir.join("vendor"))
-        .map(|v| v.trim() == "0x1002")
-        .unwrap_or(false)
+    is_vendor(device_dir, "0x1002")
 }
 
 /// Parse the active mode from `pp_power_profile_mode`. The active row carries a
@@ -85,6 +83,32 @@ pub fn find_amd_gpu() -> Option<AmdGpu> {
         });
     }
     None
+}
+
+/// Whether any NVIDIA GPU (vendor `0x10de`) is present — used to decide whether
+/// to apply monado's NVIDIA compositor mitigations.
+pub fn has_nvidia_gpu() -> bool {
+    let Ok(read) = fs::read_dir("/sys/class/drm") else {
+        return false;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        let is_card = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("card") && n[4..].chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false);
+        if is_card && is_vendor(&path.join("device"), "0x10de") {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_vendor(device_dir: &Path, vendor: &str) -> bool {
+    fs::read_to_string(device_dir.join("vendor"))
+        .map(|v| v.trim() == vendor)
+        .unwrap_or(false)
 }
 
 /// Set the VR power profile on the detected AMD GPU via `pkexec`. Blocking.

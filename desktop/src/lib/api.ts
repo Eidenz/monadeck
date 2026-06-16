@@ -32,6 +32,7 @@ export const getSnapshot = () => invoke<Snapshot>("get_snapshot");
 
 import type { AmdGpu } from "./types";
 export const amdGpu = () => invoke<AmdGpu | null>("amd_gpu");
+export const hasNvidia = () => invoke<boolean>("has_nvidia");
 export const setAmdVrProfile = () => invoke<void>("set_amd_vr_profile");
 export const importOpenxrStatus = () => invoke<boolean>("import_openxr_status");
 export const writeImportOpenxr = () => invoke<void>("write_import_openxr");

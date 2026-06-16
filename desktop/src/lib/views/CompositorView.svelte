@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { app, saveConfig } from "$lib/state.svelte";
-  import { amdGpu, setAmdVrProfile } from "$lib/api";
+  import { amdGpu, hasNvidia, setAmdVrProfile } from "$lib/api";
   import Toggle from "$lib/components/Toggle.svelte";
   import type { AmdGpu } from "$lib/types";
 
@@ -12,7 +12,10 @@
     app.config.render_scale = Math.max(50, Math.min(300, Math.round(v) || 100));
     saveConfig();
   }
-  const set = (k: "min_frame_period" | "compute_compositor" | "debug_gui", v: boolean) => {
+  const set = (
+    k: "min_frame_period" | "compute_compositor" | "debug_gui" | "nvidia_mitigation",
+    v: boolean,
+  ) => {
     if (app.config) {
       app.config[k] = v;
       saveConfig();
@@ -20,9 +23,11 @@
   };
 
   let gpu = $state<AmdGpu | null>(null);
+  let nvidia = $state(false);
   let applying = $state(false);
   async function loadGpu() {
     gpu = await amdGpu();
+    nvidia = await hasNvidia();
   }
   async function applyVr() {
     applying = true;
@@ -85,6 +90,16 @@
       />
       <span>Monado debug/preview window <em>(desktop mirror)</em></span>
     </div>
+    {#if nvidia}
+      <div class="toggle-row">
+        <Toggle
+          label="NVIDIA mitigations"
+          checked={app.config?.nvidia_mitigation ?? true}
+          onchange={(v) => set("nvidia_mitigation", v)}
+        />
+        <span>NVIDIA compositor mitigations <em>(present-wait + pacing fraction — NVIDIA GPU detected)</em></span>
+      </div>
+    {/if}
   </div>
 
   {#if gpu}

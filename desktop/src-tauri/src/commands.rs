@@ -231,6 +231,14 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
             env.entry("XRT_CURATED_GUI".to_string())
                 .or_insert_with(|| "1".to_string());
         }
+        // NVIDIA compositor mitigations — only when an NVIDIA GPU is actually
+        // present (so it's a no-op for AMD users / portable to nvidia friends).
+        if cfg.nvidia_mitigation && gpu::has_nvidia_gpu() {
+            env.entry("U_PACING_COMP_TIME_FRACTION_PERCENT".to_string())
+                .or_insert_with(|| "95".to_string());
+            env.entry("XRT_COMPOSITOR_USE_PRESENT_WAIT".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
         let bin = cfg.monado_service_bin();
         st.runner
             .lock()
@@ -298,6 +306,12 @@ pub async fn amd_gpu() -> Option<AmdGpu> {
         .await
         .ok()
         .flatten()
+}
+
+/// Whether an NVIDIA GPU is present (drives the mitigations toggle visibility).
+#[tauri::command]
+pub fn has_nvidia() -> bool {
+    gpu::has_nvidia_gpu()
 }
 
 /// Set the AMD VR power profile (prompts for a password via pkexec).

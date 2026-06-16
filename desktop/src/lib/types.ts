@@ -26,6 +26,7 @@ export interface MonadeckConfig {
   min_frame_period: boolean;
   compute_compositor: boolean;
   debug_gui: boolean;
+  nvidia_mitigation: boolean;
   lighthouse_driver: string;
   environment: Record<string, string>;
   plugins: Plugin[];

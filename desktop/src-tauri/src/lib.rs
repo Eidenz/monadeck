@@ -113,6 +113,7 @@ pub fn run() {
             commands::get_snapshot,
             commands::get_logs,
             commands::amd_gpu,
+            commands::has_nvidia,
             commands::set_amd_vr_profile,
             commands::import_openxr_status,
             commands::write_import_openxr,
