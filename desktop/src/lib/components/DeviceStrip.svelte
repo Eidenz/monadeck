@@ -7,6 +7,8 @@
     hmd: "M4 8.5h16a2 2 0 0 1 2 2v3.2a3 3 0 0 1-3 3h-2.4a2 2 0 0 1-1.7-.95L13.6 14.8a2 2 0 0 0-3.2 0l-1.3 1.95A2 2 0 0 1 7.4 17.7H5a3 3 0 0 1-3-3V10.5a2 2 0 0 1 2-2z",
     controller:
       "M9 3.2h6a3.2 3.2 0 0 1 3.2 3.2v9.4a3.4 3.4 0 0 1-6.5 1.4l-.9-2.1a1 1 0 0 0-1.6 0l-.9 2.1A3.4 3.4 0 0 1 5.8 15.8V6.4A3.2 3.2 0 0 1 9 3.2z",
+    glove:
+      "M7.2 11.4V7a1.3 1.3 0 0 1 2.6 0v3.4h.5V4.8a1.3 1.3 0 0 1 2.6 0v5.6h.5V5.8a1.3 1.3 0 0 1 2.6 0v4.6h.5V8a1.3 1.3 0 0 1 2.6 0v6.2a5.8 5.8 0 0 1-5.8 5.8h-1.4a5 5 0 0 1-3.5-1.5l-3.4-3.4a1.4 1.4 0 0 1 2-2l1.6 1.6z",
     tracker:
       "M12 6.5c4 0 6.5 1.8 6.5 4s-2.5 4-6.5 4-6.5-1.8-6.5-4 2.5-4 6.5-4zm-4.2 8.2A8.7 8.7 0 0 0 12 15.6a8.7 8.7 0 0 0 4.2-.9l1.2 1.9a1.6 1.6 0 0 1-1.36 2.45H7.96A1.6 1.6 0 0 1 6.6 16.6l1.2-1.9z",
     gamepad:
@@ -38,6 +40,15 @@
     if (charge > 0.2) return "var(--warn)";
     return "var(--danger)";
   }
+
+  const LOW_BATTERY = 0.15;
+  // Grey when not detected, a gentle red when the battery is critically low,
+  // otherwise the normal teal→green gradient.
+  function iconFill(dev: DeviceInfo | null): string {
+    if (!dev) return "hsl(var(--muted) / 0.3)";
+    if (dev.battery && dev.battery.charge < LOW_BATTERY) return "url(#devgrad-low)";
+    return "url(#devgrad)";
+  }
 </script>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -45,6 +56,10 @@
     <linearGradient id="devgrad" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="hsl(185 70% 52%)" />
       <stop offset="1" stop-color="hsl(150 62% 46%)" />
+    </linearGradient>
+    <linearGradient id="devgrad-low" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="hsl(2 75% 62%)" />
+      <stop offset="1" stop-color="hsl(0 62% 50%)" />
     </linearGradient>
   </defs>
 </svg>
@@ -57,7 +72,10 @@
       title={slot.dev ? `${slot.dev.name}${slot.dev.serial ? `\n${slot.dev.serial}` : ""}` : `${slot.label} — not detected`}
     >
       <svg viewBox="0 0 24 24" width="46" height="46" aria-hidden="true" style={slot.flip ? "transform:scaleX(-1)" : ""}>
-        <path d={ICONS[slot.icon]} fill={slot.dev ? "url(#devgrad)" : "hsl(var(--muted) / 0.3)"} />
+        <path
+          d={ICONS[slot.dev?.kind ?? slot.icon] ?? ICONS[slot.icon]}
+          fill={iconFill(slot.dev)}
+        />
       </svg>
       {#if slot.dev?.battery}
         <span class="batt" style={`--c:${batteryColor(slot.dev.battery.charge)}`}>
@@ -70,7 +88,7 @@
   {#each extras as d (d.index)}
     <div class="dev" title={`${d.name}${d.serial ? `\n${d.serial}` : ""}`}>
       <svg viewBox="0 0 24 24" width="46" height="46" aria-hidden="true">
-        <path d={ICONS[d.kind] ?? ICONS.unknown} fill="url(#devgrad)" />
+        <path d={ICONS[d.kind] ?? ICONS.unknown} fill={iconFill(d)} />
       </svg>
       {#if d.battery}
         <span class="batt" style={`--c:${batteryColor(d.battery.charge)}`}>

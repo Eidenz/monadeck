@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#222a31" />
+      <stop offset="1" stop-color="#11171c" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.02" r="0.95">
+      <stop offset="0" stop-color="#2b4d55" stop-opacity="0.8" />
+      <stop offset="0.6" stop-color="#2b4d55" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#36cdd6" />
+      <stop offset="1" stop-color="#30c47f" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)" />
+  <rect width="1024" height="1024" rx="232" fill="url(#glow)" />
+
+  <!-- VR visor (the brand headset glyph), drawn in 24-unit space and scaled up -->
+  <g transform="translate(512,468) scale(33) translate(-12,-13.1)">
+    <path
+      d="M4 8.5h16a2 2 0 0 1 2 2v3.2a3 3 0 0 1-3 3h-2.4a2 2 0 0 1-1.7-.95L13.6 14.8a2 2 0 0 0-3.2 0l-1.3 1.95A2 2 0 0 1 7.4 17.7H5a3 3 0 0 1-3-3V10.5a2 2 0 0 1 2-2z"
+      fill="url(#grad)"
+    />
+  </g>
+
+  <!-- the "deck" bar -->
+  <rect x="320" y="662" width="384" height="34" rx="17" fill="url(#grad)" opacity="0.92" />
+</svg>

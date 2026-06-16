@@ -20,6 +20,8 @@ export interface MonadeckConfig {
   monado_prefix: string;
   xrizer_path: string | null;
   ovr_runtime: OvrRuntime;
+  minimize_to_tray: boolean;
+  auto_start: boolean;
   lighthouse_driver: string;
   environment: Record<string, string>;
   plugins: Plugin[];
@@ -28,6 +30,7 @@ export interface MonadeckConfig {
 export type DeviceKind =
   | "hmd"
   | "controller"
+  | "glove"
   | "tracker"
   | "gamepad"
   | "basestation"
@@ -51,6 +54,7 @@ export interface DeviceInfo {
 export interface ClientInfo {
   name: string;
   focused: boolean;
+  primary: boolean;
   overlay: boolean;
 }
 

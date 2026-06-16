@@ -7,6 +7,7 @@
   } from "@tauri-apps/api/window";
   import TitleBar from "$lib/components/TitleBar.svelte";
   import CapToast from "$lib/components/CapToast.svelte";
+  import CrashToast from "$lib/components/CrashToast.svelte";
   import DeviceStrip from "$lib/components/DeviceStrip.svelte";
   import AppsBar from "$lib/components/AppsBar.svelte";
   import {
@@ -14,29 +15,41 @@
     loadInitial,
     refreshStatus,
     refreshSnapshot,
+    refreshConfig,
     start,
     stop,
   } from "$lib/state.svelte";
 
   let dismissed = $state(false);
   const showToast = $derived(app.caps === "needs_setcap" && !dismissed);
+  const showCrash = $derived(app.crash !== null);
 
+  // Stopped → Warming up… (process up, system not ready yet) → Now Playing.
   const heading = $derived(
     app.service.connected
       ? "Now Playing"
       : app.service.running
-        ? "Starting…"
+        ? "Warming up…"
         : "Stopped",
   );
 
+  // The detected "game": the primary app (fall back to a focused non-overlay).
+  const game = $derived(
+    app.service.connected
+      ? (app.clients.find((c) => c.primary) ??
+          app.clients.find((c) => c.focused && !c.overlay) ??
+          null)
+      : null,
+  );
+
   // The window auto-sizes to the deck's measured content — compact by default,
-  // growing as devices/apps appear. The cap toast floats detached above the
-  // deck, growing the (transparent) window UPWARD so the deck stays put; device
-  // and app growth just extends the window downward.
+  // growing as devices/apps appear. The toasts float detached above the deck,
+  // growing the (transparent) window UPWARD so the deck stays put; device and
+  // app growth just extends the window downward.
   const WIN_W = 380;
   let contentH = $state(0); // measured deck (+ error) height
   let toastSlotH = $state(0); // measured toast card height
-  const toastH = $derived(showToast ? toastSlotH : 0);
+  const toastH = $derived(showToast || showCrash ? toastSlotH : 0);
 
   let appliedToastH = 0;
   let desired: { total: number; toast: number } | null = null;
@@ -76,19 +89,31 @@
   });
 
   onMount(() => {
-    loadInitial();
+    (async () => {
+      await loadInitial();
+      // Auto-start the service on launch when enabled (and not already up).
+      if (
+        app.config?.auto_start &&
+        app.config?.monado_prefix &&
+        !app.service.running
+      ) {
+        start();
+      }
+    })();
     const t = setInterval(async () => {
       await refreshStatus();
       await refreshSnapshot();
+      await refreshConfig();
     }, 1500);
     return () => clearInterval(t);
   });
 </script>
 
 <div class="deck-window">
-  {#if showToast}
+  {#if showToast || showCrash}
     <div class="toast-slot" bind:clientHeight={toastSlotH}>
-      <CapToast bind:dismissed />
+      {#if showCrash}<CrashToast />{/if}
+      {#if showToast}<CapToast bind:dismissed />{/if}
     </div>
   {/if}
 
@@ -97,7 +122,10 @@
       <TitleBar />
       <div class="body">
         <div class="status-row">
-          <div class="heading">{heading}</div>
+          <div class="heading-wrap">
+            <div class="heading">{heading}</div>
+            {#if game}<div class="game" title={game.name}>{game.name}</div>{/if}
+          </div>
           {#if app.service.running}
             <button class="pwr stop" onclick={stop} disabled={app.busy}>Stop</button>
           {:else}
@@ -140,6 +168,9 @@
   .toast-slot {
     flex: none;
     padding: 8px 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
   /* Natural-height content (deck + any error), measured to size the window. */
   .content {
@@ -162,11 +193,22 @@
     justify-content: space-between;
     gap: 10px;
   }
+  .heading-wrap {
+    min-width: 0;
+  }
   .heading {
     font-size: 21px;
     font-weight: 600;
     color: hsl(var(--foreground));
     letter-spacing: 0.2px;
+  }
+  .game {
+    font-size: 12px;
+    color: hsl(var(--primary));
+    margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .pwr {
     flex: none;

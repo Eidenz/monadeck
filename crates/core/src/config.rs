@@ -24,6 +24,10 @@ pub enum OvrRuntime {
     None,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_lh_driver() -> String {
     // The Bigscreen Beyond (and other SteamVR-tracked HMDs that aren't Vive/Index)
     // need monado's steamvr_lh wrapper, enabled via STEAMVR_LH_ENABLE — the same
@@ -45,6 +49,14 @@ pub struct MonadeckConfig {
     /// Which OpenVR compat layer to register on start.
     #[serde(default)]
     pub ovr_runtime: OvrRuntime,
+
+    /// Hide the deck to the tray on close instead of quitting the app.
+    #[serde(default = "default_true")]
+    pub minimize_to_tray: bool,
+
+    /// Start monado-service automatically when Monadeck launches.
+    #[serde(default)]
+    pub auto_start: bool,
 
     /// Lighthouse tracking driver. `steamvr` uses monado's steamvr_lh wrapper
     /// (enabled via `STEAMVR_LH_ENABLE=true`) and is needed for the Bigscreen
@@ -70,6 +82,8 @@ impl Default for MonadeckConfig {
             monado_prefix: PathBuf::new(),
             xrizer_path: None,
             ovr_runtime: OvrRuntime::default(),
+            minimize_to_tray: true,
+            auto_start: false,
             lighthouse_driver: default_lh_driver(),
             environment: BTreeMap::new(),
             plugins: Vec::new(),

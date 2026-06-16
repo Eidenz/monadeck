@@ -17,6 +17,7 @@ use std::path::PathBuf;
 pub enum DeviceKind {
     Hmd,
     Controller,
+    Glove,
     Tracker,
     Gamepad,
     BaseStation,
@@ -43,14 +44,25 @@ pub struct DeviceInfo {
 }
 
 fn classify(role: Option<&str>, name: &str) -> DeviceKind {
+    let n = name.to_lowercase();
+    // Gloves (UDCAP) hold the left/right controller roles, so check by name
+    // before the role match or they'd render as controllers.
+    let is_glove = n.contains("glove") || n.contains("udcap");
     match role {
         Some("head") | Some("eyes") => return DeviceKind::Hmd,
-        Some("left") | Some("right") => return DeviceKind::Controller,
+        Some("left") | Some("right") => {
+            return if is_glove {
+                DeviceKind::Glove
+            } else {
+                DeviceKind::Controller
+            }
+        }
         Some("gamepad") => return DeviceKind::Gamepad,
         _ => {}
     }
-    let n = name.to_lowercase();
-    if n.contains("tracker") {
+    if is_glove {
+        DeviceKind::Glove
+    } else if n.contains("tracker") {
         DeviceKind::Tracker
     } else if n.contains("base") || n.contains("lighthouse") || n.contains("station") {
         DeviceKind::BaseStation
@@ -95,8 +107,10 @@ pub fn ipc_socket_path() -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientInfo {
     pub name: String,
-    /// The currently focused/primary app (vs. a background overlay).
+    /// The currently focused app.
     pub focused: bool,
+    /// The primary app (the "game") — what shows under "Now Playing".
+    pub primary: bool,
     pub overlay: bool,
 }
 
@@ -161,16 +175,18 @@ fn clients_from(monado: &Monado) -> Result<Vec<ClientInfo>, String> {
         if !seen.insert(name.to_lowercase()) {
             continue;
         }
-        let (focused, overlay) = match c.state() {
+        let (focused, primary, overlay) = match c.state() {
             Ok(s) => (
                 s.contains(ClientState::ClientSessionFocused),
+                s.contains(ClientState::ClientPrimaryApp),
                 s.contains(ClientState::ClientSessionOverlay),
             ),
-            Err(_) => (false, false),
+            Err(_) => (false, false, false),
         };
         out.push(ClientInfo {
             name,
             focused,
+            primary,
             overlay,
         });
     }

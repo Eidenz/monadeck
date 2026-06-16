@@ -20,7 +20,13 @@ export const app = $state({
   clients: [] as ClientInfo[],
   busy: false,
   error: "" as string,
+  // Set when the service stops without us asking (crash) — drives the toast.
+  crash: null as { code: number | null } | null,
 });
+
+// Crash detection: a running→stopped transition we didn't initiate.
+let wasRunning = false;
+let intendedStop = false;
 
 export async function loadInitial() {
   app.version = await api.appVersion();
@@ -47,11 +53,24 @@ export async function loadInitial() {
   await refreshStatus();
 }
 
+// Re-pull config from the backend so changes made in the settings window (e.g.
+// always-on-top, prefix) reach the deck window, which has its own state.
+export async function refreshConfig() {
+  app.config = await api.getConfig();
+}
+
 export async function refreshStatus() {
   try {
     app.service = await api.serviceStatus();
     app.runtime = await api.runtimeStatus();
     app.caps = await api.capabilitiesStatus();
+    // The service went from running to stopped — if we didn't ask for it, it
+    // crashed (or failed to bring up a system); surface a toast.
+    if (wasRunning && !app.service.running) {
+      if (!intendedStop) app.crash = { code: app.service.exit_code };
+      intendedStop = false;
+    }
+    wasRunning = app.service.running;
   } catch (e) {
     app.error = String(e);
   }
@@ -97,6 +116,7 @@ export async function saveConfig() {
 export async function start() {
   app.busy = true;
   app.error = "";
+  app.crash = null;
   try {
     await api.startService();
   } catch (e) {
@@ -108,6 +128,7 @@ export async function start() {
 }
 
 export async function stop() {
+  intendedStop = true; // a clean stop, not a crash
   app.busy = true;
   try {
     await api.stopService();

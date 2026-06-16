@@ -1,6 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { app, saveConfig, applyCaps } from "$lib/state.svelte";
+  import Toggle from "$lib/components/Toggle.svelte";
 
   async function browse(field: "monado_prefix" | "xrizer_path") {
     if (!app.config) return;
@@ -82,6 +83,36 @@
         }}>Leave alone</button>
     </div>
     <span class="note">Starting backs up your existing runtime files and restores them on stop.</span>
+  </div>
+
+  <div class="field">
+    <span class="lbl">Behavior</span>
+    <div class="toggle-row">
+      <Toggle
+        label="Minimize to tray on close"
+        checked={app.config?.minimize_to_tray ?? true}
+        onchange={(v) => {
+          if (app.config) {
+            app.config.minimize_to_tray = v;
+            saveConfig();
+          }
+        }}
+      />
+      <span>Minimize to tray on close <em>(uncheck to quit instead)</em></span>
+    </div>
+    <div class="toggle-row">
+      <Toggle
+        label="Start the service when Monadeck launches"
+        checked={app.config?.auto_start ?? false}
+        onchange={(v) => {
+          if (app.config) {
+            app.config.auto_start = v;
+            saveConfig();
+          }
+        }}
+      />
+      <span>Start the service when Monadeck launches</span>
+    </div>
   </div>
 
   <div class="field">
@@ -205,5 +236,16 @@
   .pill.warn {
     color: hsl(var(--warn));
     border-color: hsl(var(--warn) / 0.4);
+  }
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    font-size: 13px;
+    color: hsl(var(--foreground));
+  }
+  .toggle-row em {
+    color: hsl(var(--muted));
+    font-style: normal;
   }
 </style>
