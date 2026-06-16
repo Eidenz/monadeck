@@ -112,6 +112,10 @@ pub fn run() {
             commands::stop_service,
             commands::get_snapshot,
             commands::get_logs,
+            commands::amd_gpu,
+            commands::set_amd_vr_profile,
+            commands::import_openxr_status,
+            commands::write_import_openxr,
             commands::list_installed_apps,
             commands::launch_plugin,
         ])

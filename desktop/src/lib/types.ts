@@ -22,9 +22,20 @@ export interface MonadeckConfig {
   ovr_runtime: OvrRuntime;
   minimize_to_tray: boolean;
   auto_start: boolean;
+  render_scale: number;
+  min_frame_period: boolean;
+  compute_compositor: boolean;
+  debug_gui: boolean;
   lighthouse_driver: string;
   environment: Record<string, string>;
   plugins: Plugin[];
+}
+
+export interface AmdGpu {
+  card: string;
+  profile_path: string;
+  current_mode: string;
+  vr_active: boolean;
 }
 
 export type DeviceKind =

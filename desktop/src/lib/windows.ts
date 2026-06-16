@@ -6,6 +6,7 @@ import { emit } from "@tauri-apps/api/event";
 
 export type SettingsSection =
   | "general"
+  | "compositor"
   | "environment"
   | "plugins"
   | "logs"

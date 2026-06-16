@@ -29,6 +29,12 @@ export const startService = () => invoke<void>("start_service");
 export const stopService = () => invoke<void>("stop_service");
 
 export const getSnapshot = () => invoke<Snapshot>("get_snapshot");
+
+import type { AmdGpu } from "./types";
+export const amdGpu = () => invoke<AmdGpu | null>("amd_gpu");
+export const setAmdVrProfile = () => invoke<void>("set_amd_vr_profile");
+export const importOpenxrStatus = () => invoke<boolean>("import_openxr_status");
+export const writeImportOpenxr = () => invoke<void>("write_import_openxr");
 export const getLogs = (since: number) =>
   invoke<LogChunk>("get_logs", { since });
 

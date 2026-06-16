@@ -17,11 +17,13 @@ pub mod cmd_runner;
 pub mod config;
 pub mod desktop;
 pub mod devices;
+pub mod gpu;
 pub mod launch_options;
 pub mod monado_conn;
 pub mod openvr_paths;
 pub mod paths;
 pub mod plugins;
+pub mod proton;
 pub mod setcap;
 
 pub use config::MonadeckConfig;

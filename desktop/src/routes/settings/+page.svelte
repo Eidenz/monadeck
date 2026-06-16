@@ -3,6 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import WindowControls from "$lib/components/WindowControls.svelte";
   import GeneralView from "$lib/views/GeneralView.svelte";
+  import CompositorView from "$lib/views/CompositorView.svelte";
   import EnvironmentView from "$lib/views/EnvironmentView.svelte";
   import PluginsView from "$lib/views/PluginsView.svelte";
   import LogsView from "$lib/views/LogsView.svelte";
@@ -12,6 +13,7 @@
 
   const nav: { id: SettingsSection; label: string }[] = [
     { id: "general", label: "General" },
+    { id: "compositor", label: "Compositor" },
     { id: "environment", label: "Environment" },
     { id: "plugins", label: "Plugins" },
     { id: "logs", label: "Logs" },
@@ -55,6 +57,8 @@
     <main class="content">
       {#if active === "general"}
         <GeneralView />
+      {:else if active === "compositor"}
+        <CompositorView />
       {:else if active === "environment"}
         <EnvironmentView />
       {:else if active === "plugins"}

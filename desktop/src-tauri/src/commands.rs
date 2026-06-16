@@ -7,6 +7,8 @@ use monadeck_core::active_runtime::{self, ActiveRuntimeKind};
 use monadeck_core::config::MonadeckConfig;
 use monadeck_core::desktop::{self, InstalledApp};
 use monadeck_core::devices::{self, Snapshot};
+use monadeck_core::gpu::{self, AmdGpu};
+use monadeck_core::proton;
 use monadeck_core::launch_options;
 use monadeck_core::openvr_paths::{self, OvrPathsKind};
 use monadeck_core::plugins::ExecWhen;
@@ -209,6 +211,26 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
                 env.insert("LH_DRIVER".to_string(), cfg.lighthouse_driver.to_lowercase());
             }
         }
+        // Compositor settings, injected like Envision's profile defaults. An
+        // explicit user env var always wins (or_insert).
+        if cfg.render_scale != 100 {
+            env.entry("XRT_COMPOSITOR_SCALE_PERCENTAGE".to_string())
+                .or_insert_with(|| cfg.render_scale.to_string());
+        }
+        if cfg.min_frame_period {
+            env.entry("U_PACING_APP_USE_MIN_FRAME_PERIOD".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+        if cfg.compute_compositor {
+            env.entry("XRT_COMPOSITOR_COMPUTE".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+        if cfg.debug_gui {
+            env.entry("XRT_DEBUG_GUI".to_string())
+                .or_insert_with(|| "1".to_string());
+            env.entry("XRT_CURATED_GUI".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
         let bin = cfg.monado_service_bin();
         st.runner
             .lock()
@@ -267,6 +289,35 @@ pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Detected AMD GPU + its current power profile (None if not an AMD card).
+#[tauri::command]
+pub async fn amd_gpu() -> Option<AmdGpu> {
+    tauri::async_runtime::spawn_blocking(gpu::find_amd_gpu)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Set the AMD VR power profile (prompts for a password via pkexec).
+#[tauri::command]
+pub async fn set_amd_vr_profile() -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(|| gpu::set_vr_profile().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Whether `PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES` is set session-wide.
+#[tauri::command]
+pub fn import_openxr_status() -> bool {
+    proton::is_set()
+}
+
+/// Write the `environment.d` config that sets it (needs a reboot/relogin).
+#[tauri::command]
+pub fn write_import_openxr() -> CmdResult<()> {
+    proton::write_env_file().map_err(|e| e.to_string())
 }
 
 /// Installed `.desktop` applications, for the "add installed app" plugin picker.

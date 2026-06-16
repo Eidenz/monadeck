@@ -307,6 +307,7 @@
     flex-direction: column;
     padding: 12px;
     gap: 10px;
+    background: hsl(var(--surface));
     box-shadow: 0 18px 50px hsl(0 0% 0% / 0.55);
   }
   .search {

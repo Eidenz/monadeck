@@ -28,6 +28,11 @@ fn default_true() -> bool {
     true
 }
 
+fn default_render_scale() -> u32 {
+    // Match Envision's Lighthouse default — a sharper image out of the box.
+    140
+}
+
 fn default_lh_driver() -> String {
     // The Bigscreen Beyond (and other SteamVR-tracked HMDs that aren't Vive/Index)
     // need monado's steamvr_lh wrapper, enabled via STEAMVR_LH_ENABLE — the same
@@ -58,6 +63,24 @@ pub struct MonadeckConfig {
     #[serde(default)]
     pub auto_start: bool,
 
+    /// Compositor render scale, percent (`XRT_COMPOSITOR_SCALE_PERCENTAGE`).
+    /// 100 = native; >100 supersamples for a sharper image (Envision uses 140).
+    #[serde(default = "default_render_scale")]
+    pub render_scale: u32,
+
+    /// `U_PACING_APP_USE_MIN_FRAME_PERIOD` — unlock the compositor refresh from a
+    /// power-of-two of the HMD rate; usually a sizeable perf boost.
+    #[serde(default = "default_true")]
+    pub min_frame_period: bool,
+
+    /// `XRT_COMPOSITOR_COMPUTE` — use the GPU compute compositor.
+    #[serde(default = "default_true")]
+    pub compute_compositor: bool,
+
+    /// `XRT_DEBUG_GUI` (+ `XRT_CURATED_GUI`) — monado's debug/preview window.
+    #[serde(default)]
+    pub debug_gui: bool,
+
     /// Lighthouse tracking driver. `steamvr` uses monado's steamvr_lh wrapper
     /// (enabled via `STEAMVR_LH_ENABLE=true`) and is needed for the Bigscreen
     /// Beyond; `vive`/`survive` use the FLOSS drivers (set via `LH_DRIVER`). An
@@ -84,6 +107,10 @@ impl Default for MonadeckConfig {
             ovr_runtime: OvrRuntime::default(),
             minimize_to_tray: true,
             auto_start: false,
+            render_scale: default_render_scale(),
+            min_frame_period: true,
+            compute_compositor: true,
+            debug_gui: false,
             lighthouse_driver: default_lh_driver(),
             environment: BTreeMap::new(),
             plugins: Vec::new(),
