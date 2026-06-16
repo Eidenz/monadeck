@@ -1,0 +1,13 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Node / SvelteKit
+node_modules
+/desktop/build
+/desktop/.svelte-kit
+.DS_Store
+
+# Tauri generated
+/desktop/src-tauri/gen

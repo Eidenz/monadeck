@@ -1,0 +1,17 @@
+[package]
+name = "monadeck-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Orchestration core for Monadeck: monado-service lifecycle, OpenXR/OpenVR runtime wiring, capabilities, libmonado device introspection, and plugins."
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+# Same pin NemuriXR uses; dlopen-based, talks to whatever libmonado.so the active
+# runtime points at (your fork's 1.7.0 .so — safe: older client, newer lib).
+libmonado = { git = "https://github.com/wayvr-org/libmonado-rs.git", rev = "6f66b26930c24a8a2fc57ddcd85704784894c750", version = "1.6.0" }

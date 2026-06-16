@@ -1,0 +1,13 @@
+# Root workspace holds only the pure-Rust orchestration core. The Tauri desktop
+# app (desktop/src-tauri) is its own workspace so its heavy web/webkit dependency
+# tree stays out of the core build — same split NemuriXR uses.
+[workspace]
+resolver = "2"
+members = ["crates/core"]
+exclude = ["desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Eidenz"]

@@ -1,0 +1,30 @@
+[package]
+name = "monadeck-desktop"
+version = "0.1.0"
+description = "Monadeck — a SteamVR-style launcher/orchestrator for a Monado fork"
+authors = ["Eidenz"]
+edition = "2021"
+
+[lib]
+# `_lib` suffix keeps the lib name distinct from the bin (Windows quirk; harmless
+# on Linux and matches the NemuriXR/udcap-control layout).
+name = "monadeck_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+monadeck-core = { path = "../../crates/core" }
+
+# Own workspace, isolated from the core workspace so the heavy webkit dep tree
+# stays out of `cargo check -p monadeck-core`.
+[workspace]

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Monadeck",
+  "version": "0.1.0",
+  "identifier": "com.eidenz.monadeck",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Monadeck",
+        "url": "/",
+        "width": 380,
+        "height": 236,
+        "minWidth": 340,
+        "minHeight": 140,
+        "decorations": false,
+        "transparent": true,
+        "resizable": true,
+        "maximizable": false,
+        "center": true
+      },
+      {
+        "label": "settings",
+        "title": "Monadeck Settings",
+        "url": "/settings",
+        "width": 780,
+        "height": 580,
+        "minWidth": 640,
+        "minHeight": 460,
+        "decorations": false,
+        "resizable": true,
+        "center": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "appimage"],
+    "category": "Utility",
+    "shortDescription": "SteamVR-style launcher for Monado",
+    "longDescription": "Monadeck — a compact launcher/orchestrator for a custom Monado build: start/stop the XR service with custom env vars, register xrizer, set CAP_SYS_NICE, watch the live device list via libmonado, and launch plugins by explicit path.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
