@@ -94,6 +94,18 @@ pub struct MonadeckConfig {
     #[serde(default = "default_lh_driver")]
     pub lighthouse_driver: String,
 
+    /// Run monado with a simulated headset (`SIMULATED_ENABLE`) — lets the
+    /// in-headset overlay be tested on a flat screen (pair with the debug
+    /// window) without any VR hardware.
+    #[serde(default)]
+    pub simulated_hmd: bool,
+
+    /// Launch the built-in in-headset library overlay after the service comes
+    /// up. It's a permanent, non-removable entry in the auto-launch list (ships
+    /// inside the bundle); off by default, the user flips this to enable it.
+    #[serde(default)]
+    pub overlay_enabled: bool,
+
     /// Environment variables injected into `monado-service` (your custom vars).
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
@@ -119,6 +131,8 @@ impl Default for MonadeckConfig {
             debug_gui: false,
             nvidia_mitigation: true,
             lighthouse_driver: default_lh_driver(),
+            simulated_hmd: false,
+            overlay_enabled: false,
             environment: BTreeMap::new(),
             plugins: Vec::new(),
         }

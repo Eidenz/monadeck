@@ -11,3 +11,6 @@ node_modules
 
 # Tauri generated
 /desktop/src-tauri/gen
+
+# Staged overlay sidecar (built by scripts/stage-overlay.sh on dev/build)
+/desktop/src-tauri/binaries

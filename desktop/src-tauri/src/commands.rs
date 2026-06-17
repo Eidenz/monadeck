@@ -231,6 +231,17 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
             env.entry("XRT_CURATED_GUI".to_string())
                 .or_insert_with(|| "1".to_string());
         }
+        // Simulated headset for testing the overlay without hardware. The
+        // simulated builder is off unless SIMULATED_ENABLE is set; add simple
+        // controllers too so there's something to point the laser with.
+        if cfg.simulated_hmd {
+            env.entry("SIMULATED_ENABLE".to_string())
+                .or_insert_with(|| "1".to_string());
+            env.entry("SIMULATED_LEFT".to_string())
+                .or_insert_with(|| "simple".to_string());
+            env.entry("SIMULATED_RIGHT".to_string())
+                .or_insert_with(|| "simple".to_string());
+        }
         // NVIDIA compositor mitigations — only when an NVIDIA GPU is actually
         // present (so it's a no-op for AMD users / portable to nvidia friends).
         if cfg.nvidia_mitigation && gpu::has_nvidia_gpu() {
@@ -263,6 +274,13 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
             match p.launch(&env) {
                 Ok(pid) => pids.push(pid),
                 Err(e) => log::warn!("plugin '{}' failed to launch: {e}", p.name),
+            }
+        }
+        // Built-in in-headset overlay — the permanent auto-launch entry.
+        if cfg.overlay_enabled {
+            match crate::overlay::launch(&env) {
+                Ok(pid) => pids.push(pid),
+                Err(e) => log::warn!("built-in overlay failed to launch: {e}"),
             }
         }
         Ok(())

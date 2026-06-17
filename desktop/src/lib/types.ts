@@ -28,6 +28,8 @@ export interface MonadeckConfig {
   debug_gui: boolean;
   nvidia_mitigation: boolean;
   lighthouse_driver: string;
+  simulated_hmd: boolean;
+  overlay_enabled: boolean;
   environment: Record<string, string>;
   plugins: Plugin[];
 }

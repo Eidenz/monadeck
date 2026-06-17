@@ -57,6 +57,13 @@
     await saveConfig();
   }
 
+  // --- built-in overlay (permanent, non-removable entry) -------------------
+  async function setOverlay(v: boolean) {
+    if (!app.config) return;
+    app.config.overlay_enabled = v;
+    await saveConfig();
+  }
+
   // --- existing plugin editing ---------------------------------------------
   async function remove(i: number) {
     if (!app.config) return;
@@ -89,12 +96,28 @@
     </div>
   </div>
 
-  {#if !app.config || app.config.plugins.length === 0}
-    <p class="empty">No plugins yet.</p>
-  {:else}
-    <div class="list">
-      {#each app.config.plugins as p, i (i)}
-        <div class="row glass" class:off={!p.enabled}>
+  <div class="list">
+    <!-- Built-in in-headset library overlay: ships in the bundle, always
+         present, toggle-only (no remove / no path edit). -->
+    <div class="row glass builtin" class:off={!app.config?.overlay_enabled}>
+      <label class="en">
+        <input
+          type="checkbox"
+          checked={app.config?.overlay_enabled ?? false}
+          onchange={(e) => setOverlay(e.currentTarget.checked)}
+        />
+      </label>
+      <div class="fields">
+        <div class="name-row">
+          <span class="name static">In-headset library</span>
+          <span class="badge">built-in</span>
+        </div>
+        <div class="path app">VR game-library launcher · ships with Monadeck · launches with the service</div>
+      </div>
+    </div>
+
+    {#each app.config?.plugins ?? [] as p, i (i)}
+      <div class="row glass" class:off={!p.enabled}>
           <label class="en">
             <input
               type="checkbox"
@@ -131,7 +154,9 @@
           </div>
         </div>
       {/each}
-    </div>
+  </div>
+  {#if !app.config || app.config.plugins.length === 0}
+    <p class="empty">Add your own apps above — they launch alongside the service.</p>
   {/if}
 </section>
 
@@ -210,6 +235,30 @@
   }
   .row.off {
     opacity: 0.55;
+  }
+  .row.builtin {
+    border: 1px solid hsl(var(--primary) / 0.35);
+  }
+  .name-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .name.static {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: hsl(var(--foreground));
+  }
+  .badge {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: hsl(var(--primary));
+    background: hsl(var(--primary) / 0.14);
+    border: 1px solid hsl(var(--primary) / 0.4);
+    border-radius: 999px;
+    padding: 1px 7px;
   }
   .fields {
     flex: 1;

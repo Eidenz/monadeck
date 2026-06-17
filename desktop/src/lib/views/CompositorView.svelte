@@ -13,7 +13,12 @@
     saveConfig();
   }
   const set = (
-    k: "min_frame_period" | "compute_compositor" | "debug_gui" | "nvidia_mitigation",
+    k:
+      | "min_frame_period"
+      | "compute_compositor"
+      | "debug_gui"
+      | "nvidia_mitigation"
+      | "simulated_hmd",
     v: boolean,
   ) => {
     if (app.config) {
@@ -89,6 +94,14 @@
         onchange={(v) => set("debug_gui", v)}
       />
       <span>Monado debug/preview window <em>(desktop mirror)</em></span>
+    </div>
+    <div class="toggle-row">
+      <Toggle
+        label="Simulated headset"
+        checked={app.config?.simulated_hmd ?? false}
+        onchange={(v) => set("simulated_hmd", v)}
+      />
+      <span>Simulated headset <em>— test the overlay without VR hardware (SIMULATED_ENABLE; pair with the debug window)</em></span>
     </div>
     {#if nvidia}
       <div class="toggle-row">

@@ -4,9 +4,9 @@
   "version": "0.2.0",
   "identifier": "com.eidenz.monadeck",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm stage-overlay:debug && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && pnpm stage-overlay:release",
     "frontendDist": "../build"
   },
   "app": {
@@ -62,6 +62,9 @@
       "deb",
       "rpm",
       "appimage"
+    ],
+    "externalBin": [
+      "binaries/monadeck-overlay"
     ],
     "category": "Utility",
     "shortDescription": "SteamVR-style launcher for Monado",

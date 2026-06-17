@@ -24,6 +24,16 @@ pub struct DetectedGame {
     pub actions_path: String,
     pub binding_files: Vec<BindingFile>,
     pub source: String,
+    /// For non-Steam games (added to Steam as a shortcut): the unsigned 32-bit
+    /// shortcut appid, resolved from `shortcuts.vdf`. Names the compatdata folder
+    /// and the custom `grid/<id>p.*` artwork, and derives the launch game-id.
+    /// `None` for real Steam apps (use `app_id`) and unmatched custom entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcut_id: Option<String>,
+    /// Unix timestamp the game was last played (Steam `LastPlayed` / non-Steam
+    /// `LastPlayTime`), for recency ordering. `None`/0 if never played or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_played: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,10 +94,11 @@ pub fn scan_games() -> Vec<DetectedGame> {
     let library_paths = find_library_folders(&steam_roots);
 
     let mut app_name_map: HashMap<String, String> = HashMap::new();
+    let mut last_played_map: HashMap<String, u64> = HashMap::new();
     for lib_path in &library_paths {
         let steamapps = lib_path.join("steamapps");
         if steamapps.is_dir() {
-            collect_app_names(&steamapps, &mut app_name_map);
+            collect_app_names(&steamapps, &mut app_name_map, &mut last_played_map);
         }
     }
 
@@ -150,6 +161,32 @@ pub fn scan_games() -> Vec<DetectedGame> {
         g.source.contains("xrizer (game override)") || !override_paths.contains(&g.game_path)
     });
 
+    // Steam games: stamp last-played from the appmanifest map.
+    for g in games.iter_mut() {
+        if let Some(id) = &g.app_id {
+            if let Some(&ts) = last_played_map.get(id) {
+                g.last_played = Some(ts);
+            }
+        }
+    }
+
+    // Resolve non-Steam shortcuts for custom entries that have no Steam appid —
+    // gives them their `grid/<id>p.*` artwork, a launchable id, and last-played.
+    // Parse shortcuts.vdf only if some game actually needs it.
+    if games.iter().any(|g| g.app_id.is_none() && g.shortcut_id.is_none()) {
+        let shortcuts = parse_shortcuts();
+        if !shortcuts.is_empty() {
+            for g in games.iter_mut().filter(|g| g.app_id.is_none() && g.shortcut_id.is_none()) {
+                if let Some(s) = match_shortcut(g, &shortcuts) {
+                    g.shortcut_id = Some(s.app_id.to_string());
+                    if s.last_play > 0 {
+                        g.last_played = Some(s.last_play as u64);
+                    }
+                }
+            }
+        }
+    }
+
     games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     games
 }
@@ -162,29 +199,92 @@ pub fn load_game_bindings(actions_path: &str, binding_path: &str) -> std::io::Re
     ))
 }
 
-/// Cover art for a game as a `data:` URL — a user-set custom cover (keyed by
-/// `game_key`) first, then Steam's library cache. `Err` if none found.
-pub fn game_cover(app_id: &str, game_key: Option<&str>) -> Result<String, String> {
+/// Raw cover-art image bytes for a game — a user-set custom cover (keyed by
+/// `game_key`) first, then Steam's library cache. Returns `(bytes, is_png)`.
+///
+/// For consumers that decode images themselves (the in-headset overlay builds
+/// GPU textures) rather than embedding a `data:` URL.
+pub fn game_cover_bytes(cover_id: &str, game_key: Option<&str>) -> Option<(Vec<u8>, bool)> {
+    // 1. A monadeck-set custom cover (keyed by game_key).
     if let Some(key) = game_key {
         for ext in ["jpg", "png"] {
             let custom = covers_dir().join(format!("{key}.{ext}"));
             if let Ok(data) = fs::read(&custom) {
-                let mime = if ext == "png" { "png" } else { "jpeg" };
-                return Ok(data_url(&data, mime));
+                return Some((data, ext == "png"));
             }
         }
     }
+    // 2. Steam user-set custom artwork. The portrait capsule lives at
+    //    userdata/<id>/config/grid/<id>p.{png,jpg} — the ONLY place non-Steam
+    //    shortcuts keep covers (keyed by the unsigned shortcut appid), and it
+    //    overrides the official library cache when present.
+    if !cover_id.is_empty() {
+        for grid in steam_grid_dirs() {
+            for ext in ["png", "jpg", "jpeg"] {
+                let p = grid.join(format!("{cover_id}p.{ext}"));
+                if let Ok(data) = fs::read(&p) {
+                    return Some((data, ext == "png"));
+                }
+            }
+        }
+    }
+    // 3. Official Steam library cache (real Steam apps only).
     let h = home();
     let candidates = [
-        h.join(format!(".steam/steam/appcache/librarycache/{app_id}/library_600x900.jpg")),
-        h.join(format!(".local/share/Steam/appcache/librarycache/{app_id}/library_600x900.jpg")),
+        h.join(format!(".steam/steam/appcache/librarycache/{cover_id}/library_600x900.jpg")),
+        h.join(format!(".local/share/Steam/appcache/librarycache/{cover_id}/library_600x900.jpg")),
     ];
     for path in &candidates {
         if let Ok(data) = fs::read(path) {
-            return Ok(data_url(&data, "jpeg"));
+            return Some((data, false));
         }
     }
-    Err("cover not found".into())
+    None
+}
+
+/// Cover art for a game as a `data:` URL — a user-set custom cover (keyed by
+/// `game_key`) first, then Steam's library cache. `Err` if none found.
+pub fn game_cover(app_id: &str, game_key: Option<&str>) -> Result<String, String> {
+    match game_cover_bytes(app_id, game_key) {
+        Some((data, is_png)) => Ok(data_url(&data, if is_png { "png" } else { "jpeg" })),
+        None => Err("cover not found".into()),
+    }
+}
+
+/// Landscape "hero"/banner art for a game. Non-Steam: `grid/<id>_hero.*` (the
+/// user-set wide banner) then `grid/<id>.*` (the header capsule). Steam:
+/// `librarycache/<id>/library_hero.jpg` then `header.jpg`. Returns
+/// `(bytes, is_png)`. Used for the launcher's hero banner.
+pub fn game_hero_bytes(cover_id: &str) -> Option<(Vec<u8>, bool)> {
+    if cover_id.is_empty() {
+        return None;
+    }
+    // Steam user-set / non-Steam art (wide hero first, header capsule second).
+    for grid in steam_grid_dirs() {
+        for (name, is_png) in [
+            (format!("{cover_id}_hero.png"), true),
+            (format!("{cover_id}_hero.jpg"), false),
+            (format!("{cover_id}.png"), true),
+            (format!("{cover_id}.jpg"), false),
+        ] {
+            if let Ok(data) = fs::read(grid.join(&name)) {
+                return Some((data, is_png));
+            }
+        }
+    }
+    // Official Steam library cache (real Steam apps).
+    let h = home();
+    for rel in [
+        format!(".steam/steam/appcache/librarycache/{cover_id}/library_hero.jpg"),
+        format!(".local/share/Steam/appcache/librarycache/{cover_id}/library_hero.jpg"),
+        format!(".steam/steam/appcache/librarycache/{cover_id}/header.jpg"),
+        format!(".local/share/Steam/appcache/librarycache/{cover_id}/header.jpg"),
+    ] {
+        if let Ok(data) = fs::read(h.join(&rel)) {
+            return Some((data, false));
+        }
+    }
+    None
 }
 
 pub fn set_custom_cover(game_key: &str, image_path: &str) -> std::io::Result<()> {
@@ -210,6 +310,136 @@ pub fn remove_custom_cover(game_key: &str) {
 fn data_url(data: &[u8], mime: &str) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(data);
     format!("data:image/{mime};base64,{b64}")
+}
+
+// --- non-Steam shortcuts (artwork + launch) -----------------------------------
+
+/// All Steam `userdata/<id>/config/grid` dirs — where Steam keeps user-set
+/// custom artwork (and the only place a non-Steam shortcut's cover lives).
+fn steam_grid_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for root in find_steam_roots() {
+        if let Ok(users) = fs::read_dir(root.join("userdata")) {
+            for u in users.flatten() {
+                let grid = u.path().join("config").join("grid");
+                if grid.is_dir() {
+                    dirs.push(grid);
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// A non-Steam game the user added to Steam, from `shortcuts.vdf`.
+#[derive(Debug, Clone)]
+pub struct Shortcut {
+    /// Unsigned 32-bit appid — names the compatdata folder and `grid/<id>p.*`.
+    pub app_id: u32,
+    pub app_name: String,
+    pub exe: String,
+    pub start_dir: String,
+    /// Unix timestamp last played (`LastPlayTime`), 0 if never.
+    pub last_play: u32,
+}
+
+/// Parse every user's `shortcuts.vdf` (binary VDF). Forgiving: we scan for the
+/// `appid` (int32) markers and read the string fields that follow each, which is
+/// all we need to map a game to its artwork + a launch id. Steam writes the
+/// fields in a stable order (appid first), so per-entry association is reliable.
+pub fn parse_shortcuts() -> Vec<Shortcut> {
+    let mut out = Vec::new();
+    for root in find_steam_roots() {
+        if let Ok(users) = fs::read_dir(root.join("userdata")) {
+            for u in users.flatten() {
+                let vdf = u.path().join("config").join("shortcuts.vdf");
+                if let Ok(data) = fs::read(&vdf) {
+                    out.extend(parse_shortcuts_bytes(&data));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn parse_shortcuts_bytes(data: &[u8]) -> Vec<Shortcut> {
+    const APPID: &[u8] = b"\x02appid\x00";
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while let Some(p) = find_bytes(&data[i..], APPID) {
+        starts.push(i + p);
+        i += p + APPID.len();
+    }
+    let mut shortcuts = Vec::new();
+    for (n, &s) in starts.iter().enumerate() {
+        let val = s + APPID.len();
+        if val + 4 > data.len() {
+            continue;
+        }
+        let app_id = u32::from_le_bytes([data[val], data[val + 1], data[val + 2], data[val + 3]]);
+        let end = starts.get(n + 1).copied().unwrap_or(data.len());
+        let seg = &data[val + 4..end];
+        shortcuts.push(Shortcut {
+            app_id,
+            app_name: vdf_str(seg, b"\x01AppName\x00").unwrap_or_default(),
+            exe: vdf_str(seg, b"\x01Exe\x00").unwrap_or_default(),
+            start_dir: vdf_str(seg, b"\x01StartDir\x00").unwrap_or_default(),
+            last_play: vdf_i32(seg, b"\x02LastPlayTime\x00").unwrap_or(0),
+        });
+    }
+    shortcuts
+}
+
+/// Read a null-terminated VDF string field value (the bytes after `key`).
+fn vdf_str(seg: &[u8], key: &[u8]) -> Option<String> {
+    let k = find_bytes(seg, key)? + key.len();
+    let end = seg[k..].iter().position(|&b| b == 0)? + k;
+    Some(String::from_utf8_lossy(&seg[k..end]).into_owned())
+}
+
+/// Read a little-endian int32 VDF field value (the 4 bytes after `key`).
+fn vdf_i32(seg: &[u8], key: &[u8]) -> Option<u32> {
+    let k = find_bytes(seg, key)? + key.len();
+    let b = seg.get(k..k + 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn norm_path(p: &str) -> String {
+    p.trim().trim_matches('"').trim_end_matches('/').to_string()
+}
+
+/// Resolve a custom (non-Steam) game's shortcut by matching its install dir or
+/// folder name against `shortcuts.vdf`.
+fn match_shortcut<'a>(game: &DetectedGame, shortcuts: &'a [Shortcut]) -> Option<&'a Shortcut> {
+    let gp = norm_path(&game.game_path);
+    // Primary: the shortcut's start dir / exe sits at or under the game dir.
+    if !gp.is_empty() {
+        if let Some(s) = shortcuts.iter().find(|s| {
+            let sd = norm_path(&s.start_dir);
+            let exe = norm_path(&s.exe);
+            (!sd.is_empty() && (sd == gp || sd.starts_with(&gp) || gp.starts_with(&sd)))
+                || (!exe.is_empty() && exe.starts_with(&format!("{gp}/")))
+        }) {
+            return Some(s);
+        }
+    }
+    // Fallback: folder name matches the shortcut name / exe basename (".exe" off).
+    let name = game.name.to_lowercase();
+    shortcuts.iter().find(|s| {
+        let an = s.app_name.trim_end_matches(".exe").to_lowercase();
+        let base = Path::new(s.exe.trim_matches('"'))
+            .file_stem()
+            .map(|b| b.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        (!an.is_empty() && an == name) || (!base.is_empty() && base == name)
+    })
 }
 
 // --- discovery internals (verbatim from xrbind, dirs -> paths) ----------------
@@ -268,7 +498,11 @@ fn parse_library_folders_vdf(content: &str) -> Option<Vec<String>> {
     (!paths.is_empty()).then_some(paths)
 }
 
-fn collect_app_names(steamapps: &Path, map: &mut HashMap<String, String>) {
+fn collect_app_names(
+    steamapps: &Path,
+    map: &mut HashMap<String, String>,
+    last: &mut HashMap<String, u64>,
+) {
     if let Ok(entries) = fs::read_dir(steamapps) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -280,7 +514,10 @@ fn collect_app_names(steamapps: &Path, map: &mut HashMap<String, String>) {
                     .to_string();
                 if let Ok(content) = fs::read_to_string(entry.path()) {
                     if let Some(app_name) = extract_vdf_value(&content, "name") {
-                        map.insert(app_id, app_name);
+                        map.insert(app_id.clone(), app_name);
+                    }
+                    if let Some(ts) = extract_vdf_value(&content, "LastPlayed").and_then(|s| s.parse().ok()) {
+                        last.insert(app_id, ts);
                     }
                 }
             }
@@ -421,6 +658,8 @@ fn try_load_xrizer_override(
         actions_path: actions_path.to_string_lossy().to_string(),
         binding_files,
         source: "xrizer (game override)".to_string(),
+        shortcut_id: None,
+        last_played: None,
     })
 }
 
@@ -516,6 +755,8 @@ fn try_load_actions_manifest(
         actions_path: actions_path.to_string_lossy().to_string(),
         binding_files,
         source: source.to_string(),
+        shortcut_id: None,
+        last_played: None,
     })
 }
 

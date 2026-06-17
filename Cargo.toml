@@ -3,7 +3,7 @@
 # tree stays out of the core build — same split NemuriXR uses.
 [workspace]
 resolver = "2"
-members = ["crates/core"]
+members = ["crates/core", "crates/overlay"]
 exclude = ["desktop"]
 
 [workspace.package]

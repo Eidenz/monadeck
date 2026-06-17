@@ -5,6 +5,7 @@
 
 mod bindings;
 mod commands;
+mod overlay;
 mod state;
 
 use state::AppState;

@@ -1,0 +1,26 @@
+[package]
+name = "monadeck-overlay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Monadeck in-headset VR game-library launcher (OpenXR overlay)"
+
+[[bin]]
+name = "monadeck-overlay"
+path = "src/main.rs"
+
+[dependencies]
+# Same in-headset stack as monado-frame (proven on the user's Monado fork).
+openxr = { version = "0.21", features = ["linked"] }
+ash = "0.38"
+egui = "0.31"
+egui-phosphor = "0.9"
+egui-ash-renderer = { version = "0.8", features = ["gpu-allocator"] }
+gpu-allocator = "0.27"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+# Reuse the desktop's Steam/cover scanner instead of reimplementing discovery.
+monadeck-core = { path = "../core" }
