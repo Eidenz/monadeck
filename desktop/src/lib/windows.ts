@@ -12,6 +12,17 @@ export type SettingsSection =
   | "logs"
   | "about";
 
+export async function openBindings() {
+  const win = await Window.getByLabel("bindings");
+  if (win) {
+    await win.show();
+    await win.unminimize();
+    await win.setFocus();
+    // The bindings window auto-scans on focus-gain (see its onMount) — the
+    // setFocus above triggers it, so no cross-window event is needed.
+  }
+}
+
 export async function openSettings(section: SettingsSection = "general") {
   const win = await Window.getByLabel("settings");
   if (win) {

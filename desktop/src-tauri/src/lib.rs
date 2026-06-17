@@ -3,6 +3,7 @@
 //! exposes a flat command surface to the SvelteKit frontend, mirroring the
 //! `invoke(...)` style used in NemuriXR/udcap-control.
 
+mod bindings;
 mod commands;
 mod state;
 
@@ -119,6 +120,15 @@ pub fn run() {
             commands::write_import_openxr,
             commands::list_installed_apps,
             commands::launch_plugin,
+            bindings::scan_steam_games,
+            bindings::load_game_bindings,
+            bindings::read_json_file,
+            bindings::write_json_file,
+            bindings::game_cover,
+            bindings::set_custom_cover,
+            bindings::remove_custom_cover,
+            bindings::get_custom_paths,
+            bindings::set_custom_paths,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Monadeck");

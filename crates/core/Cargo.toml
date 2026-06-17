@@ -12,6 +12,9 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
+# Binding editor: scan Steam libraries for VR games + their xrizer bindings.
+walkdir = "2"
+base64 = "0.22"
 # Same pin NemuriXR uses; dlopen-based, talks to whatever libmonado.so the active
 # runtime points at (your fork's 1.7.0 .so — safe: older client, newer lib).
 libmonado = { git = "https://github.com/wayvr-org/libmonado-rs.git", rev = "6f66b26930c24a8a2fc57ddcd85704784894c750", version = "1.6.0" }

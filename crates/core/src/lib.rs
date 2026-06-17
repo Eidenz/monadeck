@@ -25,5 +25,6 @@ pub mod paths;
 pub mod plugins;
 pub mod proton;
 pub mod setcap;
+pub mod steam;
 
 pub use config::MonadeckConfig;
