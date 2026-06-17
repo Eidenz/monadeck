@@ -13,10 +13,11 @@ mod mathx;
 mod monado;
 mod ui;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::raw::c_char;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use anyhow::{bail, Result};
 use ash::vk;
@@ -285,6 +286,12 @@ fn run() -> Result<()> {
     let mut blocked_prev = false; // game-input arbitration edge state
     // (hand index, controller->panel offset) while grabbing.
     let mut grab: Option<(usize, xr::Posef)> = None;
+    let start = Instant::now(); // egui clock (animations)
+    let mut summon_at: Option<Instant> = None; // summon fade-in
+    let mut launching_until: Option<Instant> = None; // "Launching…" hold before hide
+    // Lazy-art LRU: per-slot last-used frame, to evict the coldest past a cap.
+    let mut frame: u64 = 0;
+    let mut last_used: HashMap<(usize, games::ArtKind), u64> = HashMap::new();
 
     log::info!("monadeck-overlay ready. Point to interact, grip to move, trigger to select.");
 
@@ -346,15 +353,28 @@ fn run() -> Result<()> {
                 visible = !visible;
                 if visible {
                     recenter = true; // reappear in front of the head
+                    summon_at = Some(Instant::now());
                     // Auto-select the running game, if any (SteamVR-style).
                     if let Some(app) = monado.running_app() {
                         if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, &app)) {
                             st.selected = Some(i);
                         }
                     }
+                } else {
+                    launching_until = None; // dismissed; drop any launch overlay
+                    st.launching_name = None;
                 }
             }
             sys_prev = sys;
+        }
+
+        // "Launching…" hold expired → hide the dashboard.
+        if let Some(until) = launching_until {
+            if Instant::now() >= until {
+                launching_until = None;
+                st.launching_name = None;
+                visible = false;
+            }
         }
 
         // Hidden: drop any input block, submit nothing, skip rendering.
@@ -379,6 +399,9 @@ fn run() -> Result<()> {
                 recenter = false;
             }
         }
+
+        // Summon fade-in (1 -> 0 over ~0.22 s).
+        st.fade_in = summon_at.map_or(0.0, |t| (1.0 - t.elapsed().as_secs_f32() / 0.22).clamp(0.0, 1.0));
 
         // --- Input: laser hit-test + grip-to-move (actions already synced) --
         let mut pointer: Option<(f32, f32, bool)> = None;
@@ -448,6 +471,7 @@ fn run() -> Result<()> {
             alpha_mode,
             pointer,
             scroll,
+            start.elapsed().as_secs_f64(),
             |ctx| ui::build(ctx, &mut st),
         )?;
 
@@ -474,6 +498,37 @@ fn run() -> Result<()> {
         }
         for (i, kind) in wants {
             want_art(&mut st.games, i, kind, &art);
+        }
+
+        // --- Lazy-art LRU: evict the coldest textures past a cap ------------
+        frame += 1;
+        let mut used: HashSet<(usize, games::ArtKind)> =
+            st.visible_now.iter().map(|&i| (i, games::ArtKind::Cover)).collect();
+        if let Some(i) = st.selected {
+            for k in games::ART_KINDS {
+                used.insert((i, k));
+            }
+        }
+        for key in &used {
+            last_used.insert(*key, frame);
+        }
+        const ART_CAP: usize = 160;
+        let mut ready: Vec<(u64, usize, games::ArtKind)> = Vec::new();
+        for (gi, g) in st.games.iter().enumerate() {
+            for k in games::ART_KINDS {
+                if matches!(g.art(k), games::ArtState::Ready(_)) {
+                    ready.push((*last_used.get(&(gi, k)).unwrap_or(&0), gi, k));
+                }
+            }
+        }
+        if ready.len() > ART_CAP {
+            ready.sort_by_key(|&(lu, _, _)| lu); // coldest first
+            for &(_, gi, k) in ready.iter().take(ready.len() - ART_CAP) {
+                if !used.contains(&(gi, k)) {
+                    *st.games[gi].art_mut(k) = games::ArtState::Idle;
+                    last_used.remove(&(gi, k));
+                }
+            }
         }
 
         if laser_ray.is_some() {
@@ -505,8 +560,10 @@ fn run() -> Result<()> {
         if let Some(i) = st.launch_request.take() {
             if let Some(g) = st.games.get(i) {
                 launch_game(g);
+                st.launching_name = Some(g.name.clone());
+                // Hold the "Launching…" overlay briefly, then auto-hide.
+                launching_until = Some(Instant::now() + std::time::Duration::from_millis(1500));
             }
-            visible = false; // auto-hide the dashboard after launching
         }
         if st.stop_request.take().is_some() {
             if let Some(app) = monado.running_app() {

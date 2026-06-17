@@ -8,12 +8,15 @@ use std::thread;
 
 use monadeck_core::steam;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ArtKind {
     Cover,
     Hero,
     Logo,
 }
+
+/// The three art kinds, for iterating slots (LRU sweep, etc.).
+pub const ART_KINDS: [ArtKind; 3] = [ArtKind::Cover, ArtKind::Hero, ArtKind::Logo];
 
 /// Load state of one art slot for one game.
 pub enum ArtState {
@@ -42,6 +45,7 @@ pub struct LibGame {
     pub source: String,
     pub last_played: Option<u64>,
     pub size_on_disk: Option<u64>,
+    pub playtime_minutes: Option<u32>,
     pub is_favorite: bool,
     pub cover: ArtState,
     pub hero: ArtState,
@@ -98,6 +102,7 @@ pub fn to_games(rows: Vec<steam::LibraryGame>) -> Vec<LibGame> {
                 source: g.source,
                 last_played: g.last_played,
                 size_on_disk: g.size_on_disk,
+                playtime_minutes: g.playtime_minutes,
                 is_favorite: false,
                 cover: ArtState::Idle,
                 hero: ArtState::Idle,

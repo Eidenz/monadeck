@@ -31,6 +31,11 @@ pub struct LibState {
     pub recenter_request: bool,
     pub recenter_playspace_request: bool,
     pub keyboard_open: bool,
+    /// Name of the game being launched (shows the "Launching…" overlay), set by
+    /// the loop for ~1.5 s after Play before the dashboard auto-hides.
+    pub launching_name: Option<String>,
+    /// Summon fade-in amount (1 = fully dark, 0 = clear), set by the loop.
+    pub fade_in: f32,
 }
 
 impl LibState {
@@ -49,6 +54,8 @@ impl LibState {
             recenter_request: false,
             recenter_playspace_request: false,
             keyboard_open: false,
+            launching_name: None,
+            fade_in: 0.0,
         }
     }
 }
@@ -67,6 +74,35 @@ pub fn build(ctx: &egui::Context, st: &mut LibState) {
         top_bar(ctx, st);
     }
     central(ctx, st);
+    overlays(ctx, st);
+}
+
+/// Foreground overlays: the summon fade-in and the "Launching…" modal.
+fn overlays(ctx: &egui::Context, st: &LibState) {
+    let screen = ctx.screen_rect();
+    if st.launching_name.is_some() || st.fade_in > 0.001 {
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("overlay-dim")));
+        let dim = if st.launching_name.is_some() { 180 } else { (st.fade_in * 255.0) as u8 };
+        painter.rect_filled(screen, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha(dim));
+    }
+    if let Some(name) = &st.launching_name {
+        egui::Area::new(egui::Id::new("launching"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                hero_card().show(ui, |ui| {
+                    ui.set_width(360.0);
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
+                        ui.add(egui::Spinner::new().size(34.0).color(theme::PRIMARY));
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new("Launching").size(15.0).color(theme::ON_SURFACE_VAR));
+                        ui.label(egui::RichText::new(name).size(22.0).strong());
+                        ui.add_space(8.0);
+                    });
+                });
+            });
+    }
 }
 
 // --- chrome -----------------------------------------------------------------
@@ -634,13 +670,24 @@ fn empty_note(ui: &mut egui::Ui, st: &LibState) {
 
 fn sub_label(g: &LibGame) -> String {
     let mut parts = vec![g.source.clone()];
+    if let Some(m) = g.playtime_minutes {
+        parts.push(human_playtime(m));
+    }
     if let Some(a) = played_ago(g.last_played) {
-        parts.push(format!("played {a}"));
+        parts.push(a);
     }
     if let Some(sz) = g.size_on_disk {
         parts.push(human_size(sz));
     }
     parts.join("  ·  ")
+}
+
+fn human_playtime(minutes: u32) -> String {
+    if minutes < 60 {
+        format!("{minutes}m played")
+    } else {
+        format!("{:.1}h played", minutes as f32 / 60.0)
+    }
 }
 
 fn human_size(bytes: u64) -> String {
@@ -680,8 +727,10 @@ fn played_ago(ts: Option<u64>) -> Option<String> {
 fn tile(ui: &mut egui::Ui, game: &LibGame, selected: bool, running: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(TILE_W, TILE_H), egui::Sense::click());
     draw_art(ui.painter(), rect, &game.cover, &game.name);
-    if resp.hovered() {
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(8), egui::Color32::from_white_alpha(20));
+    // Smoothly fade the hover highlight in/out.
+    let hover_t = ui.ctx().animate_bool(resp.id, resp.hovered());
+    if hover_t > 0.001 {
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(8), egui::Color32::from_white_alpha((hover_t * 24.0) as u8));
     }
     if selected {
         ui.painter().rect_stroke(

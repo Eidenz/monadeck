@@ -206,12 +206,15 @@ pub struct LibraryGame {
     pub source: String,              // "Steam" | "Non-Steam"
     pub last_played: Option<u64>,
     pub size_on_disk: Option<u64>,
+    /// Total playtime in minutes (from `localconfig.vdf`), if tracked.
+    pub playtime_minutes: Option<u32>,
 }
 
 /// Every installed Steam game + every non-Steam shortcut, sorted by name.
 pub fn scan_library() -> Vec<LibraryGame> {
     let mut games: Vec<LibraryGame> = Vec::new();
     let mut seen_app: HashSet<String> = HashSet::new();
+    let playtimes = parse_playtimes();
 
     let roots = find_steam_roots();
     for lib in find_library_folders(&roots) {
@@ -234,6 +237,7 @@ pub fn scan_library() -> Vec<LibraryGame> {
             if is_steam_tool(&name) || !seen_app.insert(app_id.clone()) {
                 continue;
             }
+            let playtime = playtimes.get(&app_id).copied();
             games.push(LibraryGame {
                 name,
                 app_id: Some(app_id),
@@ -241,6 +245,7 @@ pub fn scan_library() -> Vec<LibraryGame> {
                 source: "Steam".into(),
                 last_played: extract_vdf_value(&content, "LastPlayed").and_then(|s| s.parse().ok()),
                 size_on_disk: extract_vdf_value(&content, "SizeOnDisk").and_then(|s| s.parse().ok()),
+                playtime_minutes: playtime,
             });
         }
     }
@@ -253,6 +258,7 @@ pub fn scan_library() -> Vec<LibraryGame> {
         }
         let trimmed = s.app_name.trim().trim_end_matches(".exe").trim();
         let name = if trimmed.is_empty() { format!("Shortcut {id}") } else { trimmed.to_string() };
+        let playtime = playtimes.get(&id).copied();
         games.push(LibraryGame {
             name,
             app_id: None,
@@ -260,6 +266,7 @@ pub fn scan_library() -> Vec<LibraryGame> {
             source: "Non-Steam".into(),
             last_played: (s.last_play > 0).then_some(s.last_play as u64),
             size_on_disk: None,
+            playtime_minutes: playtime,
         });
     }
 
@@ -275,6 +282,110 @@ fn is_steam_tool(name: &str) -> bool {
         || n.starts_with("steam runtime")
         || n.contains("steamworks common")
         || n == "steamvr"
+}
+
+/// Per-app total playtime (minutes), parsed from every user's `localconfig.vdf`
+/// (`.../Software/Valve/Steam/apps/<appid>/Playtime`). Keyed by appid string.
+fn parse_playtimes() -> HashMap<String, u32> {
+    let mut out = HashMap::new();
+    for root in find_steam_roots() {
+        let Ok(users) = fs::read_dir(root.join("userdata")) else {
+            continue;
+        };
+        for u in users.flatten() {
+            let path = u.path().join("config").join("localconfig.vdf");
+            if let Ok(content) = fs::read_to_string(&path) {
+                parse_localconfig_playtimes(&content, &mut out);
+            }
+        }
+    }
+    out
+}
+
+enum VdfTok {
+    Str(String),
+    Open,
+    Close,
+}
+
+/// Tokenise text-VDF into quoted strings + braces (whitespace/garbage ignored).
+fn vdf_tokens(s: &str) -> Vec<VdfTok> {
+    let mut toks = Vec::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => toks.push(VdfTok::Open),
+            '}' => toks.push(VdfTok::Close),
+            '"' => {
+                let mut buf = String::new();
+                while let Some(nc) = chars.next() {
+                    match nc {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(e) = chars.next() {
+                                buf.push(e);
+                            }
+                        }
+                        _ => buf.push(nc),
+                    }
+                }
+                toks.push(VdfTok::Str(buf));
+            }
+            _ => {}
+        }
+    }
+    toks
+}
+
+fn parse_localconfig_playtimes(content: &str, out: &mut HashMap<String, u32>) {
+    let toks = vdf_tokens(content);
+    // Find the `"apps"` block.
+    let mut i = 0;
+    while i + 1 < toks.len() {
+        if matches!(&toks[i], VdfTok::Str(k) if k == "apps") && matches!(toks[i + 1], VdfTok::Open) {
+            i += 2;
+            break;
+        }
+        i += 1;
+    }
+    // Walk each `<appid> { ... Playtime ... }` child until the apps block closes.
+    while i < toks.len() {
+        match &toks[i] {
+            VdfTok::Close => break,
+            VdfTok::Str(appid) if matches!(toks.get(i + 1), Some(VdfTok::Open)) => {
+                let (playtime, end) = scan_block_playtime(&toks, i + 2);
+                if appid.chars().all(|c| c.is_ascii_digit()) {
+                    if let Some(pt) = playtime.filter(|&p| p > 0) {
+                        out.insert(appid.clone(), pt);
+                    }
+                }
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// Scan a `{ ... }` block (starting just after its `{`) for a top-level
+/// `"Playtime" "N"`; return (playtime, index just past the matching `}`).
+fn scan_block_playtime(toks: &[VdfTok], start: usize) -> (Option<u32>, usize) {
+    let mut depth = 1usize;
+    let mut playtime = None;
+    let mut j = start;
+    while j < toks.len() && depth >= 1 {
+        match &toks[j] {
+            VdfTok::Open => depth += 1,
+            VdfTok::Close => depth -= 1,
+            VdfTok::Str(key) if depth == 1 && key == "Playtime" => {
+                if let Some(VdfTok::Str(v)) = toks.get(j + 1) {
+                    playtime = v.parse::<u32>().ok();
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    (playtime, j)
 }
 
 /// Read a game's `actions.json` + a chosen binding file, as `(actions, binding)`.

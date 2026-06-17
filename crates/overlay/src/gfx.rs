@@ -193,6 +193,7 @@ pub fn render_panel(
     alpha_mode: bool,
     pointer: Option<(f32, f32, bool)>,
     scroll: (f32, f32),
+    time: f64,
     mut build: impl FnMut(&egui::Context),
 ) -> Result<()> {
     let pos = pointer.map(|(u, v, _)| egui::pos2(u * p.px.0 as f32 / PPP, v * p.px.1 as f32 / PPP));
@@ -232,6 +233,8 @@ pub fn render_panel(
             egui::pos2(0.0, 0.0),
             egui::vec2(p.px.0 as f32 / PPP, p.px.1 as f32 / PPP),
         )),
+        // A real, monotonic time enables egui animations + double-click timing.
+        time: Some(time),
         events,
         ..Default::default()
     };
