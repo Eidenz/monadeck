@@ -165,10 +165,14 @@ fn clients_from(monado: &Monado) -> Result<Vec<ClientInfo>, String> {
     let mut out = Vec::new();
     for mut c in clients {
         let Ok(name) = c.name() else { continue };
-        // Ignore libmonado control connections — including monadeck's own polls.
-        // Multiple tools share one libmonado, so these would spam the list; not
-        // showing them is a deliberate upside over Envision.
-        if name.eq_ignore_ascii_case("libmonado") || name.trim().is_empty() {
+        // Ignore libmonado control connections — including monadeck's own polls —
+        // and our own in-headset overlay (it's part of monadeck, not a "connected
+        // app" the user cares to see). Multiple tools share one libmonado, so these
+        // would otherwise spam the list; hiding them is a deliberate upside.
+        if name.eq_ignore_ascii_case("libmonado")
+            || name.eq_ignore_ascii_case("monadeck-overlay")
+            || name.trim().is_empty()
+        {
             continue;
         }
         // One entry per app name (an app may hold several connections).
