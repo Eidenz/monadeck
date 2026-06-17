@@ -188,13 +188,15 @@ export function isOverride(): boolean {
   return !!editor.game?.source.includes("xrizer (game override)");
 }
 
-/** Write to `<game>/xrizer/bindings_<ctrl>.json` so the game's default file (which
- *  Steam may overwrite on update) is left untouched — the proper xrizer workflow. */
+/** Write to `<game>/xrizer/<ctrl>.json` so the game's default file (which Steam
+ *  may overwrite on update) is left untouched — the proper xrizer workflow. xrizer
+ *  loads its overrides as `<controller>.json` directly (e.g. `knuckles.json`), NOT
+ *  the `bindings_<ctrl>.json` SteamVR-style name. */
 export async function saveAsOverride() {
   if (!editor.game || !editor.binding || !validJson()) return;
   const ctrl = editor.binding.controllerType;
   const gamePath = editor.game.gamePath;
-  const path = `${gamePath}/xrizer/bindings_${ctrl}.json`;
+  const path = `${gamePath}/xrizer/${ctrl}.json`;
   editor.saving = true;
   editor.error = "";
   try {

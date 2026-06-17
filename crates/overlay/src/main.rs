@@ -331,6 +331,8 @@ fn run() -> Result<()> {
     let mut recenter = true;
     let mut visible = false; // default off — summon with a left system click
     let mut sys_prev = false;
+    let mut sys_active_prev = false; // system action active-state edge
+    let mut last_active_change: Option<Instant> = None; // when is_active last flipped
     let mut blocked_prev = false; // game-input arbitration edge state
     // (hand index, controller->panel offset) while grabbing.
     let mut grab: Option<(usize, xr::Posef)> = None;
@@ -410,8 +412,19 @@ fn run() -> Result<()> {
         // --- Sync actions + summon/dismiss (left system click, rising edge) --
         if focused {
             session.sync_actions(&[(&action_set).into()])?;
-            let sys = system_action.state(&session, left_path)?.current_state;
-            if sys && !sys_prev {
+            let sl = system_action.state(&session, left_path)?;
+            let sys_active = sl.is_active;
+            let sys_down = sl.is_active && sl.current_state;
+            // Another overlay (e.g. WayVR) blocking/unblocking our input as your
+            // cursor enters/leaves its window flips the action's `is_active`, which
+            // can fake a system press — so ignore press edges for a moment around
+            // any active-state flip (same fix monado-frame uses).
+            if sys_active != sys_active_prev {
+                sys_active_prev = sys_active;
+                last_active_change = Some(Instant::now());
+            }
+            let settled = last_active_change.map_or(true, |t| t.elapsed().as_millis() > 150);
+            if sys_down && !sys_prev && settled {
                 visible = !visible;
                 if visible {
                     recenter = true; // reappear in front of the head
@@ -427,7 +440,7 @@ fn run() -> Result<()> {
                     st.launching_name = None;
                 }
             }
-            sys_prev = sys;
+            sys_prev = sys_down;
         }
 
         // "Launching…" hold expired → hide the dashboard.
@@ -875,7 +888,10 @@ unsafe fn create_overlay_session(
         ty: xr::sys::SessionCreateInfoOverlayEXTX::TYPE,
         next: std::ptr::null(),
         create_flags: xr::OverlaySessionCreateFlagsEXTX::EMPTY,
-        session_layers_placement: 5,
+        // The compositor stacks overlay sessions by increasing placement. WayVR
+        // (and monado-frame/nemurixr) use 5; sit above WayVR's background image so
+        // the dashboard isn't hidden underneath it.
+        session_layers_placement: 12,
     };
     let binding = xr::sys::GraphicsBindingVulkanKHR {
         ty: xr::sys::GraphicsBindingVulkanKHR::TYPE,
