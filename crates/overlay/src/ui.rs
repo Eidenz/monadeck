@@ -494,13 +494,7 @@ fn hero(ui: &mut egui::Ui, st: &mut LibState) {
     let sel = st.selected.filter(|&i| i < st.games.len());
     let running = sel.is_some() && sel == st.running_index;
     let action = match sel {
-        Some(i) => {
-            let g = &st.games[i];
-            match &g.hero {
-                ArtState::Ready(tex) => hero_landscape(ui, g, tex, running),
-                _ => hero_portrait(ui, g, running),
-            }
-        }
+        Some(i) => hero_banner(ui, &st.games[i], running),
         None => {
             hero_empty(ui);
             HeroAction::None
@@ -522,11 +516,17 @@ fn hero_card() -> egui::Frame {
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 44, 54)))
 }
 
-fn hero_landscape(ui: &mut egui::Ui, g: &LibGame, hero_tex: &egui::TextureHandle, running: bool) -> HeroAction {
+/// The single, consistent hero layout: a wide banner showing the game's hero art
+/// when it's loaded, or a gradient placeholder (lazy-load swaps it in later) —
+/// so the hero never switches shape or flickers between portrait/landscape.
+fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool) -> HeroAction {
     let w = ui.available_width();
     let h = (w * 0.30).clamp(190.0, 300.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
-    draw_texture_cover(ui.painter(), rect, hero_tex);
+    match &g.hero {
+        ArtState::Ready(tex) => draw_texture_cover(ui.painter(), rect, tex),
+        _ => draw_hero_placeholder(ui.painter(), rect, &g.name),
+    }
 
     let painter = ui.painter();
     let band = 18.0;
@@ -633,44 +633,39 @@ fn fav_button(is_favorite: bool) -> egui::Button<'static> {
         .min_size(egui::vec2(46.0, 46.0))
 }
 
-fn hero_portrait(ui: &mut egui::Ui, g: &LibGame, running: bool) -> HeroAction {
-    let mut action = HeroAction::None;
-    hero_card().show(ui, |ui| {
-        ui.set_min_height(248.0);
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(172.0, 258.0), egui::Sense::hover());
-            draw_art(ui.painter(), rect, &g.cover, &g.name);
-            ui.add_space(20.0);
-            ui.vertical(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new(&g.name).size(30.0).strong());
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(sub_label(g)).color(theme::ON_SURFACE_VAR));
-                if running {
-                    ui.add_space(2.0);
-                    ui.label(egui::RichText::new("● Running").color(RUNNING_GREEN).strong());
-                }
-                ui.add_space(20.0);
-                let (label, fill, fg, act) = if running {
-                    (format!("{}  Stop", icon::STOP), STOP_RED, egui::Color32::WHITE, HeroAction::Stop)
-                } else {
-                    (format!("{}  Play", icon::PLAY), theme::PRIMARY, egui::Color32::BLACK, HeroAction::Launch)
-                };
-                let btn = egui::Button::new(egui::RichText::new(label).size(20.0).color(fg))
-                    .fill(fill)
-                    .min_size(egui::vec2(160.0, 48.0));
-                ui.horizontal(|ui| {
-                    if ui.add(btn).clicked() {
-                        action = act;
-                    }
-                    if ui.add(fav_button(g.is_favorite)).clicked() {
-                        action = HeroAction::ToggleFavorite;
-                    }
-                });
-            });
-        });
-    });
-    action
+/// A subtle vertical gradient placeholder for the hero banner when there's no
+/// art (or it's still loading). Tinted from a hash of the name so each game gets
+/// a consistent, distinct look instead of a flat block.
+fn draw_hero_placeholder(painter: &egui::Painter, rect: egui::Rect, name: &str) {
+    const PALETTE: [(egui::Color32, egui::Color32); 6] = [
+        (egui::Color32::from_rgb(18, 22, 30), egui::Color32::from_rgb(33, 44, 62)),
+        (egui::Color32::from_rgb(24, 19, 30), egui::Color32::from_rgb(46, 33, 58)),
+        (egui::Color32::from_rgb(16, 28, 27), egui::Color32::from_rgb(26, 50, 46)),
+        (egui::Color32::from_rgb(30, 23, 17), egui::Color32::from_rgb(54, 40, 28)),
+        (egui::Color32::from_rgb(30, 18, 23), egui::Color32::from_rgb(56, 31, 42)),
+        (egui::Color32::from_rgb(19, 25, 20), egui::Color32::from_rgb(33, 48, 35)),
+    ];
+    let (top, bottom) = PALETTE[name_hash(name) as usize % PALETTE.len()];
+    const BANDS: usize = 28;
+    for k in 0..BANDS {
+        let t = (k as f32 + 0.5) / BANDS as f32;
+        let y0 = rect.top() + (k as f32 / BANDS as f32) * rect.height();
+        let y1 = rect.top() + ((k + 1) as f32 / BANDS as f32) * rect.height();
+        painter.rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
+            egui::CornerRadius::ZERO,
+            lerp_color(top, bottom, t),
+        );
+    }
+}
+
+fn name_hash(s: &str) -> u32 {
+    s.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
+}
+
+fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
+    egui::Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
 fn hero_empty(ui: &mut egui::Ui) {
@@ -686,17 +681,16 @@ fn hero_empty(ui: &mut egui::Ui) {
 // --- helpers ----------------------------------------------------------------
 
 fn filtered(st: &LibState) -> Vec<usize> {
+    // Recency order only (games are already last-played-sorted). Favorites are
+    // surfaced via the dedicated Favorites tab + the ★ tile badge, not by
+    // reordering the main lists.
     let q = st.search.trim().to_lowercase();
-    let mut idx: Vec<usize> = st
-        .games
+    st.games
         .iter()
         .enumerate()
         .filter(|(_, g)| q.is_empty() || g.name.to_lowercase().contains(&q))
         .map(|(i, _)| i)
-        .collect();
-    // Favorites float to the top; stable sort keeps recency order within groups.
-    idx.sort_by_key(|&i| !st.games[i].is_favorite);
-    idx
+        .collect()
 }
 
 fn empty_note(ui: &mut egui::Ui, st: &LibState) {
