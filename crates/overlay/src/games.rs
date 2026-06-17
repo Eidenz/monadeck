@@ -45,8 +45,14 @@ pub struct LibGame {
     pub source: String,
     pub last_played: Option<u64>,
     pub size_on_disk: Option<u64>,
+    /// Steam's own playtime, if known.
     pub playtime_minutes: Option<u32>,
+    /// Total minutes the overlay itself has timed this game running (fills the
+    /// gap for non-Steam games); set from the playtime store, not the scan.
+    pub tracked_minutes: Option<u32>,
     pub is_favorite: bool,
+    /// Indices (into the live collections list) this game belongs to.
+    pub collections: Vec<usize>,
     pub cover: ArtState,
     pub hero: ArtState,
     pub logo: ArtState,
@@ -103,7 +109,9 @@ pub fn to_games(rows: Vec<steam::LibraryGame>) -> Vec<LibGame> {
                 last_played: g.last_played,
                 size_on_disk: g.size_on_disk,
                 playtime_minutes: g.playtime_minutes,
+                tracked_minutes: None,
                 is_favorite: false,
+                collections: Vec::new(),
                 cover: ArtState::Idle,
                 hero: ArtState::Idle,
                 logo: ArtState::Idle,
@@ -172,7 +180,19 @@ fn decode(cover_id: &str, kind: ArtKind) -> Option<egui::ColorImage> {
         ArtKind::Hero => (steam::game_hero_bytes(cover_id)?.0, (900, 360)),
         ArtKind::Logo => (steam::game_logo_bytes(cover_id)?.0, (520, 320)),
     };
-    let img = image::load_from_memory(&bytes).ok()?;
+    let img = match image::load_from_memory(&bytes) {
+        Ok(img) => img,
+        Err(e) => {
+            // Bytes were found but couldn't be decoded — usually art in a format we
+            // don't build in (e.g. an AVIF saved with a .png name, as SteamGridDB
+            // serves). Log it so it's diagnosable instead of a silent blank tile.
+            let kind = image::guess_format(&bytes)
+                .map(|f| format!("{f:?}"))
+                .unwrap_or_else(|_| "unknown".into());
+            log::warn!("art decode failed for {cover_id} ({kind} format): {e}");
+            return None;
+        }
+    };
     let img = img.thumbnail(max_w, max_h);
     let rgba = img.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];

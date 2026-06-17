@@ -16,12 +16,22 @@ pub enum Nav {
     Settings,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Recent,
+    Name,
+    Playtime,
+    Size,
+}
+
 /// All mutable UI state for the launcher panel.
 pub struct LibState {
     pub games: Vec<LibGame>,
     pub scanning: bool,
     pub search: String,
     pub nav: Nav,
+    /// Sort order for the Library / Favorites / Categories lists (not Home).
+    pub sort: SortMode,
     pub selected: Option<usize>,
     /// Game indices whose tiles were on-screen this frame (drives lazy art).
     pub visible_now: Vec<usize>,
@@ -32,8 +42,18 @@ pub struct LibState {
     pub launch_request: Option<usize>,
     pub stop_request: Option<usize>,
     pub favorite_toggle_request: Option<usize>,
+    /// User collections (names, mirrored from the loop) + drained op requests.
+    pub collections: Vec<String>,
+    pub collection_toggle: Option<usize>, // toggle the selected game in collection #
+    pub collection_create: Option<String>, // create a new collection with this name
+    pub collection_delete: Option<usize>, // delete collection #
+    /// Naming a new collection: the keyboard targets `name_buf` instead of search.
+    pub naming: bool,
+    pub name_buf: String,
     pub recenter_request: bool,
     pub recenter_playspace_request: bool,
+    /// Re-scan the catalogue + re-probe artwork (picks up covers added at runtime).
+    pub refresh_request: bool,
     pub keyboard_open: bool,
     /// Name of the game being launched (shows the "Launching…" overlay), set by
     /// the loop for ~1.5 s after Play before the dashboard auto-hides.
@@ -47,6 +67,10 @@ pub struct LibState {
     pub audio_enabled: bool,
     pub audio_volume: f32,
     pub summon_tilt: bool,
+    /// Panel placement comfort knobs (mirrored to/from the overlay config).
+    pub panel_dist: f32,
+    pub panel_scale: f32,
+    pub panel_curve: f32,
     /// Timer state. `timer_secs` is the configured duration (adjusted when idle);
     /// `timer_remaining`/`timer_running`/`timer_paused` are set by the loop; the
     /// request flags are drained by it.
@@ -63,6 +87,12 @@ pub struct LibState {
     /// Device batteries + wall clock, refreshed by the loop for the bottom bar.
     pub batteries: Vec<crate::monado::BatteryInfo>,
     pub clock: String,
+    /// Minutes the currently-running game has been up this session (for the splash).
+    pub session_minutes: Option<u32>,
+    /// Central-view fade-in animation (resets when the tab / splash changes).
+    last_nav: Nav,
+    last_splash: bool,
+    view_anim: f32,
 }
 
 impl LibState {
@@ -72,6 +102,7 @@ impl LibState {
             scanning: true,
             search: String::new(),
             nav: Nav::Home,
+            sort: SortMode::Recent,
             selected: None,
             visible_now: Vec::new(),
             running_index: None,
@@ -79,8 +110,15 @@ impl LibState {
             launch_request: None,
             stop_request: None,
             favorite_toggle_request: None,
+            collections: Vec::new(),
+            collection_toggle: None,
+            collection_create: None,
+            collection_delete: None,
+            naming: false,
+            name_buf: String::new(),
             recenter_request: false,
             recenter_playspace_request: false,
+            refresh_request: false,
             keyboard_open: false,
             launching_name: None,
             fade_in: 0.0,
@@ -89,6 +127,9 @@ impl LibState {
             audio_enabled: true,
             audio_volume: 0.55,
             summon_tilt: false,
+            panel_dist: 1.5,
+            panel_scale: 1.0,
+            panel_curve: 1.0,
             timer_secs: 300,
             timer_total: 300,
             timer_remaining: 300,
@@ -99,6 +140,10 @@ impl LibState {
             show_splash: false,
             batteries: Vec::new(),
             clock: String::new(),
+            session_minutes: None,
+            last_nav: Nav::Home,
+            last_splash: false,
+            view_anim: 1.0,
         }
     }
 }
@@ -110,7 +155,7 @@ const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
 /// the on-screen keyboard, and the launching/fade overlays.
 pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
     let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::Tools);
-    if searchable && st.keyboard_open {
+    if (searchable || st.naming) && st.keyboard_open {
         keyboard(ctx, st);
     }
     if searchable {
@@ -164,7 +209,6 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
                 (icon::SQUARES_FOUR, Nav::Library),
                 (icon::STAR, Nav::Favorites),
                 (icon::TAG, Nav::Tags),
-                (icon::TIMER, Nav::Tools),
             ] {
                 let active = st.nav == nav && !st.show_splash;
                 if rail_button(ui, glyph, active).clicked() && !active {
@@ -174,14 +218,19 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
                 }
                 ui.add_space(8.0);
             }
-            // Settings pinned to the bottom.
+            // Tools (timer) + Settings pinned to the bottom.
             let avail = ui.available_height();
-            ui.add_space((avail - 56.0).max(0.0));
-            let active = st.nav == Nav::Settings && !st.show_splash;
-            if rail_button(ui, icon::GEAR, active).clicked() && !active {
-                st.nav = Nav::Settings;
-                st.show_splash = false;
-                st.sound_tab = true;
+            ui.add_space((avail - 112.0).max(0.0));
+            for (glyph, nav) in [(icon::TIMER, Nav::Tools), (icon::GEAR, Nav::Settings)] {
+                let active = st.nav == nav && !st.show_splash;
+                if rail_button(ui, glyph, active).clicked() && !active {
+                    st.nav = nav;
+                    st.show_splash = false;
+                    st.sound_tab = true;
+                }
+                if nav == Nav::Tools {
+                    ui.add_space(8.0);
+                }
             }
         });
     });
@@ -317,30 +366,60 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgb(13, 16, 20))
         .inner_margin(egui::Margin::symmetric(14, 12));
+    let naming = st.naming;
     egui::TopBottomPanel::bottom("keyboard").frame(frame).show(ctx, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
+        if naming {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{}  New collection:", icon::FOLDER_PLUS)).size(14.0).color(theme::ON_SURFACE_VAR));
+                ui.add_space(6.0);
+                let shown = if st.name_buf.is_empty() { "…" } else { st.name_buf.as_str() };
+                ui.label(egui::RichText::new(shown).size(16.0).strong().color(egui::Color32::WHITE));
+            });
+            ui.add_space(4.0);
+        }
         for row in ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"] {
-            key_row(ui, row, &mut st.search);
+            key_row(ui, row, if naming { &mut st.name_buf } else { &mut st.search });
         }
         let sp = 6.0;
-        let total = 96.0 + 240.0 + 96.0 + 110.0 + 3.0 * sp;
+        let total = 96.0 + 240.0 + 96.0 + 130.0 + 3.0 * sp;
         let pad = ((ui.available_width() - total) * 0.5).max(0.0);
         ui.horizontal(|ui| {
             ui.add_space(pad);
             ui.spacing_mut().item_spacing.x = sp;
             if fkey(ui, &format!("{}  Back", icon::BACKSPACE), 96.0, false).clicked() {
-                st.search.pop();
+                if naming { st.name_buf.pop(); } else { st.search.pop(); }
             }
             if fkey(ui, "Space", 240.0, false).clicked() {
-                st.search.push(' ');
+                if naming { st.name_buf.push(' '); } else { st.search.push(' '); }
             }
             if fkey(ui, "Clear", 96.0, false).clicked() {
-                st.search.clear();
+                if naming { st.name_buf.clear(); } else { st.search.clear(); }
             }
-            if fkey(ui, "Done", 110.0, true).clicked() {
+            let commit = if naming { "Create" } else { "Done" };
+            if fkey(ui, commit, 130.0, true).clicked() {
+                if naming {
+                    let name = st.name_buf.trim().to_string();
+                    if !name.is_empty() {
+                        st.collection_create = Some(name);
+                    }
+                    st.name_buf.clear();
+                    st.naming = false;
+                }
                 st.keyboard_open = false;
             }
         });
+        if naming {
+            let cancel_pad = ((ui.available_width() - 110.0) * 0.5).max(0.0);
+            ui.horizontal(|ui| {
+                ui.add_space(cancel_pad);
+                if fkey(ui, "Cancel", 110.0, false).clicked() {
+                    st.name_buf.clear();
+                    st.naming = false;
+                    st.keyboard_open = false;
+                }
+            });
+        }
     });
 }
 
@@ -377,6 +456,14 @@ fn fkey(ui: &mut egui::Ui, label: &str, w: f32, accent: bool) -> egui::Response 
 fn central(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default().fill(theme::SURFACE).inner_margin(egui::Margin::symmetric(24, 18));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+        // Quick fade-in when the view changes (tab switch / splash toggle).
+        if st.nav != st.last_nav || st.show_splash != st.last_splash {
+            st.last_nav = st.nav;
+            st.last_splash = st.show_splash;
+            st.view_anim = 0.0;
+        }
+        st.view_anim = (st.view_anim + 0.14).min(1.0);
+        ui.set_opacity(st.view_anim);
         if st.scanning {
             ui.add_space(80.0);
             ui.vertical_centered(|ui| {
@@ -411,6 +498,7 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
 
 fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
     hero(ui, st);
+    collection_chips(ui, st);
     ui.add_space(14.0);
     ui.label(egui::RichText::new("Recent Games").heading().strong().color(egui::Color32::WHITE));
     ui.add_space(8.0);
@@ -448,10 +536,51 @@ fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
     }
 }
 
+/// Membership chips for the selected game: tap to add/remove it from a collection,
+/// or "＋ New" to create one. Shown under the Home hero.
+fn collection_chips(ui: &mut egui::Ui, st: &mut LibState) {
+    let Some(sel) = st.selected.filter(|&i| i < st.games.len()) else {
+        return;
+    };
+    ui.add_space(8.0);
+    let cols = st.collections.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new(format!("{}  Collections", icon::FOLDERS)).size(13.0).color(theme::ON_SURFACE_VAR));
+        ui.add_space(4.0);
+        for (ci, name) in cols.iter().enumerate() {
+            let member = st.games[sel].collections.contains(&ci);
+            if chip(ui, name, member).clicked() {
+                st.collection_toggle = Some(ci);
+                st.sound_tab = true;
+            }
+        }
+        if chip(ui, &format!("{}  New", icon::PLUS), false).clicked() {
+            st.naming = true;
+            st.name_buf.clear();
+            st.keyboard_open = true;
+        }
+    });
+}
+
+fn chip(ui: &mut egui::Ui, label: &str, on: bool) -> egui::Response {
+    let (fg, fill) = if on {
+        (egui::Color32::BLACK, theme::PRIMARY)
+    } else {
+        (theme::ON_SURFACE, theme::SURFACE_CONTAINER_HIGH)
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(13.0).color(fg))
+            .fill(fill)
+            .corner_radius(8)
+            .min_size(egui::vec2(0.0, 28.0)),
+    )
+}
+
 fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
-    ui.label(egui::RichText::new(title).heading().strong().color(egui::Color32::WHITE));
+    view_header(ui, st, title);
     ui.add_space(10.0);
-    let shown = filtered(st);
+    let mut shown = filtered(st);
+    apply_sort(st, &mut shown);
     if shown.is_empty() {
         st.visible_now.clear();
         st.hovered_index = None;
@@ -461,10 +590,74 @@ fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
     game_grid(ui, st, &shown, "grid");
 }
 
+/// A view header: the title on the left, the sort selector on the right.
+fn view_header(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).heading().strong().color(egui::Color32::WHITE));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Added right-to-left, so list reversed to read Recent · Name · … left-to-right.
+            for (label, mode) in [
+                (icon::HARD_DRIVES, SortMode::Size),
+                (icon::HOURGLASS_MEDIUM, SortMode::Playtime),
+                (icon::TEXT_AA, SortMode::Name),
+                (icon::CLOCK_COUNTER_CLOCKWISE, SortMode::Recent),
+            ] {
+                if sort_pill(ui, label, sort_label(mode), st.sort == mode).clicked() {
+                    st.sort = mode;
+                    st.sound_tab = true;
+                }
+            }
+            ui.label(egui::RichText::new("Sort").size(13.0).color(theme::ON_SURFACE_VAR));
+        });
+    });
+}
+
+fn sort_label(mode: SortMode) -> &'static str {
+    match mode {
+        SortMode::Recent => "Recent",
+        SortMode::Name => "Name",
+        SortMode::Playtime => "Played",
+        SortMode::Size => "Size",
+    }
+}
+
+fn sort_pill(ui: &mut egui::Ui, glyph: &str, label: &str, selected: bool) -> egui::Response {
+    let (fg, fill) = if selected {
+        (egui::Color32::BLACK, theme::PRIMARY)
+    } else {
+        (theme::ON_SURFACE_VAR, theme::SURFACE_CONTAINER)
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(format!("{glyph}  {label}")).size(13.0).color(fg))
+            .fill(fill)
+            .corner_radius(8)
+            .min_size(egui::vec2(0.0, 30.0)),
+    )
+}
+
+/// Sort game indices in place by the active mode (Recent keeps the recency order
+/// the catalogue already arrives in).
+fn apply_sort(st: &LibState, idxs: &mut [usize]) {
+    let key_play = |g: &LibGame| g.playtime_minutes.or(g.tracked_minutes).unwrap_or(0);
+    match st.sort {
+        SortMode::Recent => {}
+        SortMode::Name => idxs.sort_by(|&a, &b| {
+            st.games[a].name.to_lowercase().cmp(&st.games[b].name.to_lowercase())
+        }),
+        SortMode::Playtime => {
+            idxs.sort_by(|&a, &b| key_play(&st.games[b]).cmp(&key_play(&st.games[a])))
+        }
+        SortMode::Size => idxs.sort_by(|&a, &b| {
+            st.games[b].size_on_disk.unwrap_or(0).cmp(&st.games[a].size_on_disk.unwrap_or(0))
+        }),
+    }
+}
+
 fn favorites_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.label(egui::RichText::new("Favorites").heading().strong().color(egui::Color32::WHITE));
+    view_header(ui, st, "Favorites");
     ui.add_space(10.0);
-    let shown: Vec<usize> = filtered(st).into_iter().filter(|&i| st.games[i].is_favorite).collect();
+    let mut shown: Vec<usize> = filtered(st).into_iter().filter(|&i| st.games[i].is_favorite).collect();
+    apply_sort(st, &mut shown);
     if shown.is_empty() {
         st.visible_now.clear();
         st.hovered_index = None;
@@ -514,8 +707,17 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str) 
 }
 
 fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.label(egui::RichText::new("Categories").heading().strong().color(egui::Color32::WHITE));
+    view_header(ui, st, "Categories");
     ui.add_space(8.0);
+
+    // Create a new collection (works even with no games yet).
+    if chip(ui, &format!("{}  New collection", icon::FOLDER_PLUS), false).clicked() {
+        st.naming = true;
+        st.name_buf.clear();
+        st.keyboard_open = true;
+    }
+    ui.add_space(10.0);
+
     let shown = filtered(st);
     if shown.is_empty() {
         st.visible_now.clear();
@@ -523,14 +725,58 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
         empty_note(ui, st);
         return;
     }
+    let cols = st.collections.clone();
     let groups: [(&str, fn(&LibGame) -> bool); 2] = [
         ("Steam", |g| g.source == "Steam"),
         ("Non-Steam", |g| g.source == "Non-Steam"),
     ];
-    let (mut visible, mut newly, mut hovered) = (Vec::new(), None, None);
+    let (mut visible, mut newly, mut hovered, mut delete) = (Vec::new(), None, None, None);
     egui::ScrollArea::vertical().id_salt("tags").show(ui, |ui| {
+        // User collections first.
+        for (ci, name) in cols.iter().enumerate() {
+            let mut group: Vec<usize> =
+                shown.iter().copied().filter(|&i| st.games[i].collections.contains(&ci)).collect();
+            apply_sort(st, &mut group);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{}  {name}  ·  {}", icon::FOLDER, group.len()))
+                        .strong()
+                        .color(theme::ON_SURFACE_VAR),
+                );
+                ui.add_space(6.0);
+                let del = egui::Button::new(egui::RichText::new(icon::TRASH).size(13.0).color(STOP_RED))
+                    .fill(egui::Color32::TRANSPARENT)
+                    .min_size(egui::vec2(28.0, 24.0));
+                if ui.add(del).on_hover_text("Delete collection").clicked() {
+                    delete = Some(ci);
+                }
+            });
+            ui.add_space(6.0);
+            if group.is_empty() {
+                ui.label(egui::RichText::new("Empty — add games from the Home hero.").size(13.0).color(theme::ON_SURFACE_VAR));
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for &i in &group {
+                        let r = tile(ui, &st.games[i], st.selected == Some(i), st.running_index == Some(i));
+                        if ui.is_rect_visible(r.rect) {
+                            visible.push(i);
+                        }
+                        if r.hovered() {
+                            hovered = Some(i);
+                        }
+                        if r.clicked() {
+                            newly = Some(i);
+                        }
+                    }
+                });
+            }
+            ui.add_space(14.0);
+        }
+        // Auto categories by source.
         for (label, pred) in groups {
-            let group: Vec<usize> = shown.iter().copied().filter(|&i| pred(&st.games[i])).collect();
+            let mut group: Vec<usize> = shown.iter().copied().filter(|&i| pred(&st.games[i])).collect();
+            apply_sort(st, &mut group);
             if group.is_empty() {
                 continue;
             }
@@ -559,6 +805,10 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
     if newly.is_some() {
         st.selected = newly;
         st.sound_select = true;
+    }
+    if let Some(ci) = delete {
+        st.collection_delete = Some(ci);
+        st.sound_tab = true;
     }
 }
 
@@ -600,7 +850,14 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
             ui.add_space(30.0);
             ui.label(egui::RichText::new(&g.name).size(42.0).strong().color(egui::Color32::WHITE));
             ui.add_space(10.0);
-            ui.label(egui::RichText::new(format!("●  Running")).size(17.0).color(RUNNING_GREEN).strong());
+            let running_line = match st.session_minutes {
+                Some(m) if m > 0 => {
+                    let t = if m < 60 { format!("{m}m") } else { format!("{:.1}h", m as f32 / 60.0) };
+                    format!("●  Running  ·  {t} this session")
+                }
+                _ => "●  Running".to_string(),
+            };
+            ui.label(egui::RichText::new(running_line).size(17.0).color(RUNNING_GREEN).strong());
             ui.add_space(10.0);
             ui.label(egui::RichText::new(sub_label(g)).size(16.0).color(theme::ON_SURFACE));
             ui.add_space(36.0);
@@ -862,6 +1119,53 @@ pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind
         });
 }
 
+/// A labelled +/- stepper (for knobs that resize the panel the control sits on,
+/// where a slider's grab point would jump out from under you).
+fn comfort_stepper(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f32, max: f32, step: f32) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            egui::vec2(78.0, 30.0),
+            egui::Label::new(egui::RichText::new(label).size(15.0).color(theme::ON_SURFACE)),
+        );
+        if step_btn(ui, icon::MINUS).clicked() {
+            *value = (*value - step).max(min);
+        }
+        ui.add_sized(
+            egui::vec2(60.0, 30.0),
+            egui::Label::new(egui::RichText::new(format!("{:.0}%", *value * 100.0)).size(15.0).strong().color(egui::Color32::WHITE)),
+        );
+        if step_btn(ui, icon::PLUS).clicked() {
+            *value = (*value + step).min(max);
+        }
+    });
+}
+
+fn step_btn(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(glyph).size(15.0).color(theme::ON_SURFACE))
+            .fill(theme::SURFACE_CONTAINER_HIGH)
+            .corner_radius(8)
+            .min_size(egui::vec2(42.0, 30.0)),
+    )
+}
+
+/// A labelled comfort slider (fixed-width label + value slider).
+fn comfort_slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    suffix: &str,
+) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            egui::vec2(78.0, 24.0),
+            egui::Label::new(egui::RichText::new(label).size(15.0).color(theme::ON_SURFACE)),
+        );
+        ui.add(egui::Slider::new(value, range).suffix(suffix).max_decimals(2));
+    });
+}
+
 fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     ui.label(egui::RichText::new("Settings").size(30.0).strong().color(egui::Color32::WHITE));
     ui.add_space(18.0);
@@ -888,6 +1192,28 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
         egui::RichText::new("Tilt to match headset angle on summon").size(16.0).color(theme::ON_SURFACE),
     );
 
+    ui.add_space(14.0);
+    ui.label(egui::RichText::new("Placement").size(15.0).color(theme::ON_SURFACE_VAR));
+    ui.add_space(6.0);
+    comfort_slider(ui, "Distance", &mut st.panel_dist, 0.8..=2.5, " m");
+    // Size is a stepper, not a slider: the slider sits on the panel it resizes, so
+    // dragging it makes the grab point jump as the panel grows/shrinks under you.
+    comfort_stepper(ui, "Size", &mut st.panel_scale, 0.7, 1.4, 0.05);
+    comfort_slider(ui, "Curve", &mut st.panel_curve, 1.0..=3.0, "");
+    ui.add_space(8.0);
+    let reset = egui::Button::new(
+        egui::RichText::new(format!("{}  Reset placement", icon::ARROW_COUNTER_CLOCKWISE)).size(15.0).color(theme::ON_SURFACE),
+    )
+    .fill(theme::SURFACE_CONTAINER_HIGH)
+    .corner_radius(10)
+    .min_size(egui::vec2(210.0, 40.0));
+    if ui.add(reset).clicked() {
+        st.panel_dist = 1.5;
+        st.panel_scale = 1.0;
+        st.panel_curve = 1.0;
+        st.sound_tab = true;
+    }
+
     ui.add_space(24.0);
     ui.label(egui::RichText::new("Sound").size(19.0).strong().color(theme::ON_SURFACE));
     ui.add_space(8.0);
@@ -905,9 +1231,22 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     });
 
     ui.add_space(24.0);
+    ui.label(egui::RichText::new("Library").size(19.0).strong().color(theme::ON_SURFACE));
+    ui.add_space(8.0);
+    let refresh = egui::Button::new(
+        egui::RichText::new(format!("{}  Refresh library", icon::ARROW_CLOCKWISE)).size(16.0).color(theme::ON_SURFACE),
+    )
+    .fill(theme::SURFACE_CONTAINER_HIGH)
+    .corner_radius(10)
+    .min_size(egui::vec2(220.0, 44.0));
+    if ui.add(refresh).clicked() {
+        st.refresh_request = true;
+        st.sound_tab = true;
+    }
+    ui.add_space(6.0);
     ui.label(
-        egui::RichText::new(format!("{} games in your library", st.games.len()))
-            .size(15.0)
+        egui::RichText::new(format!("{} games · re-scan to pick up artwork added while running", st.games.len()))
+            .size(14.0)
             .color(theme::ON_SURFACE_VAR),
     );
 }
@@ -1129,22 +1468,25 @@ fn filtered(st: &LibState) -> Vec<usize> {
 }
 
 fn empty_note(ui: &mut egui::Ui, st: &LibState) {
-    ui.add_space(40.0);
+    let (glyph, title, hint) = if st.games.is_empty() {
+        (icon::GAME_CONTROLLER, "No games found", "Add games to Steam or your non-Steam shortcuts.")
+    } else {
+        (icon::MAGNIFYING_GLASS, "No matches", "Try a different search.")
+    };
+    ui.add_space(56.0);
     ui.vertical_centered(|ui| {
-        ui.label(
-            egui::RichText::new(if st.games.is_empty() {
-                "No games found."
-            } else {
-                "No games match your search."
-            })
-            .color(theme::ON_SURFACE_VAR),
-        );
+        ui.label(egui::RichText::new(glyph).size(40.0).color(theme::SURFACE_CONTAINER_HIGH));
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new(title).size(19.0).strong().color(theme::ON_SURFACE));
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new(hint).size(14.0).color(theme::ON_SURFACE_VAR));
     });
 }
 
 fn sub_label(g: &LibGame) -> String {
     let mut parts = vec![g.source.clone()];
-    if let Some(m) = g.playtime_minutes {
+    // Steam's own playtime when known, else our tracked total (non-Steam games).
+    if let Some(m) = g.playtime_minutes.or(g.tracked_minutes) {
         parts.push(human_playtime(m));
     }
     if let Some(a) = played_ago(g.last_played) {
@@ -1200,27 +1542,36 @@ fn played_ago(ts: Option<u64>) -> Option<String> {
 
 fn tile(ui: &mut egui::Ui, game: &LibGame, selected: bool, running: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(TILE_W, TILE_H), egui::Sense::click());
-    draw_art(ui.painter(), rect, &game.cover, &game.name);
-    // Smoothly fade the hover highlight in/out.
+    // Smoothly fade the hover highlight + pop the cover slightly on hover.
     let hover_t = ui.ctx().animate_bool(resp.id, resp.hovered());
+    let r = rect.expand(hover_t * 5.0);
     if hover_t > 0.001 {
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(8), egui::Color32::from_white_alpha((hover_t * 24.0) as u8));
+        // Soft shadow behind the lifted tile.
+        ui.painter().rect_filled(
+            r.translate(egui::vec2(0.0, 2.0)).expand(2.0),
+            egui::CornerRadius::same(10),
+            egui::Color32::from_black_alpha((hover_t * 70.0) as u8),
+        );
+    }
+    draw_art(ui.painter(), r, &game.cover, &game.name);
+    if hover_t > 0.001 {
+        ui.painter().rect_filled(r, egui::CornerRadius::same(8), egui::Color32::from_white_alpha((hover_t * 24.0) as u8));
     }
     if selected {
         ui.painter().rect_stroke(
-            rect,
+            r,
             egui::CornerRadius::same(8),
             egui::Stroke::new(3.0, theme::PRIMARY),
             egui::StrokeKind::Inside,
         );
     }
     if running {
-        let c = egui::pos2(rect.left() + 13.0, rect.top() + 13.0);
+        let c = egui::pos2(r.left() + 13.0, r.top() + 13.0);
         ui.painter().circle_filled(c, 6.0, egui::Color32::from_black_alpha(140));
         ui.painter().circle_filled(c, 4.0, RUNNING_GREEN);
     }
     if game.is_favorite {
-        let c = egui::pos2(rect.right() - 15.0, rect.top() + 15.0);
+        let c = egui::pos2(r.right() - 15.0, r.top() + 15.0);
         ui.painter().circle_filled(c, 11.0, egui::Color32::from_black_alpha(120));
         ui.painter().text(c, egui::Align2::CENTER_CENTER, icon::STAR, egui::FontId::proportional(15.0), FAV_GOLD);
     }

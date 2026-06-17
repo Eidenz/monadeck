@@ -13,11 +13,24 @@ pub struct OverlayConfig {
     /// Summon the dashboard tilted to match the headset's pitch (vs. always
     /// upright facing you).
     pub summon_tilt: bool,
+    /// Distance the dashboard sits in front of you, metres.
+    pub panel_dist: f32,
+    /// Overall panel size multiplier (1.0 = default).
+    pub panel_scale: f32,
+    /// Cylinder curvature multiplier (1.0 = wraps around you; larger = flatter).
+    pub panel_curve: f32,
 }
 
 impl Default for OverlayConfig {
     fn default() -> Self {
-        Self { audio_enabled: true, audio_volume: 0.55, summon_tilt: false }
+        Self {
+            audio_enabled: true,
+            audio_volume: 0.55,
+            summon_tilt: false,
+            panel_dist: 1.5,
+            panel_scale: 1.0,
+            panel_curve: 1.0,
+        }
     }
 }
 

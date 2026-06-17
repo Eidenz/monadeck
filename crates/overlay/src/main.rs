@@ -85,6 +85,35 @@ fn make_toast(
     }
 }
 
+/// Stamp the per-user metadata (favorite flag · tracked playtime · collection
+/// membership) onto a freshly scanned catalogue, keyed by each game's cover id.
+fn apply_user_meta(
+    games: &mut [games::LibGame],
+    favorites: &HashSet<String>,
+    playtime: &HashMap<String, u64>,
+    collections: &[monadeck_core::collections::Collection],
+) {
+    for g in games.iter_mut() {
+        match g.cover_id.as_ref() {
+            Some(id) => {
+                g.is_favorite = favorites.contains(id);
+                g.tracked_minutes = playtime.get(id).map(|&s| (s / 60) as u32).filter(|&m| m > 0);
+                g.collections = collections
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.members.iter().any(|m| m == id))
+                    .map(|(ci, _)| ci)
+                    .collect();
+            }
+            None => {
+                g.is_favorite = false;
+                g.tracked_minutes = None;
+                g.collections.clear();
+            }
+        }
+    }
+}
+
 unsafe extern "system" fn get_instance_proc_addr(
     instance: xr::sys::platform::VkInstance,
     name: *const c_char,
@@ -280,12 +309,8 @@ fn run() -> Result<()> {
     const BOTTOM_H: f32 = BOTTOM_W * 151.0 / 1640.0; // slimmer bar (width preserved)
     const PANEL_FWD: f32 = 0.06; // float rail/bottom this far in front of main
     const GAP: f32 = 0.05;
-    // Curved placement: yaw the rail left of the main arc; drop the bar below.
-    const RAIL_YAW: f32 = MAIN_W / CURVE_RADIUS / 2.0 + GAP + RAIL_W / (CURVE_RADIUS - PANEL_FWD) / 2.0;
-    const BOTTOM_YOFF: f32 = -(MAIN_H / 2.0 + GAP + BOTTOM_H / 2.0);
-    // Flat fallback offsets (runtimes without cylinder layers).
-    const RAIL_DX: f32 = -(MAIN_W / 2.0 + GAP + RAIL_W / 2.0);
-    const BOTTOM_DY: f32 = BOTTOM_YOFF;
+    // The rail yaw / bottom drop / flat-fallback offsets are derived per-frame
+    // from the live comfort knobs (distance · size · curve), down in the loop.
 
     // The layout anchor (flat centre, faces the viewer). The three panels are
     // cylinder segments sharing one axis (curved together), positioned from the
@@ -350,13 +375,32 @@ fn run() -> Result<()> {
     let monado = monado::MonadoLink::new();
     let ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
-    let mut settings_prev = (ov_cfg.audio_enabled, ov_cfg.audio_volume, ov_cfg.summon_tilt);
+    let mut settings_prev = (
+        ov_cfg.audio_enabled,
+        ov_cfg.audio_volume,
+        ov_cfg.summon_tilt,
+        ov_cfg.panel_dist,
+        ov_cfg.panel_scale,
+        ov_cfg.panel_curve,
+    );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
+    // Re-place the dashboard in front of you when the distance knob changes.
+    let mut panel_dist_prev = ov_cfg.panel_dist;
+    // Tracked playtime: total seconds per game key + the in-progress session.
+    let mut playtime: HashMap<String, u64> = monadeck_core::playtime::load();
+    let mut session_start: Option<Instant> = None;
+    let mut session_key: Option<String> = None;
+    // User collections (named groups of games).
+    let mut collections = monadeck_core::collections::load();
 
     let mut st = ui::LibState::new();
     st.audio_enabled = ov_cfg.audio_enabled;
     st.audio_volume = ov_cfg.audio_volume;
     st.summon_tilt = ov_cfg.summon_tilt;
+    st.panel_dist = ov_cfg.panel_dist;
+    st.panel_scale = ov_cfg.panel_scale;
+    st.panel_curve = ov_cfg.panel_curve;
+    st.collections = collections.iter().map(|c| c.name.clone()).collect();
 
     // --- Loop state ---------------------------------------------------------
     let mut events = xr::EventDataBuffer::new();
@@ -378,6 +422,7 @@ fn run() -> Result<()> {
     // Re-scan to refresh last-played ordering when a game starts/stops.
     let mut running_app_prev: Option<String> = None;
     let mut refresh_rx: Option<std::sync::mpsc::Receiver<Vec<monadeck_core::steam::LibraryGame>>> = None;
+    let mut manual_refresh = false; // a user-requested "Refresh library" is pending
     // Notifications + timer (run even while the dashboard is hidden).
     let mut toast: Option<ToastState> = None;
     let mut timer_end: Option<Instant> = None;
@@ -430,23 +475,61 @@ fn run() -> Result<()> {
         // Drain the finished scan (metadata only; art loads lazily).
         if let Ok(rows) = scan_rx.try_recv() {
             st.games = games::to_games(rows);
-            for g in st.games.iter_mut() {
-                g.is_favorite = g.cover_id.as_ref().is_some_and(|id| favorites.contains(id));
-            }
+            apply_user_meta(&mut st.games, &favorites, &playtime, &collections);
             st.scanning = false;
             if st.selected.is_none() && !st.games.is_empty() {
                 st.selected = Some(0);
             }
         }
 
+        // Manual "Refresh library": apply the re-scan as soon as it lands, even
+        // while the dashboard is visible (rebuild resets art to Idle, so covers
+        // added at runtime get re-probed). Selection is preserved/clamped.
+        if manual_refresh {
+            if let Some(rx) = &refresh_rx {
+                if let Ok(rows) = rx.try_recv() {
+                    st.games = games::to_games(rows);
+                    apply_user_meta(&mut st.games, &favorites, &playtime, &collections);
+                    if st.selected.map_or(false, |i| i >= st.games.len()) {
+                        st.selected = (!st.games.is_empty()).then_some(0);
+                    }
+                    last_used.clear();
+                    refresh_rx = None;
+                    manual_refresh = false;
+                }
+            }
+        }
+
         // A game started or stopped -> last-played changed -> refresh the order.
         let running = monado.running_app();
         if running != running_app_prev {
+            // Close the previous session into the store (ignore <30 s blips).
+            if let (Some(s), Some(key)) = (session_start.take(), session_key.take()) {
+                let secs = s.elapsed().as_secs();
+                if secs >= 30 {
+                    *playtime.entry(key).or_insert(0) += secs;
+                    monadeck_core::playtime::save(&playtime);
+                }
+            }
+            // Open a new session for the now-running game (if we can key it).
+            if let Some(app) = &running {
+                if let Some(key) = st
+                    .games
+                    .iter()
+                    .find(|g| name_matches(&g.name, app))
+                    .and_then(|g| g.cover_id.clone())
+                {
+                    session_start = Some(Instant::now());
+                    session_key = Some(key);
+                }
+            }
             running_app_prev = running.clone();
             if refresh_rx.is_none() {
                 refresh_rx = Some(games::spawn_scan());
             }
         }
+        // Live "this session" minutes for the splash.
+        st.session_minutes = session_start.map(|s| (s.elapsed().as_secs() / 60) as u32);
 
         // --- Sync actions + summon/dismiss (left system click, rising edge) --
         if focused {
@@ -590,9 +673,7 @@ fn run() -> Result<()> {
             if let Some(rx) = &refresh_rx {
                 if let Ok(rows) = rx.try_recv() {
                     st.games = games::to_games(rows);
-                    for g in st.games.iter_mut() {
-                        g.is_favorite = g.cover_id.as_ref().is_some_and(|id| favorites.contains(id));
-                    }
+                    apply_user_meta(&mut st.games, &favorites, &playtime, &collections);
                     st.selected = (!st.games.is_empty()).then_some(0);
                     last_used.clear();
                     refresh_rx = None;
@@ -615,21 +696,47 @@ fn run() -> Result<()> {
         // Reflect the running game into the UI each frame.
         st.running_index = running.as_ref().and_then(|app| st.games.iter().position(|g| name_matches(&g.name, app)));
 
+        // Comfort knobs (live): distance, size, curvature. The dashboard is a
+        // head-centred cylinder, so distance = anchor placement, the cylinder
+        // radius `r = dist * curve` (bigger = flatter while the surface stays at
+        // `dist`), and `scale` multiplies every panel's metric size + gaps.
+        let dist = st.panel_dist.clamp(0.7, 3.0);
+        let scale = st.panel_scale.clamp(0.6, 1.6);
+        let r = dist * st.panel_curve.clamp(1.0, 4.0);
+        let main_w = MAIN_W * scale;
+        let main_h = MAIN_H * scale;
+        let rail_w = RAIL_W * scale;
+        let rail_h = RAIL_H * scale;
+        let bottom_w = BOTTOM_W * scale;
+        let bottom_h = BOTTOM_H * scale;
+        let gap_m = GAP * scale;
+        // The rail sits a fixed *linear* gap left of the main arc; dividing by the
+        // radius turns it into the right yaw angle, so flattening (bigger r) no
+        // longer flings it sideways (GAP·r blow-up). `GAP*CURVE_RADIUS` keeps the
+        // default look identical to the old fixed-angle gap.
+        let rail_gap = GAP * CURVE_RADIUS * scale;
+        let rail_yaw = main_w / (2.0 * r) + rail_gap / r + rail_w / (2.0 * (r - PANEL_FWD));
+        let bottom_yoff = -(main_h / 2.0 + gap_m + bottom_h / 2.0);
+        let rail_dx = -(main_w / 2.0 + gap_m + rail_w / 2.0);
+
         // Place the layout in front of the head on first show / on recenter.
         if recenter {
             if let Some(h) = hmd {
-                anchor = front_pose(&h, CURVE_RADIUS, 0.0, 0.0, st.summon_tilt);
+                anchor = front_pose(&h, dist, 0.0, 0.0, st.summon_tilt);
                 recenter = false;
             }
         }
         // Flat poses (used by the quad fallback + render).
         main_panel.pose = anchor;
-        rail_panel.pose = offset_pose(&anchor, RAIL_DX, 0.0, PANEL_FWD);
-        bottom_panel.pose = offset_pose(&anchor, 0.0, BOTTOM_DY, PANEL_FWD);
+        main_panel.size_m = (main_w, main_h);
+        rail_panel.pose = offset_pose(&anchor, rail_dx, 0.0, PANEL_FWD);
+        rail_panel.size_m = (rail_w, rail_h);
+        bottom_panel.pose = offset_pose(&anchor, 0.0, bottom_yoff, PANEL_FWD);
+        bottom_panel.size_m = (bottom_w, bottom_h);
         // Curved placements on the shared cylinder (hit-test + layers).
-        let main_l = cyl_layout(&anchor, CURVE_RADIUS, CURVE_RADIUS, 0.0, 0.0, MAIN_W, MAIN_H);
-        let rail_l = cyl_layout(&anchor, CURVE_RADIUS, CURVE_RADIUS - PANEL_FWD, RAIL_YAW, 0.0, RAIL_W, RAIL_H);
-        let bottom_l = cyl_layout(&anchor, CURVE_RADIUS, CURVE_RADIUS - PANEL_FWD, 0.0, BOTTOM_YOFF, BOTTOM_W, BOTTOM_H);
+        let main_l = cyl_layout(&anchor, r, r, 0.0, 0.0, main_w, main_h);
+        let rail_l = cyl_layout(&anchor, r, r - PANEL_FWD, rail_yaw, 0.0, rail_w, rail_h);
+        let bottom_l = cyl_layout(&anchor, r, r - PANEL_FWD, 0.0, bottom_yoff, bottom_w, bottom_h);
 
         // Bottom-bar clock (batteries were refreshed before the visibility gate).
         st.clock = chrono::Local::now().format("%-I:%M %p").to_string();
@@ -860,16 +967,32 @@ fn run() -> Result<()> {
             audio.tab();
         }
         // Settings changed in the Settings tab — apply live + persist.
-        if (st.audio_enabled, st.audio_volume, st.summon_tilt) != settings_prev {
+        let settings_now = (
+            st.audio_enabled,
+            st.audio_volume,
+            st.summon_tilt,
+            st.panel_dist,
+            st.panel_scale,
+            st.panel_curve,
+        );
+        if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
             audio.set_volume(st.audio_volume);
-            settings_prev = (st.audio_enabled, st.audio_volume, st.summon_tilt);
+            settings_prev = settings_now;
             monadeck_core::overlay_config::OverlayConfig {
                 audio_enabled: st.audio_enabled,
                 audio_volume: st.audio_volume,
                 summon_tilt: st.summon_tilt,
+                panel_dist: st.panel_dist,
+                panel_scale: st.panel_scale,
+                panel_curve: st.panel_curve,
             }
             .save();
+        }
+        // Changing the distance re-places the dashboard in front of you.
+        if st.panel_dist != panel_dist_prev {
+            panel_dist_prev = st.panel_dist;
+            recenter = true;
         }
         if st.stop_request.take().is_some() {
             if let Some(app) = monado.running_app() {
@@ -887,6 +1010,36 @@ fn run() -> Result<()> {
                     }
                 }
                 monadeck_core::favorites::save(&favorites);
+            }
+        }
+        // Collections: create / toggle the selected game's membership / delete.
+        let mut cols_dirty = false;
+        if let Some(name) = st.collection_create.take() {
+            collections.push(monadeck_core::collections::Collection { name, members: Vec::new() });
+            cols_dirty = true;
+        }
+        if let Some(ci) = st.collection_toggle.take() {
+            if let Some(id) = st.selected.and_then(|i| st.games.get(i)).and_then(|g| g.cover_id.clone()) {
+                monadeck_core::collections::toggle_member(&mut collections, ci, &id);
+                cols_dirty = true;
+            }
+        }
+        if let Some(ci) = st.collection_delete.take() {
+            if ci < collections.len() {
+                collections.remove(ci);
+                cols_dirty = true;
+            }
+        }
+        if cols_dirty {
+            monadeck_core::collections::save(&collections);
+            st.collections = collections.iter().map(|c| c.name.clone()).collect();
+            apply_user_meta(&mut st.games, &favorites, &playtime, &collections);
+        }
+        if st.refresh_request {
+            st.refresh_request = false;
+            if refresh_rx.is_none() {
+                refresh_rx = Some(games::spawn_scan());
+                manual_refresh = true;
             }
         }
         if st.recenter_request {

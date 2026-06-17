@@ -14,6 +14,7 @@
 
 pub mod active_runtime;
 pub mod cmd_runner;
+pub mod collections;
 pub mod config;
 pub mod desktop;
 pub mod devices;
@@ -24,6 +25,7 @@ pub mod monado_conn;
 pub mod openvr_paths;
 pub mod overlay_config;
 pub mod paths;
+pub mod playtime;
 pub mod plugins;
 pub mod proton;
 pub mod setcap;
