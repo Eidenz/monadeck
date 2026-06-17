@@ -22,6 +22,7 @@ pub mod gpu;
 pub mod launch_options;
 pub mod monado_conn;
 pub mod openvr_paths;
+pub mod overlay_config;
 pub mod paths;
 pub mod plugins;
 pub mod proton;

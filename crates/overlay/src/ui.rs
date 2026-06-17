@@ -39,6 +39,12 @@ pub struct LibState {
     pub launching_name: Option<String>,
     /// Summon fade-in amount (1 = fully dark, 0 = clear), set by the loop.
     pub fade_in: f32,
+    /// One-shot UI-sound requests, drained by the loop.
+    pub sound_select: bool,
+    pub sound_tab: bool,
+    /// Sound settings (mirrored to/from the persisted overlay config by the loop).
+    pub audio_enabled: bool,
+    pub audio_volume: f32,
 }
 
 impl LibState {
@@ -60,6 +66,10 @@ impl LibState {
             keyboard_open: false,
             launching_name: None,
             fade_in: 0.0,
+            sound_select: false,
+            sound_tab: false,
+            audio_enabled: true,
+            audio_volume: 0.55,
         }
     }
 }
@@ -130,8 +140,9 @@ fn left_rail(ctx: &egui::Context, st: &mut LibState) {
                     (icon::STAR, Nav::Favorites),
                     (icon::TAG, Nav::Tags),
                 ] {
-                    if rail_button(ui, glyph, st.nav == nav).clicked() {
+                    if rail_button(ui, glyph, st.nav == nav).clicked() && st.nav != nav {
                         st.nav = nav;
+                        st.sound_tab = true;
                     }
                     ui.add_space(6.0);
                 }
@@ -143,10 +154,12 @@ fn left_rail(ctx: &egui::Context, st: &mut LibState) {
                     .clicked()
                 {
                     st.recenter_playspace_request = true;
+                    st.sound_tab = true;
                 }
                 ui.add_space(6.0);
-                if rail_button(ui, icon::GEAR, st.nav == Nav::Settings).clicked() {
+                if rail_button(ui, icon::GEAR, st.nav == Nav::Settings).clicked() && st.nav != Nav::Settings {
                     st.nav = Nav::Settings;
+                    st.sound_tab = true;
                 }
             });
         });
@@ -334,6 +347,7 @@ fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
     st.hovered_index = hovered;
     if newly.is_some() {
         st.selected = newly;
+        st.sound_select = true;
     }
 }
 
@@ -395,6 +409,7 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str) 
     st.hovered_index = hovered;
     if newly.is_some() {
         st.selected = newly;
+        st.sound_select = true;
     }
     if launch.is_some() {
         st.launch_request = launch;
@@ -446,6 +461,7 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
     st.hovered_index = hovered;
     if newly.is_some() {
         st.selected = newly;
+        st.sound_select = true;
     }
 }
 
@@ -458,6 +474,7 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     .min_size(egui::vec2(220.0, 42.0));
     if ui.add(recenter).clicked() {
         st.recenter_request = true;
+        st.sound_tab = true;
     }
     ui.add_space(6.0);
     ui.label(
@@ -469,12 +486,17 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     ui.separator();
     ui.add_space(12.0);
     ui.label(egui::RichText::new(format!("{} games in your library", st.games.len())).color(theme::ON_SURFACE_VAR));
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new("Point with a controller, trigger to select, Play to launch.")
-            .small()
-            .color(theme::ON_SURFACE_VAR),
-    );
+
+    ui.add_space(20.0);
+    ui.separator();
+    ui.add_space(12.0);
+    ui.label(egui::RichText::new("Sound").strong());
+    ui.add_space(8.0);
+    ui.checkbox(&mut st.audio_enabled, "UI sounds (select, launch, tabs)");
+    ui.add_space(6.0);
+    ui.add_enabled_ui(st.audio_enabled, |ui| {
+        ui.add(egui::Slider::new(&mut st.audio_volume, 0.0..=1.0).text("Volume").show_value(false));
+    });
 }
 
 // --- hero banner ------------------------------------------------------------

@@ -7,6 +7,7 @@
 //
 // The OpenXR/Vulkan/egui/laser plumbing is adapted from monado-frame.
 
+mod audio;
 mod games;
 mod gfx;
 mod mathx;
@@ -275,9 +276,14 @@ fn run() -> Result<()> {
     let art = games::ArtLoader::new();
     // libmonado link: running-game detection, recenter, input arbitration.
     let monado = monado::MonadoLink::new();
+    let ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
+    let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
+    let mut audio_prev = (ov_cfg.audio_enabled, ov_cfg.audio_volume);
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
 
     let mut st = ui::LibState::new();
+    st.audio_enabled = ov_cfg.audio_enabled;
+    st.audio_volume = ov_cfg.audio_volume;
 
     // --- Loop state ---------------------------------------------------------
     let mut events = xr::EventDataBuffer::new();
@@ -294,6 +300,9 @@ fn run() -> Result<()> {
     let mut launching_until: Option<Instant> = None; // "Launching…" hold before hide
     let mut click_prev = false; // haptic click edge
     let mut hover_prev: Option<usize> = None; // haptic hover edge
+    // Re-scan to refresh last-played ordering when a game starts/stops.
+    let mut running_app_prev: Option<String> = None;
+    let mut refresh_rx: Option<std::sync::mpsc::Receiver<Vec<monadeck_core::steam::LibraryGame>>> = None;
     // Lazy-art LRU: per-slot last-used frame, to evict the coldest past a cap.
     let mut frame: u64 = 0;
     let mut last_used: HashMap<(usize, games::ArtKind), u64> = HashMap::new();
@@ -350,6 +359,15 @@ fn run() -> Result<()> {
             }
         }
 
+        // A game started or stopped -> last-played changed -> refresh the order.
+        let running = monado.running_app();
+        if running != running_app_prev {
+            running_app_prev = running.clone();
+            if refresh_rx.is_none() {
+                refresh_rx = Some(games::spawn_scan());
+            }
+        }
+
         // --- Sync actions + summon/dismiss (left system click, rising edge) --
         if focused {
             session.sync_actions(&[(&action_set).into()])?;
@@ -360,8 +378,8 @@ fn run() -> Result<()> {
                     recenter = true; // reappear in front of the head
                     summon_at = Some(Instant::now());
                     // Auto-select the running game, if any (SteamVR-style).
-                    if let Some(app) = monado.running_app() {
-                        if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, &app)) {
+                    if let Some(app) = &running {
+                        if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, app)) {
                             st.selected = Some(i);
                         }
                     }
@@ -382,8 +400,20 @@ fn run() -> Result<()> {
             }
         }
 
-        // Hidden: drop any input block, submit nothing, skip rendering.
+        // Hidden: apply any finished refresh (rebuild while out of sight, so the
+        // order is fresh on the next summon), drop input block, skip rendering.
         if !visible {
+            if let Some(rx) = &refresh_rx {
+                if let Ok(rows) = rx.try_recv() {
+                    st.games = games::to_games(rows);
+                    for g in st.games.iter_mut() {
+                        g.is_favorite = g.cover_id.as_ref().is_some_and(|id| favorites.contains(id));
+                    }
+                    st.selected = (!st.games.is_empty()).then_some(0);
+                    last_used.clear();
+                    refresh_rx = None;
+                }
+            }
             if blocked_prev {
                 monado.set_block(false);
                 blocked_prev = false;
@@ -393,9 +423,7 @@ fn run() -> Result<()> {
         }
 
         // Reflect the running game into the UI each frame.
-        st.running_index = monado
-            .running_app()
-            .and_then(|app| st.games.iter().position(|g| name_matches(&g.name, &app)));
+        st.running_index = running.as_ref().and_then(|app| st.games.iter().position(|g| name_matches(&g.name, app)));
 
         // Place the panel in front of the head on first show / on recenter.
         if recenter {
@@ -582,10 +610,37 @@ fn run() -> Result<()> {
         if let Some(i) = st.launch_request.take() {
             if let Some(g) = st.games.get(i) {
                 launch_game(g);
+                audio.launch();
                 st.launching_name = Some(g.name.clone());
                 // Hold the "Launching…" overlay briefly, then auto-hide.
                 launching_until = Some(Instant::now() + std::time::Duration::from_millis(1500));
             }
+            // Optimistically mark it "now" so it's at the top when you return
+            // (a real re-scan confirms it when the game starts/stops).
+            if let Some(g) = st.games.get_mut(i) {
+                g.last_played = Some(now_unix());
+            }
+            resort_recency(&mut st);
+            last_used.clear();
+        }
+        if st.sound_select {
+            st.sound_select = false;
+            audio.select();
+        }
+        if st.sound_tab {
+            st.sound_tab = false;
+            audio.tab();
+        }
+        // Sound settings changed in the Settings tab — apply live + persist.
+        if (st.audio_enabled, st.audio_volume) != audio_prev {
+            audio.set_enabled(st.audio_enabled);
+            audio.set_volume(st.audio_volume);
+            audio_prev = (st.audio_enabled, st.audio_volume);
+            monadeck_core::overlay_config::OverlayConfig {
+                audio_enabled: st.audio_enabled,
+                audio_volume: st.audio_volume,
+            }
+            .save();
         }
         if st.stop_request.take().is_some() {
             if let Some(app) = monado.running_app() {
@@ -614,6 +669,26 @@ fn run() -> Result<()> {
             monado.recenter();
         }
     }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Re-sort the catalogue most-recently-played first (art moves with each entry,
+/// so nothing reloads), keeping the same game selected by identity.
+fn resort_recency(st: &mut ui::LibState) {
+    let sel_id = st.selected.and_then(|i| st.games.get(i)).and_then(|g| g.cover_id.clone());
+    st.games.sort_by(|a, b| {
+        b.last_played
+            .unwrap_or(0)
+            .cmp(&a.last_played.unwrap_or(0))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    st.selected = sel_id.and_then(|id| st.games.iter().position(|g| g.cover_id.as_deref() == Some(id.as_str())));
 }
 
 /// Fire a haptic tick on a controller (`amplitude` 0..1, `millis` duration).
