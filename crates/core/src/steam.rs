@@ -191,6 +191,92 @@ pub fn scan_games() -> Vec<DetectedGame> {
     games
 }
 
+// --- launcher catalogue -------------------------------------------------------
+
+/// A launchable game for the in-headset launcher. Sourced from installed Steam
+/// apps + non-Steam shortcuts — the things that actually have a launch id. This
+/// is deliberately NOT keyed on xrizer bindings: a game can have bindings without
+/// being added to Steam, in which case it can't be launched and doesn't belong
+/// in a launcher. (Bindings remain the binding-editor's concern via `scan_games`.)
+#[derive(Debug, Clone)]
+pub struct LibraryGame {
+    pub name: String,
+    pub app_id: Option<String>,      // installed Steam app
+    pub shortcut_id: Option<String>, // non-Steam shortcut (unsigned appid)
+    pub source: String,              // "Steam" | "Non-Steam"
+    pub last_played: Option<u64>,
+    pub size_on_disk: Option<u64>,
+}
+
+/// Every installed Steam game + every non-Steam shortcut, sorted by name.
+pub fn scan_library() -> Vec<LibraryGame> {
+    let mut games: Vec<LibraryGame> = Vec::new();
+    let mut seen_app: HashSet<String> = HashSet::new();
+
+    let roots = find_steam_roots();
+    for lib in find_library_folders(&roots) {
+        let steamapps = lib.join("steamapps");
+        let Ok(entries) = fs::read_dir(&steamapps) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if !(fname.starts_with("appmanifest_") && fname.ends_with(".acf")) {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let Some(app_id) = extract_vdf_value(&content, "appid") else {
+                continue;
+            };
+            let name = extract_vdf_value(&content, "name").unwrap_or_else(|| format!("App {app_id}"));
+            if is_steam_tool(&name) || !seen_app.insert(app_id.clone()) {
+                continue;
+            }
+            games.push(LibraryGame {
+                name,
+                app_id: Some(app_id),
+                shortcut_id: None,
+                source: "Steam".into(),
+                last_played: extract_vdf_value(&content, "LastPlayed").and_then(|s| s.parse().ok()),
+                size_on_disk: extract_vdf_value(&content, "SizeOnDisk").and_then(|s| s.parse().ok()),
+            });
+        }
+    }
+
+    let mut seen_sc: HashSet<String> = HashSet::new();
+    for s in parse_shortcuts() {
+        let id = s.app_id.to_string();
+        if !seen_sc.insert(id.clone()) {
+            continue;
+        }
+        let trimmed = s.app_name.trim().trim_end_matches(".exe").trim();
+        let name = if trimmed.is_empty() { format!("Shortcut {id}") } else { trimmed.to_string() };
+        games.push(LibraryGame {
+            name,
+            app_id: None,
+            shortcut_id: Some(id),
+            source: "Non-Steam".into(),
+            last_played: (s.last_play > 0).then_some(s.last_play as u64),
+            size_on_disk: None,
+        });
+    }
+
+    games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    games
+}
+
+/// Steam infrastructure that isn't a launchable game (runtimes, Proton, etc.).
+fn is_steam_tool(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.starts_with("proton")
+        || n.starts_with("steam linux runtime")
+        || n.starts_with("steam runtime")
+        || n.contains("steamworks common")
+        || n == "steamvr"
+}
+
 /// Read a game's `actions.json` + a chosen binding file, as `(actions, binding)`.
 pub fn load_game_bindings(actions_path: &str, binding_path: &str) -> std::io::Result<(String, String)> {
     Ok((

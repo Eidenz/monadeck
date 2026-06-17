@@ -10,8 +10,10 @@
 mod games;
 mod gfx;
 mod mathx;
+mod monado;
 mod ui;
 
+use std::collections::HashSet;
 use std::os::raw::c_char;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -256,21 +258,20 @@ fn run() -> Result<()> {
             xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/force")?),
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick")?),
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
+            // Summon/dismiss is the LEFT system (menu) click only.
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
-            xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/right/input/system/click")?),
         ],
     )?;
     session.attach_action_sets(&[&action_set])?;
     let aim_left = aim_action.create_space(&session, left_path, xr::Posef::IDENTITY)?;
     let aim_right = aim_action.create_space(&session, right_path, xr::Posef::IDENTITY)?;
 
-    // --- Game scan (background) ---------------------------------------------
-    let (scan_tx, scan_rx) = std::sync::mpsc::channel::<Vec<games::GameEntry>>();
-    std::thread::spawn(move || {
-        let entries = games::scan();
-        log::info!("scan found {} games", entries.len());
-        let _ = scan_tx.send(entries);
-    });
+    // --- Game scan (background, metadata only) + lazy art decoder pool ------
+    let scan_rx = games::spawn_scan();
+    let art = games::ArtLoader::new();
+    // libmonado link: running-game detection, recenter, input arbitration.
+    let monado = monado::MonadoLink::new();
+    let mut favorites: HashSet<String> = monadeck_core::favorites::load();
 
     let mut st = ui::LibState::new();
 
@@ -279,7 +280,9 @@ fn run() -> Result<()> {
     let mut running = false;
     let mut focused = false;
     let mut recenter = true;
+    let mut visible = false; // default off — summon with a left system click
     let mut sys_prev = false;
+    let mut blocked_prev = false; // game-input arbitration edge state
     // (hand index, controller->panel offset) while grabbing.
     let mut grab: Option<(usize, xr::Posef)> = None;
 
@@ -323,16 +326,53 @@ fn run() -> Result<()> {
         let time = frame_state.predicted_display_time;
         let hmd = locate_pose(&view_space, &space, time);
 
-        // Drain finished scan -> upload cover textures into the panel context.
-        if let Ok(entries) = scan_rx.try_recv() {
-            st.games = games::load_into(&panel.ctx, entries);
+        // Drain the finished scan (metadata only; art loads lazily).
+        if let Ok(rows) = scan_rx.try_recv() {
+            st.games = games::to_games(rows);
+            for g in st.games.iter_mut() {
+                g.is_favorite = g.cover_id.as_ref().is_some_and(|id| favorites.contains(id));
+            }
             st.scanning = false;
             if st.selected.is_none() && !st.games.is_empty() {
                 st.selected = Some(0);
             }
         }
 
-        // Place the panel in front of the head on first frame / on recenter.
+        // --- Sync actions + summon/dismiss (left system click, rising edge) --
+        if focused {
+            session.sync_actions(&[(&action_set).into()])?;
+            let sys = system_action.state(&session, left_path)?.current_state;
+            if sys && !sys_prev {
+                visible = !visible;
+                if visible {
+                    recenter = true; // reappear in front of the head
+                    // Auto-select the running game, if any (SteamVR-style).
+                    if let Some(app) = monado.running_app() {
+                        if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, &app)) {
+                            st.selected = Some(i);
+                        }
+                    }
+                }
+            }
+            sys_prev = sys;
+        }
+
+        // Hidden: drop any input block, submit nothing, skip rendering.
+        if !visible {
+            if blocked_prev {
+                monado.set_block(false);
+                blocked_prev = false;
+            }
+            frame_stream.end(time, blend_mode, &[])?;
+            continue;
+        }
+
+        // Reflect the running game into the UI each frame.
+        st.running_index = monado
+            .running_app()
+            .and_then(|app| st.games.iter().position(|g| name_matches(&g.name, &app)));
+
+        // Place the panel in front of the head on first show / on recenter.
         if recenter {
             if let Some(h) = hmd {
                 panel.pose = front_pose(&h, CURVE_RADIUS, 0.0, 0.0);
@@ -340,21 +380,11 @@ fn run() -> Result<()> {
             }
         }
 
-        // --- Input: laser hit-test + grip-to-move ---------------------------
+        // --- Input: laser hit-test + grip-to-move (actions already synced) --
         let mut pointer: Option<(f32, f32, bool)> = None;
         let mut laser_ray: Option<(xr::Posef, f32)> = None;
         let mut scroll = (0.0f32, 0.0f32);
         if focused {
-            session.sync_actions(&[(&action_set).into()])?;
-
-            // System click (either hand, rising edge) recenters the panel.
-            let sys = system_action.state(&session, left_path)?.current_state
-                || system_action.state(&session, right_path)?.current_state;
-            if sys && !sys_prev {
-                recenter = true;
-            }
-            sys_prev = sys;
-
             // Continue an in-progress grab.
             if let Some((hand_i, offset)) = grab {
                 let (path, aim) = if hand_i == 0 { (left_path, &aim_left) } else { (right_path, &aim_right) };
@@ -398,6 +428,14 @@ fn run() -> Result<()> {
             }
         }
 
+        // Block the game's controller input while pointing at the dashboard, so
+        // the two don't fight over the same presses (edge-triggered).
+        let want_block = pointer.is_some();
+        if want_block != blocked_prev {
+            monado.set_block(want_block);
+            blocked_prev = want_block;
+        }
+
         // --- Render + submit ------------------------------------------------
         render_panel(
             &mut panel,
@@ -412,6 +450,31 @@ fn run() -> Result<()> {
             scroll,
             |ctx| ui::build(ctx, &mut st),
         )?;
+
+        // --- Lazy art: upload finished decodes, request on-screen/selected --
+        while let Some(res) = art.try_recv() {
+            if let Some(g) = st.games.get_mut(res.index) {
+                let key = format!("art-{}-{:?}", res.index, res.kind);
+                *g.art_mut(res.kind) = match res.image {
+                    Some(img) => games::ArtState::Ready(panel.ctx.load_texture(
+                        key,
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    )),
+                    None => games::ArtState::Missing,
+                };
+            }
+        }
+        let mut wants: Vec<(usize, games::ArtKind)> =
+            st.visible_now.iter().map(|&i| (i, games::ArtKind::Cover)).collect();
+        if let Some(i) = st.selected {
+            wants.push((i, games::ArtKind::Cover));
+            wants.push((i, games::ArtKind::Hero));
+            wants.push((i, games::ArtKind::Logo));
+        }
+        for (i, kind) in wants {
+            want_art(&mut st.games, i, kind, &art);
+        }
 
         if laser_ray.is_some() {
             fill_laser(&mut laser, &device, cmd, queue, fence)?;
@@ -443,11 +506,82 @@ fn run() -> Result<()> {
             if let Some(g) = st.games.get(i) {
                 launch_game(g);
             }
+            visible = false; // auto-hide the dashboard after launching
+        }
+        if st.stop_request.take().is_some() {
+            if let Some(app) = monado.running_app() {
+                stop_game(&app);
+            }
+        }
+        if let Some(i) = st.favorite_toggle_request.take() {
+            if let Some(g) = st.games.get_mut(i) {
+                g.is_favorite = !g.is_favorite;
+                if let Some(id) = &g.cover_id {
+                    if g.is_favorite {
+                        favorites.insert(id.clone());
+                    } else {
+                        favorites.remove(id);
+                    }
+                }
+                monadeck_core::favorites::save(&favorites);
+            }
         }
         if st.recenter_request {
             st.recenter_request = false;
             recenter = true;
         }
+        if st.recenter_playspace_request {
+            st.recenter_playspace_request = false;
+            monado.recenter();
+        }
+    }
+}
+
+/// Whether a catalogue game name and a libmonado client (OpenXR app) name refer
+/// to the same game — loose, since the two don't always match exactly.
+fn name_matches(game: &str, app: &str) -> bool {
+    let (g, a) = (game.to_lowercase(), app.to_lowercase());
+    !g.is_empty() && !a.is_empty() && (g == a || g.contains(&a) || a.contains(&g))
+}
+
+/// Best-effort "stop the running game". libmonado has no kill API, so we SIGTERM
+/// processes whose command line matches the app's (sanitised) name. Imperfect —
+/// a clean version needs the client PID exposed by libmonado.
+fn stop_game(app: &str) {
+    let name: String = app
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-'))
+        .collect();
+    let name = name.trim();
+    if name.len() < 3 {
+        log::warn!("stop: app name '{app}' too short to match safely");
+        return;
+    }
+    log::info!("stop: SIGTERM processes matching '{name}'");
+    let _ = Command::new("pkill")
+        .arg("-TERM")
+        .arg("-f")
+        .arg(name)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+/// Request art for one slot if it hasn't been requested yet (Idle -> Pending),
+/// or mark it Missing when the game has no art id.
+fn want_art(games: &mut [games::LibGame], i: usize, kind: games::ArtKind, loader: &games::ArtLoader) {
+    if !games[i].art(kind).is_idle() {
+        return;
+    }
+    let cover_id = games[i].cover_id.clone();
+    let slot = games[i].art_mut(kind);
+    match cover_id {
+        Some(id) => {
+            *slot = games::ArtState::Pending;
+            loader.request(i, kind, id);
+        }
+        None => *slot = games::ArtState::Missing,
     }
 }
 
@@ -466,7 +600,7 @@ fn deadzone(x: f32, y: f32) -> (f32, f32) {
 /// Launch a game via `steam://rungameid/<id>` so the user's per-game launch
 /// options (the VR wrapper) are honoured. Steam apps: id == appid. Non-Steam
 /// shortcuts: the 64-bit game id `(appid << 32) | 0x02000000`.
-fn launch_game(g: &games::LoadedGame) {
+fn launch_game(g: &games::LibGame) {
     let game_id = if let Some(id) = &g.app_id {
         id.clone()
     } else if let Some(sid) = g.shortcut_id.as_ref().and_then(|s| s.parse::<u64>().ok()) {

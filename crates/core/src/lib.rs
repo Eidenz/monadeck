@@ -17,6 +17,7 @@ pub mod cmd_runner;
 pub mod config;
 pub mod desktop;
 pub mod devices;
+pub mod favorites;
 pub mod gpu;
 pub mod launch_options;
 pub mod monado_conn;
