@@ -58,6 +58,33 @@ struct Hit {
     path: xr::Path,
 }
 
+/// An active notification: shown on its own floating layer (over a game too),
+/// auto-dismissed at `until`.
+struct ToastState {
+    title: String,
+    body: String,
+    kind: ui::ToastKind,
+    pose: xr::Posef,
+    until: Instant,
+}
+
+/// A toast tucked into the lower view (~1.3 m ahead, dropped below the gaze) so
+/// it's read at a glance without blocking what you're looking at.
+fn make_toast(
+    title: impl Into<String>,
+    body: impl Into<String>,
+    kind: ui::ToastKind,
+    hmd: &xr::Posef,
+) -> ToastState {
+    ToastState {
+        title: title.into(),
+        body: body.into(),
+        kind,
+        pose: mathx::toast_pose(hmd, 1.3, 0.42),
+        until: Instant::now() + std::time::Duration::from_secs(5),
+    }
+}
+
 unsafe extern "system" fn get_instance_proc_addr(
     instance: xr::sys::platform::VkInstance,
     name: *const c_char,
@@ -276,6 +303,12 @@ fn run() -> Result<()> {
         &session, &device, allocator.clone(), render_pass, format, srgb,
         (1640, 151), (BOTTOM_W, BOTTOM_H), anchor,
     )?;
+    // A small notification panel (timer alarm, low battery) — shows independently
+    // of the dashboard, even over a running game.
+    let mut toast_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        (720, 168), (0.44, 0.44 * 168.0 / 720.0), anchor,
+    )?;
     let mut laser = make_laser(&session, format)?;
 
     // --- Actions ------------------------------------------------------------
@@ -317,12 +350,13 @@ fn run() -> Result<()> {
     let monado = monado::MonadoLink::new();
     let ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
-    let mut audio_prev = (ov_cfg.audio_enabled, ov_cfg.audio_volume);
+    let mut settings_prev = (ov_cfg.audio_enabled, ov_cfg.audio_volume, ov_cfg.summon_tilt);
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
 
     let mut st = ui::LibState::new();
     st.audio_enabled = ov_cfg.audio_enabled;
     st.audio_volume = ov_cfg.audio_volume;
+    st.summon_tilt = ov_cfg.summon_tilt;
 
     // --- Loop state ---------------------------------------------------------
     let mut events = xr::EventDataBuffer::new();
@@ -344,6 +378,11 @@ fn run() -> Result<()> {
     // Re-scan to refresh last-played ordering when a game starts/stops.
     let mut running_app_prev: Option<String> = None;
     let mut refresh_rx: Option<std::sync::mpsc::Receiver<Vec<monadeck_core::steam::LibraryGame>>> = None;
+    // Notifications + timer (run even while the dashboard is hidden).
+    let mut toast: Option<ToastState> = None;
+    let mut timer_end: Option<Instant> = None;
+    let mut timer_paused: Option<u32> = None;
+    let mut battery_low_warned = false;
     // Lazy-art LRU: per-slot last-used frame, to evict the coldest past a cap.
     let mut frame: u64 = 0;
     let mut last_used: HashMap<(usize, games::ArtKind), u64> = HashMap::new();
@@ -452,8 +491,101 @@ fn run() -> Result<()> {
             }
         }
 
+        // --- Timer, low-battery warning, toasts (run even while hidden) ------
+        let now = Instant::now();
+        st.batteries = monado.batteries();
+
+        // Timer: start / pause / resume / reset, then count down + fire.
+        if st.timer_toggle_request {
+            st.timer_toggle_request = false;
+            if let Some(end) = timer_end.take() {
+                timer_paused = Some(end.saturating_duration_since(now).as_secs() as u32);
+            } else if let Some(p) = timer_paused.take() {
+                timer_end = Some(now + std::time::Duration::from_secs(p as u64));
+            } else if st.timer_secs > 0 {
+                timer_end = Some(now + std::time::Duration::from_secs(st.timer_secs as u64));
+                st.timer_total = st.timer_secs;
+            }
+        }
+        if st.timer_reset_request {
+            st.timer_reset_request = false;
+            timer_end = None;
+            timer_paused = None;
+        }
+        if let Some(end) = timer_end {
+            let rem = end.saturating_duration_since(now).as_secs() as u32;
+            if rem == 0 {
+                timer_end = None;
+                if let Some(h) = hmd {
+                    toast = Some(make_toast("Timer finished", "", ui::ToastKind::Timer, &h));
+                }
+                audio.alarm();
+                pulse(&session, &haptic_action, left_path, 0.7, 60);
+                pulse(&session, &haptic_action, right_path, 0.7, 60);
+                st.timer_remaining = 0;
+                st.timer_running = false;
+                st.timer_paused = false;
+            } else {
+                st.timer_remaining = rem;
+                st.timer_running = true;
+                st.timer_paused = false;
+            }
+        } else if let Some(p) = timer_paused {
+            st.timer_remaining = p;
+            st.timer_running = false;
+            st.timer_paused = true;
+        } else {
+            st.timer_remaining = st.timer_secs;
+            st.timer_running = false;
+            st.timer_paused = false;
+        }
+
+        // Low-battery warning: once per low episode, reset (hysteresis) above 20%.
+        if let Some(low) = st
+            .batteries
+            .iter()
+            .filter(|b| !b.charging)
+            .min_by(|a, b| a.charge.partial_cmp(&b.charge).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            if low.charge < 0.15 && !battery_low_warned {
+                battery_low_warned = true;
+                if let Some(h) = hmd {
+                    let kind = match low.kind {
+                        monado::BatteryKind::Glove => "Glove",
+                        monado::BatteryKind::Controller => "Controller",
+                        monado::BatteryKind::Tracker => "Tracker",
+                        monado::BatteryKind::Other => "Device",
+                    };
+                    toast = Some(make_toast(
+                        "Low battery",
+                        format!("{kind} at {}%", (low.charge * 100.0).round() as i32),
+                        ui::ToastKind::Battery,
+                        &h,
+                    ));
+                }
+                audio.alarm();
+            }
+        }
+        if !st.batteries.iter().any(|b| !b.charging && b.charge < 0.20) {
+            battery_low_warned = false;
+        }
+
+        // Expire + render the toast on its own layer (shows even over a game).
+        if toast.as_ref().map_or(false, |t| now >= t.until) {
+            toast = None;
+        }
+        let toast_active = toast.is_some();
+        if let Some(t) = &toast {
+            toast_panel.pose = t.pose;
+            render_panel(
+                &mut toast_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
+                true, None, (0.0, 0.0), start.elapsed().as_secs_f64(),
+                |ctx| ui::build_toast(ctx, &t.title, &t.body, t.kind),
+            )?;
+        }
+
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
-        // order is fresh on the next summon), drop input block, skip rendering.
+        // order is fresh on the next summon), drop input block, render only toasts.
         if !visible {
             if let Some(rx) = &refresh_rx {
                 if let Ok(rows) = rx.try_recv() {
@@ -470,7 +602,13 @@ fn run() -> Result<()> {
                 monado.set_block(false);
                 blocked_prev = false;
             }
-            frame_stream.end(time, blend_mode, &[])?;
+            let toast_q;
+            let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+            if toast_active {
+                toast_q = quad_layer(&toast_panel, &space, true);
+                layers.push(&toast_q);
+            }
+            frame_stream.end(time, blend_mode, &layers)?;
             continue;
         }
 
@@ -480,7 +618,7 @@ fn run() -> Result<()> {
         // Place the layout in front of the head on first show / on recenter.
         if recenter {
             if let Some(h) = hmd {
-                anchor = front_pose(&h, CURVE_RADIUS, 0.0, 0.0);
+                anchor = front_pose(&h, CURVE_RADIUS, 0.0, 0.0, st.summon_tilt);
                 recenter = false;
             }
         }
@@ -493,9 +631,8 @@ fn run() -> Result<()> {
         let rail_l = cyl_layout(&anchor, CURVE_RADIUS, CURVE_RADIUS - PANEL_FWD, RAIL_YAW, 0.0, RAIL_W, RAIL_H);
         let bottom_l = cyl_layout(&anchor, CURVE_RADIUS, CURVE_RADIUS - PANEL_FWD, 0.0, BOTTOM_YOFF, BOTTOM_W, BOTTOM_H);
 
-        // Bottom-bar live data.
+        // Bottom-bar clock (batteries were refreshed before the visibility gate).
         st.clock = chrono::Local::now().format("%-I:%M %p").to_string();
-        st.batteries = monado.batteries();
 
         // Summon fade-in (1 -> 0 over ~0.22 s).
         st.fade_in = summon_at.map_or(0.0, |t| (1.0 - t.elapsed().as_secs_f32() / 0.22).clamp(0.0, 1.0));
@@ -687,6 +824,11 @@ fn run() -> Result<()> {
             layers.push(&rail_quad);
             layers.push(&bottom_quad);
         }
+        let toast_q;
+        if toast_active {
+            toast_q = quad_layer(&toast_panel, &space, true);
+            layers.push(&toast_q);
+        }
         if let Some(q) = &laser_q {
             layers.push(q);
         }
@@ -717,14 +859,15 @@ fn run() -> Result<()> {
             st.sound_tab = false;
             audio.tab();
         }
-        // Sound settings changed in the Settings tab — apply live + persist.
-        if (st.audio_enabled, st.audio_volume) != audio_prev {
+        // Settings changed in the Settings tab — apply live + persist.
+        if (st.audio_enabled, st.audio_volume, st.summon_tilt) != settings_prev {
             audio.set_enabled(st.audio_enabled);
             audio.set_volume(st.audio_volume);
-            audio_prev = (st.audio_enabled, st.audio_volume);
+            settings_prev = (st.audio_enabled, st.audio_volume, st.summon_tilt);
             monadeck_core::overlay_config::OverlayConfig {
                 audio_enabled: st.audio_enabled,
                 audio_volume: st.audio_volume,
+                summon_tilt: st.summon_tilt,
             }
             .save();
         }

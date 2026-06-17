@@ -9,6 +9,7 @@ use rodio::{Decoder, OutputStream, OutputStreamHandle, Source};
 static SELECT: &[u8] = include_bytes!("../assets/sounds/select.wav");
 static LAUNCH: &[u8] = include_bytes!("../assets/sounds/launch.wav");
 static TAB: &[u8] = include_bytes!("../assets/sounds/tab.wav");
+static ALARM: &[u8] = include_bytes!("../assets/sounds/alarm.wav");
 
 pub struct Audio {
     // Kept alive for the stream to keep playing; not Send, so Audio lives on the
@@ -66,5 +67,9 @@ impl Audio {
     /// Switching a side tab / recenter (minimal blip).
     pub fn tab(&self) {
         self.play(TAB);
+    }
+    /// Toast notification / timer fired (rising chime).
+    pub fn alarm(&self) {
+        self.play(ALARM);
     }
 }

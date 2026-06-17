@@ -10,11 +10,14 @@ use std::path::PathBuf;
 pub struct OverlayConfig {
     pub audio_enabled: bool,
     pub audio_volume: f32,
+    /// Summon the dashboard tilted to match the headset's pitch (vs. always
+    /// upright facing you).
+    pub summon_tilt: bool,
 }
 
 impl Default for OverlayConfig {
     fn default() -> Self {
-        Self { audio_enabled: true, audio_volume: 0.55 }
+        Self { audio_enabled: true, audio_volume: 0.55, summon_tilt: false }
     }
 }
 

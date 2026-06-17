@@ -180,10 +180,16 @@ pub fn quat_from_axes(x: [f32; 3], y: [f32; 3], z: [f32; 3]) -> [f32; 4] {
     }
 }
 
-/// A pose `dist` metres ahead of the head, upright and facing the user.
-pub fn front_pose(h: &xr::Posef, dist: f32, lateral: f32, height: f32) -> xr::Posef {
+/// A pose `dist` metres ahead of the head, facing the user. `tilt` uses the
+/// head's own up (so the panel pitches to match your gaze) instead of world-up
+/// (always vertical).
+pub fn front_pose(h: &xr::Posef, dist: f32, lateral: f32, height: f32, tilt: bool) -> xr::Posef {
     let fwd = normalize(forward(h));
-    let up = [0.0, 1.0, 0.0];
+    let up = if tilt {
+        normalize(quat_rotate(qf(&h.orientation), [0.0, 1.0, 0.0]))
+    } else {
+        [0.0, 1.0, 0.0]
+    };
     let right = normalize(cross(fwd, up));
     let o = [h.position.x, h.position.y, h.position.z];
     let pos = [
@@ -202,6 +208,25 @@ pub fn quat_from_axis_angle(axis: [f32; 3], angle: f32) -> [f32; 4] {
     let a = normalize(axis);
     let s = (angle * 0.5).sin();
     [a[0] * s, a[1] * s, a[2] * s, (angle * 0.5).cos()]
+}
+
+/// A notification pose: `dist` ahead of the head and `drop` below the gaze (in
+/// head-local space, so it sits in the lower view at any head pitch), facing the
+/// head and tilted to match it.
+pub fn toast_pose(h: &xr::Posef, dist: f32, drop: f32) -> xr::Posef {
+    let q = qf(&h.orientation);
+    let fwd = normalize(quat_rotate(q, [0.0, 0.0, -1.0]));
+    let up = normalize(quat_rotate(q, [0.0, 1.0, 0.0]));
+    let o = [h.position.x, h.position.y, h.position.z];
+    let pos = [
+        o[0] + fwd[0] * dist - up[0] * drop,
+        o[1] + fwd[1] * dist - up[1] * drop,
+        o[2] + fwd[2] * dist - up[2] * drop,
+    ];
+    let z = normalize([o[0] - pos[0], o[1] - pos[1], o[2] - pos[2]]); // face head
+    let x = normalize(cross(up, z));
+    let y = cross(z, x);
+    xr::Posef { orientation: quatf(quat_from_axes(x, y, z)), position: vec3f(pos) }
 }
 
 /// A pose offset from `anchor` in the anchor's own frame (+X right, +Y up, +Z

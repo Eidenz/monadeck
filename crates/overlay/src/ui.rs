@@ -12,6 +12,7 @@ pub enum Nav {
     Library,
     Favorites,
     Tags,
+    Tools,
     Settings,
 }
 
@@ -42,9 +43,21 @@ pub struct LibState {
     /// One-shot UI-sound requests, drained by the loop.
     pub sound_select: bool,
     pub sound_tab: bool,
-    /// Sound settings (mirrored to/from the persisted overlay config by the loop).
+    /// Settings (mirrored to/from the persisted overlay config by the loop).
     pub audio_enabled: bool,
     pub audio_volume: f32,
+    pub summon_tilt: bool,
+    /// Timer state. `timer_secs` is the configured duration (adjusted when idle);
+    /// `timer_remaining`/`timer_running`/`timer_paused` are set by the loop; the
+    /// request flags are drained by it.
+    pub timer_secs: u32,
+    /// Duration the running countdown started from (drives the progress ring).
+    pub timer_total: u32,
+    pub timer_remaining: u32,
+    pub timer_running: bool,
+    pub timer_paused: bool,
+    pub timer_toggle_request: bool,
+    pub timer_reset_request: bool,
     /// Main panel is showing the active-game splash (toggled from the bottom bar).
     pub show_splash: bool,
     /// Device batteries + wall clock, refreshed by the loop for the bottom bar.
@@ -75,6 +88,14 @@ impl LibState {
             sound_tab: false,
             audio_enabled: true,
             audio_volume: 0.55,
+            summon_tilt: false,
+            timer_secs: 300,
+            timer_total: 300,
+            timer_remaining: 300,
+            timer_running: false,
+            timer_paused: false,
+            timer_toggle_request: false,
+            timer_reset_request: false,
             show_splash: false,
             batteries: Vec::new(),
             clock: String::new(),
@@ -88,7 +109,7 @@ const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
 /// The main (centre) panel: search bar, the active view (or active-game splash),
 /// the on-screen keyboard, and the launching/fade overlays.
 pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
-    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings);
+    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::Tools);
     if searchable && st.keyboard_open {
         keyboard(ctx, st);
     }
@@ -119,7 +140,7 @@ fn overlays(ctx: &egui::Context, st: &LibState) {
                         ui.add(egui::Spinner::new().size(34.0).color(theme::PRIMARY));
                         ui.add_space(12.0);
                         ui.label(egui::RichText::new("Launching").size(15.0).color(theme::ON_SURFACE_VAR));
-                        ui.label(egui::RichText::new(name).size(22.0).strong());
+                        ui.label(egui::RichText::new(name).size(22.0).strong().color(egui::Color32::WHITE));
                         ui.add_space(8.0);
                     });
                 });
@@ -143,6 +164,7 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
                 (icon::SQUARES_FOUR, Nav::Library),
                 (icon::STAR, Nav::Favorites),
                 (icon::TAG, Nav::Tags),
+                (icon::TIMER, Nav::Tools),
             ] {
                 let active = st.nav == nav && !st.show_splash;
                 if rail_button(ui, glyph, active).clicked() && !active {
@@ -373,6 +395,11 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
             Nav::Library => grid_view(ui, st, "Library"),
             Nav::Favorites => favorites_view(ui, st),
             Nav::Tags => tags_view(ui, st),
+            Nav::Tools => {
+                st.visible_now.clear();
+                st.hovered_index = None;
+                tools_view(ui, st);
+            }
             Nav::Settings => {
                 st.visible_now.clear();
                 st.hovered_index = None;
@@ -385,7 +412,7 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
 fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
     hero(ui, st);
     ui.add_space(14.0);
-    ui.label(egui::RichText::new("Recent Games").heading().strong());
+    ui.label(egui::RichText::new("Recent Games").heading().strong().color(egui::Color32::WHITE));
     ui.add_space(8.0);
 
     let shown = filtered(st);
@@ -422,7 +449,7 @@ fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
 }
 
 fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
-    ui.label(egui::RichText::new(title).heading().strong());
+    ui.label(egui::RichText::new(title).heading().strong().color(egui::Color32::WHITE));
     ui.add_space(10.0);
     let shown = filtered(st);
     if shown.is_empty() {
@@ -435,7 +462,7 @@ fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
 }
 
 fn favorites_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.label(egui::RichText::new("Favorites").heading().strong());
+    ui.label(egui::RichText::new("Favorites").heading().strong().color(egui::Color32::WHITE));
     ui.add_space(10.0);
     let shown: Vec<usize> = filtered(st).into_iter().filter(|&i| st.games[i].is_favorite).collect();
     if shown.is_empty() {
@@ -487,7 +514,7 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str) 
 }
 
 fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.label(egui::RichText::new("Categories").heading().strong());
+    ui.label(egui::RichText::new("Categories").heading().strong().color(egui::Color32::WHITE));
     ui.add_space(8.0);
     let shown = filtered(st);
     if shown.is_empty() {
@@ -589,6 +616,252 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
     });
 }
 
+/// A countdown timer that fires a toast + chime when it reaches zero. Centred on
+/// a circular progress ring with the time inside it.
+fn tools_view(ui: &mut egui::Ui, st: &mut LibState) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(icon::TIMER).size(28.0).color(theme::PRIMARY));
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("Timer").size(28.0).strong().color(egui::Color32::WHITE));
+    });
+    ui.add_space(6.0);
+
+    ui.vertical_centered(|ui| {
+        // Progress ring with the remaining time inside it.
+        let dim = 248.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(dim, dim), egui::Sense::hover());
+        let frac = if st.timer_running || st.timer_paused {
+            st.timer_remaining as f32 / st.timer_total.max(1) as f32
+        } else {
+            1.0
+        };
+        let accent = if st.timer_running {
+            theme::PRIMARY
+        } else if st.timer_paused {
+            FAV_GOLD
+        } else {
+            egui::Color32::from_rgb(60, 78, 80) // muted teal: armed, not running
+        };
+        timer_ring(ui.painter(), rect, frac.clamp(0.0, 1.0), accent);
+
+        // The ring is fixed-size; the time shrinks (and gains an hours field) so
+        // long durations still fit inside it.
+        let secs = st.timer_remaining;
+        let label = if secs >= 3600 {
+            format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+        } else {
+            format!("{:02}:{:02}", secs / 60, secs % 60)
+        };
+        let fs = match label.chars().count() {
+            0..=5 => 60.0,
+            6 => 50.0,
+            7 => 42.0,
+            _ => 34.0,
+        };
+        ui.painter().text(
+            rect.center() - egui::vec2(0.0, 8.0),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(fs),
+            egui::Color32::WHITE,
+        );
+        let status = if st.timer_running {
+            "running"
+        } else if st.timer_paused {
+            "paused"
+        } else {
+            "ready"
+        };
+        ui.painter().text(
+            rect.center() + egui::vec2(0.0, 42.0),
+            egui::Align2::CENTER_CENTER,
+            status,
+            egui::FontId::proportional(15.0),
+            theme::ON_SURFACE_VAR,
+        );
+
+        ui.add_space(22.0);
+
+        if !st.timer_running && !st.timer_paused {
+            centered_row(ui, 310.0, |ui| {
+                if pill(ui, "−1m", 70.0, false).clicked() {
+                    st.timer_secs = st.timer_secs.saturating_sub(60);
+                }
+                if pill(ui, "−10s", 70.0, false).clicked() {
+                    st.timer_secs = st.timer_secs.saturating_sub(10);
+                }
+                if pill(ui, "+10s", 70.0, false).clicked() {
+                    st.timer_secs = (st.timer_secs + 10).min(86_400);
+                }
+                if pill(ui, "+1m", 70.0, false).clicked() {
+                    st.timer_secs = (st.timer_secs + 60).min(86_400);
+                }
+            });
+            ui.add_space(10.0);
+            centered_row(ui, 278.0, |ui| {
+                for m in [1u32, 5, 10, 30] {
+                    let sel = st.timer_secs == m * 60;
+                    if pill(ui, &format!("{m}m"), 62.0, sel).clicked() {
+                        st.timer_secs = m * 60;
+                    }
+                }
+            });
+            ui.add_space(20.0);
+            centered_row(ui, 220.0, |ui| {
+                let start = egui::Button::new(
+                    egui::RichText::new(format!("{}  Start", icon::PLAY)).size(20.0).color(egui::Color32::BLACK),
+                )
+                .fill(theme::PRIMARY)
+                .corner_radius(12)
+                .min_size(egui::vec2(220.0, 54.0));
+                if st.timer_secs > 0 && ui.add(start).clicked() {
+                    st.timer_toggle_request = true;
+                    st.sound_tab = true;
+                }
+            });
+        } else {
+            centered_row(ui, 350.0, |ui| {
+                let (label, glyph) = if st.timer_running {
+                    ("Pause", icon::PAUSE)
+                } else {
+                    ("Resume", icon::PLAY)
+                };
+                let toggle = egui::Button::new(
+                    egui::RichText::new(format!("{glyph}  {label}")).size(19.0).color(egui::Color32::BLACK),
+                )
+                .fill(theme::PRIMARY)
+                .corner_radius(12)
+                .min_size(egui::vec2(170.0, 52.0));
+                if ui.add(toggle).clicked() {
+                    st.timer_toggle_request = true;
+                    st.sound_tab = true;
+                }
+                let reset = egui::Button::new(
+                    egui::RichText::new(format!("{}  Reset", icon::ARROW_COUNTER_CLOCKWISE)).size(19.0).color(theme::ON_SURFACE),
+                )
+                .fill(theme::SURFACE_CONTAINER_HIGH)
+                .corner_radius(12)
+                .min_size(egui::vec2(170.0, 52.0));
+                if ui.add(reset).clicked() {
+                    st.timer_reset_request = true;
+                    st.sound_tab = true;
+                }
+            });
+        }
+    });
+}
+
+/// Lay out `content` as a horizontal row centred within the available width.
+fn centered_row(ui: &mut egui::Ui, total_w: f32, content: impl FnOnce(&mut egui::Ui)) {
+    let pad = ((ui.available_width() - total_w) * 0.5).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(pad);
+        ui.spacing_mut().item_spacing.x = 10.0;
+        content(ui);
+    });
+}
+
+/// A circular track with a progress arc sweeping clockwise from 12 o'clock,
+/// rounded at both ends.
+fn timer_ring(painter: &egui::Painter, rect: egui::Rect, frac: f32, accent: egui::Color32) {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let center = rect.center();
+    let radius = rect.width().min(rect.height()) * 0.5 - 14.0;
+    let width = 15.0;
+    painter.circle_stroke(center, radius, egui::Stroke::new(width, egui::Color32::from_rgb(34, 40, 48)));
+    if frac <= 0.0 {
+        return;
+    }
+    let start = -FRAC_PI_2;
+    let sweep = frac * TAU;
+    let n = 96;
+    let pts: Vec<egui::Pos2> = (0..=n)
+        .map(|i| {
+            let a = start + sweep * (i as f32 / n as f32);
+            egui::pos2(center.x + radius * a.cos(), center.y + radius * a.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(pts, egui::Stroke::new(width, accent)));
+    // Rounded caps at both ends.
+    let cap = |a: f32| egui::pos2(center.x + radius * a.cos(), center.y + radius * a.sin());
+    painter.circle_filled(cap(start), width * 0.5, accent);
+    painter.circle_filled(cap(start + sweep), width * 0.5, accent);
+}
+
+fn pill(ui: &mut egui::Ui, label: &str, w: f32, selected: bool) -> egui::Response {
+    let (fg, fill) = if selected {
+        (egui::Color32::BLACK, theme::PRIMARY)
+    } else {
+        (theme::ON_SURFACE, theme::SURFACE_CONTAINER_HIGH)
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(16.0).color(fg))
+            .fill(fill)
+            .corner_radius(10)
+            .min_size(egui::vec2(w, 42.0)),
+    )
+}
+
+/// Per-notification icon + accent colour.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // `Info` is the generic fallback for future toasts.
+pub enum ToastKind {
+    Timer,
+    Battery,
+    Info,
+}
+
+impl ToastKind {
+    fn style(self) -> (&'static str, egui::Color32) {
+        match self {
+            ToastKind::Timer => (icon::TIMER, theme::PRIMARY),
+            ToastKind::Battery => (icon::BATTERY_WARNING, FAV_GOLD),
+            ToastKind::Info => (icon::BELL_RINGING, theme::PRIMARY),
+        }
+    }
+}
+
+/// The floating notification card (its own layer; shows over a game too). The
+/// quad is cleared transparent, so the card hugs its content and floats centred.
+pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind) {
+    let (glyph, accent) = kind.style();
+    let card = egui::Frame::default()
+        .fill(egui::Color32::from_rgb(24, 28, 35))
+        .corner_radius(20)
+        .inner_margin(egui::Margin::symmetric(20, 16))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(46, 54, 64)));
+    egui::Area::new(egui::Id::new("toast-card"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            card.show(ui, |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // Tinted icon chip.
+                    let (chip, _) = ui.allocate_exact_size(egui::vec2(52.0, 52.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        chip,
+                        egui::CornerRadius::same(14),
+                        egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38),
+                    );
+                    ui.painter().text(
+                        chip.center(),
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        egui::FontId::proportional(27.0),
+                        accent,
+                    );
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(title).size(21.0).strong().color(egui::Color32::WHITE));
+                        if !body.is_empty() {
+                            ui.add_space(3.0);
+                            ui.label(egui::RichText::new(body).size(15.0).color(theme::ON_SURFACE_VAR));
+                        }
+                    });
+                });
+            });
+        });
+}
+
 fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     ui.label(egui::RichText::new("Settings").size(30.0).strong().color(egui::Color32::WHITE));
     ui.add_space(18.0);
@@ -608,6 +881,11 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
         egui::RichText::new("Brings the panel back in front of you. Grip to grab and move it.")
             .size(14.0)
             .color(theme::ON_SURFACE_VAR),
+    );
+    ui.add_space(10.0);
+    ui.checkbox(
+        &mut st.summon_tilt,
+        egui::RichText::new("Tilt to match headset angle on summon").size(16.0).color(theme::ON_SURFACE),
     );
 
     ui.add_space(24.0);
