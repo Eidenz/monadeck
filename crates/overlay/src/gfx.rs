@@ -192,6 +192,7 @@ pub fn render_panel(
     fence: vk::Fence,
     alpha_mode: bool,
     pointer: Option<(f32, f32, bool)>,
+    scroll: (f32, f32),
     mut build: impl FnMut(&egui::Context),
 ) -> Result<()> {
     let pos = pointer.map(|(u, v, _)| egui::pos2(u * p.px.0 as f32 / PPP, v * p.px.1 as f32 / PPP));
@@ -202,6 +203,16 @@ pub fn render_panel(
         events.push(egui::Event::PointerMoved(ps));
     } else if p.prev_pos.is_some() {
         events.push(egui::Event::PointerGone);
+    }
+    // Thumbstick scroll, routed to whatever ScrollArea is under the pointer.
+    // Stick up/right => content scrolls toward earlier/left, like a real wheel.
+    if pos.is_some() && (scroll.0 != 0.0 || scroll.1 != 0.0) {
+        const SPEED: f32 = 14.0;
+        events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(scroll.0 * SPEED, scroll.1 * SPEED),
+            modifiers: egui::Modifiers::default(),
+        });
     }
     if down != p.prev_down {
         if let Some(ps) = pos.or(p.prev_pos) {

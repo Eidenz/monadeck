@@ -26,6 +26,8 @@ pub struct LibState {
     pub launch_request: Option<usize>,
     /// Set by `build` when the user asks to recenter the panel.
     pub recenter_request: bool,
+    /// On-panel virtual keyboard visible (no physical keyboard in VR).
+    pub keyboard_open: bool,
 }
 
 impl LibState {
@@ -38,6 +40,7 @@ impl LibState {
             selected: None,
             launch_request: None,
             recenter_request: false,
+            keyboard_open: false,
         }
     }
 }
@@ -46,9 +49,14 @@ const TILE_W: f32 = 168.0;
 const TILE_H: f32 = 252.0; // 2:3 portrait capsule, like Steam's grid.
 
 pub fn build(ctx: &egui::Context, st: &mut LibState) {
+    let searchable = !matches!(st.nav, Nav::Settings);
     left_rail(ctx, st);
     bottom_bar(ctx, st);
-    if !matches!(st.nav, Nav::Settings) {
+    // Keyboard panel sits just above the status bar (added after it).
+    if searchable && st.keyboard_open {
+        keyboard(ctx, st);
+    }
+    if searchable {
         top_bar(ctx, st);
     }
     central(ctx, st);
@@ -106,12 +114,24 @@ fn top_bar(ctx: &egui::Context, st: &mut LibState) {
         ui.horizontal_centered(|ui| {
             ui.label(egui::RichText::new(icon::MAGNIFYING_GLASS).size(20.0).color(theme::ON_SURFACE_VAR));
             ui.add_space(8.0);
-            ui.add_sized(
-                egui::vec2(ui.available_width() - 8.0, 30.0),
+            // Keyboard toggle on the right; text field fills the middle.
+            let kbd_w = 46.0;
+            let resp = ui.add_sized(
+                egui::vec2(ui.available_width() - kbd_w - 10.0, 30.0),
                 egui::TextEdit::singleline(&mut st.search)
                     .hint_text("Search for games…")
                     .frame(false),
             );
+            if resp.clicked() || resp.gained_focus() {
+                st.keyboard_open = true;
+            }
+            ui.add_space(8.0);
+            let kbd = egui::Button::new(egui::RichText::new(icon::KEYBOARD).size(20.0))
+                .min_size(egui::vec2(kbd_w, 36.0))
+                .fill(if st.keyboard_open { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH });
+            if ui.add(kbd).clicked() {
+                st.keyboard_open = !st.keyboard_open;
+            }
         });
     });
 }
@@ -135,6 +155,69 @@ fn bottom_bar(ctx: &egui::Context, st: &LibState) {
             });
         });
     });
+}
+
+// --- on-panel virtual keyboard ----------------------------------------------
+
+fn keyboard(ctx: &egui::Context, st: &mut LibState) {
+    let frame = egui::Frame::default()
+        .fill(egui::Color32::from_rgb(13, 16, 20))
+        .inner_margin(egui::Margin::symmetric(14, 12));
+    egui::TopBottomPanel::bottom("keyboard").frame(frame).show(ctx, |ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        for row in ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"] {
+            key_row(ui, row, &mut st.search);
+        }
+        // Function row: backspace · space · clear · done.
+        let sp = 6.0;
+        let total = 96.0 + 240.0 + 96.0 + 110.0 + 3.0 * sp;
+        let pad = ((ui.available_width() - total) * 0.5).max(0.0);
+        ui.horizontal(|ui| {
+            ui.add_space(pad);
+            ui.spacing_mut().item_spacing.x = sp;
+            if fkey(ui, &format!("{}  Back", icon::BACKSPACE), 96.0, false).clicked() {
+                st.search.pop();
+            }
+            if fkey(ui, "Space", 240.0, false).clicked() {
+                st.search.push(' ');
+            }
+            if fkey(ui, "Clear", 96.0, false).clicked() {
+                st.search.clear();
+            }
+            if fkey(ui, "Done", 110.0, true).clicked() {
+                st.keyboard_open = false;
+            }
+        });
+    });
+}
+
+/// A centered row of single-character keys that append to `target`.
+fn key_row(ui: &mut egui::Ui, chars: &str, target: &mut String) {
+    let (kw, sp) = (44.0, 6.0);
+    let n = chars.chars().count() as f32;
+    let total = n * kw + (n - 1.0).max(0.0) * sp;
+    let pad = ((ui.available_width() - total) * 0.5).max(0.0);
+    ui.horizontal(|ui| {
+        ui.add_space(pad);
+        ui.spacing_mut().item_spacing.x = sp;
+        for ch in chars.chars() {
+            let key = egui::Button::new(egui::RichText::new(ch.to_string()).size(18.0))
+                .min_size(egui::vec2(kw, 44.0));
+            if ui.add(key).clicked() {
+                target.push(ch);
+            }
+        }
+    });
+}
+
+fn fkey(ui: &mut egui::Ui, label: &str, w: f32, accent: bool) -> egui::Response {
+    let text = egui::RichText::new(label).size(16.0);
+    let text = if accent { text.color(egui::Color32::BLACK) } else { text };
+    let mut btn = egui::Button::new(text).min_size(egui::vec2(w, 44.0));
+    if accent {
+        btn = btn.fill(theme::PRIMARY);
+    }
+    ui.add(btn)
 }
 
 // --- central views ----------------------------------------------------------

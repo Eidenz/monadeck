@@ -242,6 +242,7 @@ fn run() -> Result<()> {
     let aim_action = action_set.create_action::<xr::Posef>("aim", "Aim pose", &[left_path, right_path])?;
     let select_action = action_set.create_action::<f32>("select", "Select", &[left_path, right_path])?;
     let grab_action = action_set.create_action::<f32>("grab", "Grab", &[left_path, right_path])?;
+    let scroll_action = action_set.create_action::<xr::Vector2f>("scroll", "Scroll", &[left_path, right_path])?;
     let system_action = action_set.create_action::<bool>("recenter", "Recenter panel", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
     xr_instance.suggest_interaction_profile_bindings(
@@ -253,6 +254,8 @@ fn run() -> Result<()> {
             xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/right/input/trigger/value")?),
             xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/left/input/squeeze/force")?),
             xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/force")?),
+            xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick")?),
+            xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/right/input/system/click")?),
         ],
@@ -340,6 +343,7 @@ fn run() -> Result<()> {
         // --- Input: laser hit-test + grip-to-move ---------------------------
         let mut pointer: Option<(f32, f32, bool)> = None;
         let mut laser_ray: Option<(xr::Posef, f32)> = None;
+        let mut scroll = (0.0f32, 0.0f32);
         if focused {
             session.sync_actions(&[(&action_set).into()])?;
 
@@ -386,6 +390,9 @@ fn run() -> Result<()> {
                         let down = select_action.state(&session, path)?.current_state > 0.5;
                         pointer = Some((u, v, down));
                         laser_ray = Some((p, t));
+                        // Thumbstick on the pointing hand scrolls the list.
+                        let s = scroll_action.state(&session, path)?.current_state;
+                        scroll = deadzone(s.x, s.y);
                     }
                 }
             }
@@ -402,6 +409,7 @@ fn run() -> Result<()> {
             fence,
             alpha_mode,
             pointer,
+            scroll,
             |ctx| ui::build(ctx, &mut st),
         )?;
 
@@ -441,6 +449,18 @@ fn run() -> Result<()> {
             recenter = true;
         }
     }
+}
+
+/// Apply a radial deadzone + rescale to a thumbstick reading, so a resting stick
+/// reads zero and the live range stays full-throw.
+fn deadzone(x: f32, y: f32) -> (f32, f32) {
+    const DZ: f32 = 0.2;
+    let mag = (x * x + y * y).sqrt();
+    if mag < DZ {
+        return (0.0, 0.0);
+    }
+    let scale = ((mag - DZ) / (1.0 - DZ)) / mag;
+    (x * scale, y * scale)
 }
 
 /// Launch a game via `steam://rungameid/<id>` so the user's per-game launch
