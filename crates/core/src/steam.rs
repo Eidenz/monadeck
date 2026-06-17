@@ -287,6 +287,34 @@ pub fn game_hero_bytes(cover_id: &str) -> Option<(Vec<u8>, bool)> {
     None
 }
 
+/// The transparent logo/wordmark art for a game, to overlay on the hero banner
+/// (SteamVR-style). Non-Steam: `grid/<id>_logo.png`. Steam: `librarycache/<id>/logo.png`.
+pub fn game_logo_bytes(cover_id: &str) -> Option<(Vec<u8>, bool)> {
+    if cover_id.is_empty() {
+        return None;
+    }
+    for grid in steam_grid_dirs() {
+        for (name, is_png) in [
+            (format!("{cover_id}_logo.png"), true),
+            (format!("{cover_id}_logo.jpg"), false),
+        ] {
+            if let Ok(data) = fs::read(grid.join(&name)) {
+                return Some((data, is_png));
+            }
+        }
+    }
+    let h = home();
+    for rel in [
+        format!(".steam/steam/appcache/librarycache/{cover_id}/logo.png"),
+        format!(".local/share/Steam/appcache/librarycache/{cover_id}/logo.png"),
+    ] {
+        if let Ok(data) = fs::read(h.join(&rel)) {
+            return Some((data, true));
+        }
+    }
+    None
+}
+
 pub fn set_custom_cover(game_key: &str, image_path: &str) -> std::io::Result<()> {
     let covers = covers_dir();
     fs::create_dir_all(&covers)?;

@@ -18,6 +18,8 @@ pub struct GameEntry {
     pub cover: Option<egui::ColorImage>,
     /// Landscape banner art for the hero, when available.
     pub hero: Option<egui::ColorImage>,
+    /// Transparent logo/wordmark to overlay on the hero banner.
+    pub logo: Option<egui::ColorImage>,
 }
 
 /// A game ready to draw: cover uploaded as a texture in the panel's egui context.
@@ -33,6 +35,7 @@ pub struct LoadedGame {
     pub last_played: Option<u64>,
     pub texture: Option<egui::TextureHandle>,
     pub hero: Option<egui::TextureHandle>,
+    pub logo: Option<egui::TextureHandle>,
 }
 
 /// Scan all libraries and pre-decode cover art, ordered most-recently-played
@@ -45,6 +48,7 @@ pub fn scan() -> Vec<GameEntry> {
             let cover_id = g.app_id.clone().or_else(|| g.shortcut_id.clone());
             let cover = cover_id.as_deref().and_then(decode_cover);
             let hero = cover_id.as_deref().and_then(decode_hero);
+            let logo = cover_id.as_deref().and_then(decode_logo);
             GameEntry {
                 name: g.name,
                 app_id: g.app_id,
@@ -54,6 +58,7 @@ pub fn scan() -> Vec<GameEntry> {
                 last_played: g.last_played,
                 cover,
                 hero,
+                logo,
             }
         })
         .collect();
@@ -81,6 +86,12 @@ fn decode_hero(cover_id: &str) -> Option<egui::ColorImage> {
     decode_scaled(&bytes, 900, 360)
 }
 
+/// Decode the transparent logo/wordmark (preserves alpha).
+fn decode_logo(cover_id: &str) -> Option<egui::ColorImage> {
+    let (bytes, _is_png) = steam::game_logo_bytes(cover_id)?;
+    decode_scaled(&bytes, 520, 320)
+}
+
 fn decode_scaled(bytes: &[u8], max_w: u32, max_h: u32) -> Option<egui::ColorImage> {
     let img = image::load_from_memory(bytes).ok()?;
     let img = img.thumbnail(max_w, max_h);
@@ -106,6 +117,9 @@ pub fn load_into(ctx: &egui::Context, entries: Vec<GameEntry>) -> Vec<LoadedGame
             let hero = e.hero.map(|img| {
                 ctx.load_texture(format!("hero-{key}"), img, egui::TextureOptions::LINEAR)
             });
+            let logo = e.logo.map(|img| {
+                ctx.load_texture(format!("logo-{key}"), img, egui::TextureOptions::LINEAR)
+            });
             LoadedGame {
                 name: e.name,
                 app_id: e.app_id,
@@ -115,6 +129,7 @@ pub fn load_into(ctx: &egui::Context, entries: Vec<GameEntry>) -> Vec<LoadedGame
                 last_played: e.last_played,
                 texture,
                 hero,
+                logo,
             }
         })
         .collect()

@@ -415,20 +415,52 @@ fn hero_landscape(ui: &mut egui::Ui, g: &LoadedGame) -> bool {
             egui::Color32::from_black_alpha(alpha),
         );
     }
-    painter.text(
-        egui::pos2(rect.left() + 22.0, rect.bottom() - 54.0),
-        egui::Align2::LEFT_BOTTOM,
-        sub_label(g),
-        egui::FontId::proportional(14.0),
-        theme::ON_SURFACE_VAR,
-    );
-    painter.text(
-        egui::pos2(rect.left() + 20.0, rect.bottom() - 20.0),
-        egui::Align2::LEFT_BOTTOM,
-        &g.name,
-        egui::FontId::proportional(30.0),
-        egui::Color32::WHITE,
-    );
+    // Title: the game's logo/wordmark art (SteamVR-style) when we have it, with
+    // the source/last-played line beneath; otherwise plain text.
+    if let Some(logo) = g.logo.as_ref() {
+        let [lw, lh] = logo.size();
+        let aspect = lw as f32 / lh.max(1) as f32;
+        let max_h = (h * 0.40).min(110.0);
+        let max_w = w * 0.42;
+        let mut dh = max_h;
+        let mut dw = dh * aspect;
+        if dw > max_w {
+            dw = max_w;
+            dh = dw / aspect;
+        }
+        let logo_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + 22.0, rect.bottom() - 34.0 - dh),
+            egui::vec2(dw, dh),
+        );
+        painter.image(
+            logo.id(),
+            logo_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        painter.text(
+            egui::pos2(rect.left() + 24.0, rect.bottom() - 12.0),
+            egui::Align2::LEFT_BOTTOM,
+            sub_label(g),
+            egui::FontId::proportional(13.0),
+            theme::ON_SURFACE_VAR,
+        );
+    } else {
+        painter.text(
+            egui::pos2(rect.left() + 22.0, rect.bottom() - 54.0),
+            egui::Align2::LEFT_BOTTOM,
+            sub_label(g),
+            egui::FontId::proportional(14.0),
+            theme::ON_SURFACE_VAR,
+        );
+        painter.text(
+            egui::pos2(rect.left() + 20.0, rect.bottom() - 20.0),
+            egui::Align2::LEFT_BOTTOM,
+            &g.name,
+            egui::FontId::proportional(30.0),
+            egui::Color32::WHITE,
+        );
+    }
 
     let play_rect = egui::Rect::from_min_size(
         egui::pos2(rect.right() - 16.0 - 150.0, rect.bottom() - 16.0 - 46.0),
