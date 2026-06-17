@@ -10,6 +10,7 @@ use crate::gfx::theme;
 pub enum Nav {
     Home,
     Library,
+    Favorites,
     Tags,
     Settings,
 }
@@ -25,6 +26,8 @@ pub struct LibState {
     pub visible_now: Vec<usize>,
     /// Index of the currently-running game in `games`, if it's in the catalogue.
     pub running_index: Option<usize>,
+    /// Index of the tile under the pointer this frame (drives hover haptics).
+    pub hovered_index: Option<usize>,
     pub launch_request: Option<usize>,
     pub stop_request: Option<usize>,
     pub favorite_toggle_request: Option<usize>,
@@ -48,6 +51,7 @@ impl LibState {
             selected: None,
             visible_now: Vec::new(),
             running_index: None,
+            hovered_index: None,
             launch_request: None,
             stop_request: None,
             favorite_toggle_request: None,
@@ -123,6 +127,7 @@ fn left_rail(ctx: &egui::Context, st: &mut LibState) {
                 for (glyph, nav) in [
                     (icon::HOUSE, Nav::Home),
                     (icon::SQUARES_FOUR, Nav::Library),
+                    (icon::STAR, Nav::Favorites),
                     (icon::TAG, Nav::Tags),
                 ] {
                     if rail_button(ui, glyph, st.nav == nav).clicked() {
@@ -283,9 +288,11 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
         match st.nav {
             Nav::Home => home_view(ui, st),
             Nav::Library => grid_view(ui, st, "Library"),
+            Nav::Favorites => favorites_view(ui, st),
             Nav::Tags => tags_view(ui, st),
             Nav::Settings => {
                 st.visible_now.clear();
+                st.hovered_index = None;
                 settings_view(ui, st);
             }
         }
@@ -301,16 +308,20 @@ fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
     let shown = filtered(st);
     if shown.is_empty() {
         st.visible_now.clear();
+        st.hovered_index = None;
         empty_note(ui, st);
         return;
     }
-    let (mut visible, mut newly) = (Vec::new(), None);
+    let (mut visible, mut newly, mut hovered) = (Vec::new(), None, None);
     egui::ScrollArea::horizontal().id_salt("home-row").show(ui, |ui| {
         ui.horizontal(|ui| {
             for &i in &shown {
                 let r = tile(ui, &st.games[i], st.selected == Some(i), st.running_index == Some(i));
                 if ui.is_rect_visible(r.rect) {
                     visible.push(i);
+                }
+                if r.hovered() {
+                    hovered = Some(i);
                 }
                 if r.clicked() {
                     newly = Some(i);
@@ -320,6 +331,7 @@ fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
         });
     });
     st.visible_now = visible;
+    st.hovered_index = hovered;
     if newly.is_some() {
         st.selected = newly;
     }
@@ -331,16 +343,44 @@ fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
     let shown = filtered(st);
     if shown.is_empty() {
         st.visible_now.clear();
+        st.hovered_index = None;
         empty_note(ui, st);
         return;
     }
-    let (mut visible, mut newly, mut launch) = (Vec::new(), None, None);
-    egui::ScrollArea::vertical().id_salt("grid").show(ui, |ui| {
+    game_grid(ui, st, &shown, "grid");
+}
+
+fn favorites_view(ui: &mut egui::Ui, st: &mut LibState) {
+    ui.label(egui::RichText::new("Favorites").heading().strong());
+    ui.add_space(10.0);
+    let shown: Vec<usize> = filtered(st).into_iter().filter(|&i| st.games[i].is_favorite).collect();
+    if shown.is_empty() {
+        st.visible_now.clear();
+        st.hovered_index = None;
+        ui.add_space(50.0);
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new(format!("{}  No favorites yet", icon::STAR)).size(18.0).color(theme::ON_SURFACE_VAR));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Tap the ★ on a game to pin it here.").small().color(theme::ON_SURFACE_VAR));
+        });
+        return;
+    }
+    game_grid(ui, st, &shown, "favs");
+}
+
+/// A vertical wrapped grid of the given game indices, with hover/select/launch
+/// tracking. Shared by Library + Favorites.
+fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str) {
+    let (mut visible, mut newly, mut launch, mut hovered) = (Vec::new(), None, None, None);
+    egui::ScrollArea::vertical().id_salt(salt).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            for &i in &shown {
+            for &i in shown {
                 let r = tile(ui, &st.games[i], st.selected == Some(i), st.running_index == Some(i));
                 if ui.is_rect_visible(r.rect) {
                     visible.push(i);
+                }
+                if r.hovered() {
+                    hovered = Some(i);
                 }
                 if r.clicked() {
                     newly = Some(i);
@@ -352,6 +392,7 @@ fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
         });
     });
     st.visible_now = visible;
+    st.hovered_index = hovered;
     if newly.is_some() {
         st.selected = newly;
     }
@@ -366,15 +407,15 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
     let shown = filtered(st);
     if shown.is_empty() {
         st.visible_now.clear();
+        st.hovered_index = None;
         empty_note(ui, st);
         return;
     }
-    let groups: [(&str, fn(&LibGame) -> bool); 3] = [
-        ("★ Favorites", |g| g.is_favorite),
-        ("Steam", |g| g.source == "Steam" && !g.is_favorite),
-        ("Non-Steam", |g| g.source == "Non-Steam" && !g.is_favorite),
+    let groups: [(&str, fn(&LibGame) -> bool); 2] = [
+        ("Steam", |g| g.source == "Steam"),
+        ("Non-Steam", |g| g.source == "Non-Steam"),
     ];
-    let (mut visible, mut newly) = (Vec::new(), None);
+    let (mut visible, mut newly, mut hovered) = (Vec::new(), None, None);
     egui::ScrollArea::vertical().id_salt("tags").show(ui, |ui| {
         for (label, pred) in groups {
             let group: Vec<usize> = shown.iter().copied().filter(|&i| pred(&st.games[i])).collect();
@@ -390,6 +431,9 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
                     if ui.is_rect_visible(r.rect) {
                         visible.push(i);
                     }
+                    if r.hovered() {
+                        hovered = Some(i);
+                    }
                     if r.clicked() {
                         newly = Some(i);
                     }
@@ -399,6 +443,7 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
         }
     });
     st.visible_now = visible;
+    st.hovered_index = hovered;
     if newly.is_some() {
         st.selected = newly;
     }

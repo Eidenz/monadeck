@@ -425,15 +425,34 @@ pub fn game_cover_bytes(cover_id: &str, game_key: Option<&str>) -> Option<(Vec<u
             }
         }
     }
-    // 3. Official Steam library cache (real Steam apps only).
-    let h = home();
-    let candidates = [
-        h.join(format!(".steam/steam/appcache/librarycache/{cover_id}/library_600x900.jpg")),
-        h.join(format!(".local/share/Steam/appcache/librarycache/{cover_id}/library_600x900.jpg")),
-    ];
-    for path in &candidates {
-        if let Ok(data) = fs::read(path) {
-            return Some((data, false));
+    // 3. Official Steam library cache — old `library_600x900.jpg` or the newer
+    //    content-addressed `library_capsule.jpg` (in a sha1 subdir).
+    librarycache_read(cover_id, &["library_600x900.jpg", "library_capsule.jpg"])
+}
+
+/// Read a named asset from a game's Steam library cache, handling BOTH the old
+/// layout (`librarycache/<appid>/<name>`) and the new content-addressed one
+/// (`librarycache/<appid>/<sha1>/<name>`). Returns `(bytes, is_png)`.
+fn librarycache_read(app_id: &str, names: &[&str]) -> Option<(Vec<u8>, bool)> {
+    for root in find_steam_roots() {
+        let dir = root.join("appcache").join("librarycache").join(app_id);
+        if !dir.is_dir() {
+            continue;
+        }
+        for name in names {
+            let is_png = name.ends_with(".png");
+            if let Ok(data) = fs::read(dir.join(name)) {
+                return Some((data, is_png));
+            }
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for e in entries.flatten() {
+                    if e.path().is_dir() {
+                        if let Ok(data) = fs::read(e.path().join(name)) {
+                            return Some((data, is_png));
+                        }
+                    }
+                }
+            }
         }
     }
     None
@@ -469,19 +488,8 @@ pub fn game_hero_bytes(cover_id: &str) -> Option<(Vec<u8>, bool)> {
             }
         }
     }
-    // Official Steam library cache (real Steam apps).
-    let h = home();
-    for rel in [
-        format!(".steam/steam/appcache/librarycache/{cover_id}/library_hero.jpg"),
-        format!(".local/share/Steam/appcache/librarycache/{cover_id}/library_hero.jpg"),
-        format!(".steam/steam/appcache/librarycache/{cover_id}/header.jpg"),
-        format!(".local/share/Steam/appcache/librarycache/{cover_id}/header.jpg"),
-    ] {
-        if let Ok(data) = fs::read(h.join(&rel)) {
-            return Some((data, false));
-        }
-    }
-    None
+    // Official Steam library cache (old direct names + new sha1-subdir layout).
+    librarycache_read(cover_id, &["library_hero.jpg", "header.jpg", "library_header.jpg"])
 }
 
 /// The transparent logo/wordmark art for a game, to overlay on the hero banner
@@ -500,16 +508,7 @@ pub fn game_logo_bytes(cover_id: &str) -> Option<(Vec<u8>, bool)> {
             }
         }
     }
-    let h = home();
-    for rel in [
-        format!(".steam/steam/appcache/librarycache/{cover_id}/logo.png"),
-        format!(".local/share/Steam/appcache/librarycache/{cover_id}/logo.png"),
-    ] {
-        if let Ok(data) = fs::read(h.join(&rel)) {
-            return Some((data, true));
-        }
-    }
-    None
+    librarycache_read(cover_id, &["logo.png"])
 }
 
 pub fn set_custom_cover(game_key: &str, image_path: &str) -> std::io::Result<()> {

@@ -247,6 +247,7 @@ fn run() -> Result<()> {
     let grab_action = action_set.create_action::<f32>("grab", "Grab", &[left_path, right_path])?;
     let scroll_action = action_set.create_action::<xr::Vector2f>("scroll", "Scroll", &[left_path, right_path])?;
     let system_action = action_set.create_action::<bool>("recenter", "Recenter panel", &[left_path, right_path])?;
+    let haptic_action = action_set.create_action::<xr::Haptic>("haptic", "Haptic tick", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
     xr_instance.suggest_interaction_profile_bindings(
         index_profile,
@@ -261,6 +262,8 @@ fn run() -> Result<()> {
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
             // Summon/dismiss is the LEFT system (menu) click only.
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
+            xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
+            xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
         ],
     )?;
     session.attach_action_sets(&[&action_set])?;
@@ -289,6 +292,8 @@ fn run() -> Result<()> {
     let start = Instant::now(); // egui clock (animations)
     let mut summon_at: Option<Instant> = None; // summon fade-in
     let mut launching_until: Option<Instant> = None; // "Launching…" hold before hide
+    let mut click_prev = false; // haptic click edge
+    let mut hover_prev: Option<usize> = None; // haptic hover edge
     // Lazy-art LRU: per-slot last-used frame, to evict the coldest past a cap.
     let mut frame: u64 = 0;
     let mut last_used: HashMap<(usize, games::ArtKind), u64> = HashMap::new();
@@ -407,6 +412,7 @@ fn run() -> Result<()> {
         let mut pointer: Option<(f32, f32, bool)> = None;
         let mut laser_ray: Option<(xr::Posef, f32)> = None;
         let mut scroll = (0.0f32, 0.0f32);
+        let mut point_path: Option<xr::Path> = None; // pointing hand, for haptics
         if focused {
             // Continue an in-progress grab.
             if let Some((hand_i, offset)) = grab {
@@ -443,6 +449,7 @@ fn run() -> Result<()> {
                         let down = select_action.state(&session, path)?.current_state > 0.5;
                         pointer = Some((u, v, down));
                         laser_ray = Some((p, t));
+                        point_path = Some(path);
                         // Thumbstick on the pointing hand scrolls the list.
                         let s = scroll_action.state(&session, path)?.current_state;
                         scroll = deadzone(s.x, s.y);
@@ -531,6 +538,21 @@ fn run() -> Result<()> {
             }
         }
 
+        // --- Haptics: firm tick on click, light tick on hovering a new game --
+        if let Some(path) = point_path {
+            let down = pointer.is_some_and(|(_, _, d)| d);
+            if down && !click_prev {
+                pulse(&session, &haptic_action, path, 0.5, 28);
+            }
+            click_prev = down;
+            if st.hovered_index.is_some() && st.hovered_index != hover_prev {
+                pulse(&session, &haptic_action, path, 0.16, 9);
+            }
+        } else {
+            click_prev = false;
+        }
+        hover_prev = st.hovered_index;
+
         if laser_ray.is_some() {
             fill_laser(&mut laser, &device, cmd, queue, fence)?;
         }
@@ -592,6 +614,21 @@ fn run() -> Result<()> {
             monado.recenter();
         }
     }
+}
+
+/// Fire a haptic tick on a controller (`amplitude` 0..1, `millis` duration).
+fn pulse(
+    session: &xr::Session<xr::Vulkan>,
+    haptic: &xr::Action<xr::Haptic>,
+    hand: xr::Path,
+    amplitude: f32,
+    millis: u64,
+) {
+    let v = xr::HapticVibration::new()
+        .amplitude(amplitude)
+        .frequency(0.0)
+        .duration(xr::Duration::from_nanos((millis * 1_000_000) as i64));
+    let _ = haptic.apply_feedback(session, hand, &v);
 }
 
 /// Whether a catalogue game name and a libmonado client (OpenXR app) name refer
