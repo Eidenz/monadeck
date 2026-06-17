@@ -7,7 +7,10 @@ use ash::vk;
 use ash::vk::Handle as _;
 use openxr as xr;
 
-use crate::mathx::{cross, forward, normalize, qf, quat_from_axes, quat_rotate, quatf, vec3f};
+use crate::mathx::{
+    cross, forward, normalize, q_mul, qf, quat_from_axes, quat_from_axis_angle, quat_rotate, quatf,
+    vec3f,
+};
 
 /// egui logical-pixel scale. Larger => crisper text at the cost of fill-rate.
 pub const PPP: f32 = 1.5;
@@ -314,42 +317,72 @@ pub fn quad_layer<'a>(
     q
 }
 
-/// Cylinder placement derived from the panel's flat anchor: `(pose, central_angle,
-/// height)`. The axis sits `radius` toward the viewer from the panel centre, so
-/// the panel's current centre + facing stay put while the surface curves around
-/// it. Shared by the layer build and the hit-test so they always agree.
-pub fn cylinder_params(p: &PanelGfx, radius: f32) -> (xr::Posef, f32, f32) {
-    let z = quat_rotate(qf(&p.pose.orientation), [0.0, 0.0, 1.0]); // +Z = toward viewer
-    let pos = [
-        p.pose.position.x + z[0] * radius,
-        p.pose.position.y + z[1] * radius,
-        p.pose.position.z + z[2] * radius,
+/// A panel's placement on the shared dashboard cylinder. Used by both the layer
+/// build and the hit-test, so they always agree.
+pub struct CylLayout {
+    pub pose: xr::Posef,
+    pub radius: f32,
+    pub central_angle: f32,
+    pub height: f32,
+}
+
+/// Place a sub-panel on the dashboard cylinder. The axis sits `base_radius` ahead
+/// of `anchor` (at the viewer); `radius` is this panel's surface distance (a touch
+/// less than base to float in front); `yaw` shifts it left/right around the axis;
+/// `y_off` shifts it up/down along the axis. So rail/bottom curve like the main.
+#[allow(clippy::too_many_arguments)]
+pub fn cyl_layout(
+    anchor: &xr::Posef,
+    base_radius: f32,
+    radius: f32,
+    yaw: f32,
+    y_off: f32,
+    width_m: f32,
+    height_m: f32,
+) -> CylLayout {
+    let q = qf(&anchor.orientation);
+    let z = quat_rotate(q, [0.0, 0.0, 1.0]); // toward viewer
+    let up = quat_rotate(q, [0.0, 1.0, 0.0]);
+    let axis = [
+        anchor.position.x + z[0] * base_radius,
+        anchor.position.y + z[1] * base_radius,
+        anchor.position.z + z[2] * base_radius,
     ];
-    let pose = xr::Posef { orientation: p.pose.orientation, position: vec3f(pos) };
-    let central_angle = (p.size_m.0 / radius).min(std::f32::consts::PI * 0.9);
-    (pose, central_angle, p.size_m.1)
+    let pos = [axis[0] + up[0] * y_off, axis[1] + up[1] * y_off, axis[2] + up[2] * y_off];
+    let orient = q_mul(quat_from_axis_angle(up, yaw), q);
+    let central_angle = (width_m / radius).min(std::f32::consts::PI * 0.9);
+    CylLayout {
+        pose: xr::Posef { orientation: quatf(orient), position: vec3f(pos) },
+        radius,
+        central_angle,
+        height: height_m,
+    }
 }
 
 pub fn cylinder_layer<'a>(
     p: &'a PanelGfx,
     space: &'a xr::Space,
-    radius: f32,
+    layout: &CylLayout,
+    alpha: bool,
 ) -> xr::CompositionLayerCylinderKHR<'a, xr::Vulkan> {
-    let (pose, central_angle, _h) = cylinder_params(p, radius);
     let sub = xr::SwapchainSubImage::new().swapchain(&p.swapchain).image_array_index(0).image_rect(
         xr::Rect2Di {
             offset: xr::Offset2Di { x: 0, y: 0 },
             extent: xr::Extent2Di { width: p.px.0 as i32, height: p.px.1 as i32 },
         },
     );
-    xr::CompositionLayerCylinderKHR::new()
+    let mut c = xr::CompositionLayerCylinderKHR::new()
         .space(space)
         .eye_visibility(xr::EyeVisibility::BOTH)
         .sub_image(sub)
-        .pose(pose)
-        .radius(radius)
-        .central_angle(central_angle)
-        .aspect_ratio(p.px.0 as f32 / p.px.1 as f32)
+        .pose(layout.pose)
+        .radius(layout.radius)
+        .central_angle(layout.central_angle)
+        .aspect_ratio(p.px.0 as f32 / p.px.1 as f32);
+    if alpha {
+        c = c.layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA);
+    }
+    c
 }
 
 // --- Laser pointer ----------------------------------------------------------

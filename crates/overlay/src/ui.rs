@@ -45,6 +45,11 @@ pub struct LibState {
     /// Sound settings (mirrored to/from the persisted overlay config by the loop).
     pub audio_enabled: bool,
     pub audio_volume: f32,
+    /// Main panel is showing the active-game splash (toggled from the bottom bar).
+    pub show_splash: bool,
+    /// Device batteries + wall clock, refreshed by the loop for the bottom bar.
+    pub batteries: Vec<crate::monado::BatteryInfo>,
+    pub clock: String,
 }
 
 impl LibState {
@@ -70,6 +75,9 @@ impl LibState {
             sound_tab: false,
             audio_enabled: true,
             audio_volume: 0.55,
+            show_splash: false,
+            batteries: Vec::new(),
+            clock: String::new(),
         }
     }
 }
@@ -77,10 +85,10 @@ impl LibState {
 const TILE_W: f32 = 168.0;
 const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
 
-pub fn build(ctx: &egui::Context, st: &mut LibState) {
-    let searchable = !matches!(st.nav, Nav::Settings);
-    left_rail(ctx, st);
-    bottom_bar(ctx, st);
+/// The main (centre) panel: search bar, the active view (or active-game splash),
+/// the on-screen keyboard, and the launching/fade overlays.
+pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
+    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings);
     if searchable && st.keyboard_open {
         keyboard(ctx, st);
     }
@@ -121,48 +129,40 @@ fn overlays(ctx: &egui::Context, st: &LibState) {
 
 // --- chrome -----------------------------------------------------------------
 
-fn left_rail(ctx: &egui::Context, st: &mut LibState) {
+/// The left floating nav rail (its own composition layer).
+pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
-        .fill(egui::Color32::from_rgb(16, 19, 23))
-        .inner_margin(egui::Margin::symmetric(10, 14));
-    egui::SidePanel::left("nav")
-        .exact_width(72.0)
-        .resizable(false)
-        .frame(frame)
-        .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new(icon::CUBE).size(28.0).color(theme::PRIMARY));
-                ui.add_space(14.0);
-                for (glyph, nav) in [
-                    (icon::HOUSE, Nav::Home),
-                    (icon::SQUARES_FOUR, Nav::Library),
-                    (icon::STAR, Nav::Favorites),
-                    (icon::TAG, Nav::Tags),
-                ] {
-                    if rail_button(ui, glyph, st.nav == nav).clicked() && st.nav != nav {
-                        st.nav = nav;
-                        st.sound_tab = true;
-                    }
-                    ui.add_space(6.0);
-                }
-                // Recenter playspace + Settings, pinned to the bottom.
-                let avail = ui.available_height();
-                ui.add_space((avail - 102.0).max(0.0));
-                if rail_button(ui, icon::CROSSHAIR, false)
-                    .on_hover_text("Recenter playspace")
-                    .clicked()
-                {
-                    st.recenter_playspace_request = true;
+        .fill(egui::Color32::from_rgb(18, 22, 28))
+        .corner_radius(20)
+        .inner_margin(egui::Margin::symmetric(10, 16));
+    egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(10.0);
+            for (glyph, nav) in [
+                (icon::HOUSE, Nav::Home),
+                (icon::SQUARES_FOUR, Nav::Library),
+                (icon::STAR, Nav::Favorites),
+                (icon::TAG, Nav::Tags),
+            ] {
+                let active = st.nav == nav && !st.show_splash;
+                if rail_button(ui, glyph, active).clicked() && !active {
+                    st.nav = nav;
+                    st.show_splash = false;
                     st.sound_tab = true;
                 }
-                ui.add_space(6.0);
-                if rail_button(ui, icon::GEAR, st.nav == Nav::Settings).clicked() && st.nav != Nav::Settings {
-                    st.nav = Nav::Settings;
-                    st.sound_tab = true;
-                }
-            });
+                ui.add_space(8.0);
+            }
+            // Settings pinned to the bottom.
+            let avail = ui.available_height();
+            ui.add_space((avail - 56.0).max(0.0));
+            let active = st.nav == Nav::Settings && !st.show_splash;
+            if rail_button(ui, icon::GEAR, active).clicked() && !active {
+                st.nav = Nav::Settings;
+                st.show_splash = false;
+                st.sound_tab = true;
+            }
         });
+    });
 }
 
 fn rail_button(ui: &mut egui::Ui, glyph: &str, active: bool) -> egui::Response {
@@ -202,24 +202,90 @@ fn top_bar(ctx: &egui::Context, st: &mut LibState) {
     });
 }
 
-fn bottom_bar(ctx: &egui::Context, st: &LibState) {
+/// The bottom floating bar (its own layer): recenter · active-game splash toggle ·
+/// device batteries · clock.
+pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
-        .fill(egui::Color32::from_rgb(13, 16, 20))
-        .inner_margin(egui::Margin::symmetric(18, 8));
-    egui::TopBottomPanel::bottom("status").exact_height(46.0).frame(frame).show(ctx, |ui| {
+        .fill(egui::Color32::from_rgb(18, 22, 28))
+        .corner_radius(20)
+        .inner_margin(egui::Margin::symmetric(18, 6));
+    egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
-            ui.label(egui::RichText::new(icon::GAME_CONTROLLER).size(22.0).color(theme::PRIMARY));
+            // Recenter playspace.
+            let recenter = egui::Button::new(egui::RichText::new(icon::CROSSHAIR).size(22.0))
+                .min_size(egui::vec2(46.0, 40.0))
+                .fill(egui::Color32::TRANSPARENT);
+            if ui.add(recenter).on_hover_text("Recenter playspace").clicked() {
+                st.recenter_playspace_request = true;
+                st.sound_tab = true;
+            }
             ui.add_space(6.0);
-            ui.label(egui::RichText::new("Monadeck").strong());
-            let count = if st.scanning {
-                "scanning…".to_string()
-            } else {
-                format!("{} games", st.games.len())
-            };
+            // Active-game splash toggle (only while a game runs).
+            if let Some(i) = st.running_index {
+                let name = short(&st.games[i].name);
+                let btn = egui::Button::new(
+                    egui::RichText::new(format!("{}  {}", icon::GAME_CONTROLLER, name))
+                        .size(15.0)
+                        .color(if st.show_splash { egui::Color32::BLACK } else { theme::ON_SURFACE }),
+                )
+                .fill(if st.show_splash { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                .min_size(egui::vec2(0.0, 40.0));
+                if ui.add(btn).on_hover_text("Active game").clicked() {
+                    st.show_splash = !st.show_splash;
+                    st.sound_tab = true;
+                }
+            }
+            // Clock + batteries on the right.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(count).color(theme::ON_SURFACE_VAR));
+                if !st.clock.is_empty() {
+                    ui.label(egui::RichText::new(&st.clock).size(20.0).strong().color(egui::Color32::WHITE));
+                }
+                ui.add_space(16.0);
+                for b in &st.batteries {
+                    battery_widget(ui, b);
+                    ui.add_space(10.0);
+                }
             });
         });
+    });
+}
+
+fn battery_widget(ui: &mut egui::Ui, b: &crate::monado::BatteryInfo) {
+    use crate::monado::BatteryKind;
+    let pct = (b.charge * 100.0).round() as i32;
+    let bat = if b.charging {
+        icon::BATTERY_CHARGING
+    } else if b.charge > 0.66 {
+        icon::BATTERY_FULL
+    } else if b.charge > 0.33 {
+        icon::BATTERY_MEDIUM
+    } else if b.charge > 0.1 {
+        icon::BATTERY_LOW
+    } else {
+        icon::BATTERY_WARNING
+    };
+    let color = if b.charge > 0.33 {
+        RUNNING_GREEN
+    } else if b.charge > 0.15 {
+        FAV_GOLD
+    } else {
+        STOP_RED
+    };
+    let dev = match b.kind {
+        BatteryKind::Glove => icon::HAND,
+        BatteryKind::Controller => icon::GAME_CONTROLLER,
+        _ => icon::CIRCLE,
+    };
+    ui.label(
+        egui::RichText::new(format!("{dev} {bat} {pct}%"))
+            .size(14.0)
+            .color(color),
+    )
+    .on_hover_text(match b.kind {
+        BatteryKind::Glove => "Glove",
+        BatteryKind::Controller => "Controller",
+        BatteryKind::Tracker => "Tracker",
+        BatteryKind::Other => "Device",
     });
 }
 
@@ -296,6 +362,10 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("Scanning your libraries…").color(theme::ON_SURFACE_VAR));
             });
+            return;
+        }
+        if st.show_splash {
+            splash_view(ui, st);
             return;
         }
         match st.nav {
@@ -465,13 +535,70 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
     }
 }
 
+/// Full-screen splash for the currently-running game: cover, title, and Stop.
+fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
+    st.hovered_index = None;
+    let Some(i) = st.running_index.filter(|&i| i < st.games.len()) else {
+        st.visible_now.clear();
+        ui.add_space(80.0);
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new("No game is running.").size(18.0).color(theme::ON_SURFACE_VAR));
+        });
+        return;
+    };
+    // Keep the running game's cover loaded while the splash is shown.
+    st.visible_now = vec![i];
+    let g = &st.games[i];
+
+    // Hero art (dimmed) or a gradient as a full-bleed background.
+    let full = ui.max_rect();
+    match &g.hero {
+        ArtState::Ready(tex) => {
+            draw_texture_cover(ui.painter(), full, tex);
+            ui.painter().rect_filled(full, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha(175));
+        }
+        _ => {
+            draw_hero_placeholder(ui.painter(), full, &g.name);
+            ui.painter().rect_filled(full, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha(90));
+        }
+    }
+
+    ui.add_space(40.0);
+    ui.horizontal(|ui| {
+        ui.add_space(20.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(300.0, 450.0), egui::Sense::hover());
+        draw_art(ui.painter(), rect, &g.cover, &g.name);
+        ui.add_space(48.0);
+        ui.vertical(|ui| {
+            ui.add_space(30.0);
+            ui.label(egui::RichText::new(&g.name).size(42.0).strong().color(egui::Color32::WHITE));
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new(format!("●  Running")).size(17.0).color(RUNNING_GREEN).strong());
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new(sub_label(g)).size(16.0).color(theme::ON_SURFACE));
+            ui.add_space(36.0);
+            let stop = egui::Button::new(
+                egui::RichText::new(format!("{}  Stop", icon::STOP)).size(24.0).color(egui::Color32::WHITE),
+            )
+            .fill(STOP_RED)
+            .min_size(egui::vec2(280.0, 66.0));
+            if ui.add(stop).clicked() {
+                st.stop_request = Some(i);
+            }
+        });
+    });
+}
+
 fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.label(egui::RichText::new("Overlay").heading().strong());
-    ui.add_space(14.0);
+    ui.label(egui::RichText::new("Settings").size(30.0).strong().color(egui::Color32::WHITE));
+    ui.add_space(18.0);
+
+    ui.label(egui::RichText::new("Panel").size(19.0).strong().color(theme::ON_SURFACE));
+    ui.add_space(8.0);
     let recenter = egui::Button::new(
-        egui::RichText::new(format!("{}  Recenter panel", icon::CROSSHAIR_SIMPLE)).size(17.0),
+        egui::RichText::new(format!("{}  Recenter panel", icon::CROSSHAIR_SIMPLE)).size(17.0).color(theme::ON_SURFACE),
     )
-    .min_size(egui::vec2(220.0, 42.0));
+    .min_size(egui::vec2(240.0, 46.0));
     if ui.add(recenter).clicked() {
         st.recenter_request = true;
         st.sound_tab = true;
@@ -479,24 +606,32 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new("Brings the panel back in front of you. Grip to grab and move it.")
-            .small()
+            .size(14.0)
             .color(theme::ON_SURFACE_VAR),
     );
-    ui.add_space(20.0);
-    ui.separator();
-    ui.add_space(12.0);
-    ui.label(egui::RichText::new(format!("{} games in your library", st.games.len())).color(theme::ON_SURFACE_VAR));
 
-    ui.add_space(20.0);
-    ui.separator();
-    ui.add_space(12.0);
-    ui.label(egui::RichText::new("Sound").strong());
+    ui.add_space(24.0);
+    ui.label(egui::RichText::new("Sound").size(19.0).strong().color(theme::ON_SURFACE));
     ui.add_space(8.0);
-    ui.checkbox(&mut st.audio_enabled, "UI sounds (select, launch, tabs)");
-    ui.add_space(6.0);
+    ui.checkbox(
+        &mut st.audio_enabled,
+        egui::RichText::new("UI sounds (select, launch, tabs)").size(16.0).color(theme::ON_SURFACE),
+    );
+    ui.add_space(8.0);
     ui.add_enabled_ui(st.audio_enabled, |ui| {
-        ui.add(egui::Slider::new(&mut st.audio_volume, 0.0..=1.0).text("Volume").show_value(false));
+        ui.add(
+            egui::Slider::new(&mut st.audio_volume, 0.0..=1.0)
+                .text(egui::RichText::new("Volume").size(15.0).color(theme::ON_SURFACE))
+                .show_value(false),
+        );
     });
+
+    ui.add_space(24.0);
+    ui.label(
+        egui::RichText::new(format!("{} games in your library", st.games.len()))
+            .size(15.0)
+            .color(theme::ON_SURFACE_VAR),
+    );
 }
 
 // --- hero banner ------------------------------------------------------------

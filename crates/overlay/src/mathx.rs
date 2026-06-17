@@ -197,6 +197,31 @@ pub fn front_pose(h: &xr::Posef, dist: f32, lateral: f32, height: f32) -> xr::Po
     xr::Posef { orientation: quatf(quat_from_axes(x, y, z)), position: vec3f(pos) }
 }
 
+/// Quaternion for a rotation of `angle` radians about `axis`.
+pub fn quat_from_axis_angle(axis: [f32; 3], angle: f32) -> [f32; 4] {
+    let a = normalize(axis);
+    let s = (angle * 0.5).sin();
+    [a[0] * s, a[1] * s, a[2] * s, (angle * 0.5).cos()]
+}
+
+/// A pose offset from `anchor` in the anchor's own frame (+X right, +Y up, +Z
+/// toward the viewer), keeping the anchor's orientation. Places the floating
+/// rail/bottom panels relative to the main panel.
+pub fn offset_pose(anchor: &xr::Posef, dx: f32, dy: f32, dz: f32) -> xr::Posef {
+    let q = qf(&anchor.orientation);
+    let r = quat_rotate(q, [1.0, 0.0, 0.0]);
+    let u = quat_rotate(q, [0.0, 1.0, 0.0]);
+    let f = quat_rotate(q, [0.0, 0.0, 1.0]);
+    xr::Posef {
+        orientation: anchor.orientation,
+        position: vec3f([
+            anchor.position.x + r[0] * dx + u[0] * dy + f[0] * dz,
+            anchor.position.y + r[1] * dx + u[1] * dy + f[1] * dz,
+            anchor.position.z + r[2] * dx + u[2] * dy + f[2] * dz,
+        ]),
+    }
+}
+
 /// A pose `dist` metres ahead of the head at a fixed identity-LOCAL orientation
 /// (used as the launcher's default anchored placement).
 pub fn posef(p: [f32; 3]) -> xr::Posef {

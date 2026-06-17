@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use libmonado::{BlockFlags, ClientLogic, ClientState, Monado};
+use libmonado::{BlockFlags, ClientLogic, ClientState, DeviceLogic, DeviceRole, Monado};
 use monadeck_core::devices::service_connected;
 
 enum Cmd {
@@ -16,10 +16,27 @@ enum Cmd {
     Recenter,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BatteryKind {
+    Controller,
+    Glove,
+    Tracker,
+    Other,
+}
+
+#[derive(Clone)]
+pub struct BatteryInfo {
+    pub kind: BatteryKind,
+    pub charge: f32, // 0..1
+    pub charging: bool,
+}
+
 #[derive(Default)]
 struct Status {
     /// Name of the primary (non-overlay) app, i.e. the running game.
     running_app: Option<String>,
+    /// Per-device battery levels (controllers/gloves/trackers).
+    batteries: Vec<BatteryInfo>,
 }
 
 pub struct MonadoLink {
@@ -39,6 +56,11 @@ impl MonadoLink {
     /// The running game's name, if any (polled ~2×/s).
     pub fn running_app(&self) -> Option<String> {
         self.status.lock().unwrap().running_app.clone()
+    }
+
+    /// Current device battery levels.
+    pub fn batteries(&self) -> Vec<BatteryInfo> {
+        self.status.lock().unwrap().batteries.clone()
     }
 
     /// Block (or unblock) the running game's controller input. Edge-triggered by
@@ -68,7 +90,10 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
             Ok(Cmd::SetBlock(block)) => apply_block(&mon, block),
             Err(RecvTimeoutError::Timeout) => {
                 let running = poll_running(&mut mon);
-                status.lock().unwrap().running_app = running;
+                let batteries = poll_batteries(&mon);
+                let mut s = status.lock().unwrap();
+                s.running_app = running;
+                s.batteries = batteries;
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -105,6 +130,40 @@ fn primary_app(m: &Monado) -> Result<Option<String>, ()> {
         }
     }
     Ok(None)
+}
+
+/// Battery levels for devices that report one (controllers/gloves/trackers).
+fn poll_batteries(mon: &Option<Monado>) -> Vec<BatteryInfo> {
+    let Some(m) = mon else { return Vec::new() };
+    let left = m.device_index_from_role(DeviceRole::Left).ok();
+    let right = m.device_index_from_role(DeviceRole::Right).ok();
+    let Ok(devices) = m.devices() else { return Vec::new() };
+    let mut out = Vec::new();
+    for dev in devices {
+        let idx = dev.index();
+        let Ok(b) = dev.battery_status() else { continue };
+        if !b.present {
+            continue;
+        }
+        let name = dev.name.to_lowercase();
+        let is_glove = name.contains("glove") || name.contains("udcap");
+        let is_ctrl = Some(idx) == left
+            || Some(idx) == right
+            || name.contains("controller")
+            || name.contains("knuckles")
+            || name.contains("index");
+        let kind = if is_glove {
+            BatteryKind::Glove
+        } else if is_ctrl {
+            BatteryKind::Controller
+        } else if name.contains("tracker") {
+            BatteryKind::Tracker
+        } else {
+            BatteryKind::Other
+        };
+        out.push(BatteryInfo { kind, charge: b.charge, charging: b.charging });
+    }
+    out
 }
 
 /// Block/unblock controller input on the game client (active + visible + not an

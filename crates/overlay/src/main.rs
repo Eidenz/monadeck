@@ -26,10 +26,10 @@ use ash::vk::Handle as _;
 use openxr as xr;
 
 use gfx::{
-    cylinder_layer, cylinder_params, fill_laser, laser_quad, make_laser, make_panel, quad_layer,
+    cyl_layout, cylinder_layer, fill_laser, laser_quad, make_laser, make_panel, quad_layer,
     render_panel,
 };
-use mathx::{front_pose, locate_pose, pose_compose, pose_invert, posef, raycast, raycast_cylinder};
+use mathx::{front_pose, locate_pose, offset_pose, pose_compose, pose_invert, posef, raycast, raycast_cylinder};
 
 static VK_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
 
@@ -38,6 +38,25 @@ const GRAB_RELEASE: f32 = 0.15;
 /// Curve radius for the cylinder panel (m). Equals the panel's anchor distance,
 /// so the cylinder axis lands at the viewer — a SteamVR-style wrap.
 const CURVE_RADIUS: f32 = 1.5;
+
+#[derive(Clone, Copy, PartialEq)]
+enum PanelId {
+    Main,
+    Rail,
+    Bottom,
+}
+
+/// The closest panel the laser hit this frame (one active pointer at a time).
+#[derive(Clone, Copy)]
+struct Hit {
+    panel: PanelId,
+    u: f32,
+    v: f32,
+    t: f32,
+    down: bool,
+    aim: xr::Posef,
+    path: xr::Path,
+}
 
 unsafe extern "system" fn get_instance_proc_addr(
     instance: xr::sys::platform::VkInstance,
@@ -191,7 +210,6 @@ fn run() -> Result<()> {
         .find(|w| formats.iter().any(|f| (*f as i64) == (w.as_raw() as i64)))
         .unwrap_or(vk::Format::B8G8R8A8_SRGB);
     let srgb = matches!(format, vk::Format::B8G8R8A8_SRGB | vk::Format::R8G8B8A8_SRGB);
-    let alpha_mode = false; // solid SteamVR-style panel
     log::info!("swapchain format {:?} srgb={} curved={}", format, srgb, curved);
 
     let color_attachment = vk::AttachmentDescription::default()
@@ -225,17 +243,38 @@ fn run() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("gpu-allocator init: {e}"))?,
     ));
 
-    // One wide library panel ~1.3 m across, anchored ahead until grabbed.
-    let mut panel = make_panel(
-        &session,
-        &device,
-        allocator.clone(),
-        render_pass,
-        format,
-        srgb,
-        (2000, 1250),
-        (1.3, 1.3 * 1250.0 / 2000.0),
-        posef([0.0, 0.0, -1.5]),
+    // Panel sizes (metres). Heights are derived from the texture aspect so the
+    // cylinder hit-test matches what's rendered. Tune these for feel.
+    const MAIN_W: f32 = 1.30;
+    const RAIL_W: f32 = 0.105; // thinner rail (height preserved via px aspect)
+    const BOTTOM_W: f32 = 1.30; // full main width
+    const MAIN_H: f32 = MAIN_W * 1250.0 / 2000.0;
+    const RAIL_H: f32 = RAIL_W * 1140.0 / 162.0;
+    const BOTTOM_H: f32 = BOTTOM_W * 151.0 / 1640.0; // slimmer bar (width preserved)
+    const PANEL_FWD: f32 = 0.06; // float rail/bottom this far in front of main
+    const GAP: f32 = 0.05;
+    // Curved placement: yaw the rail left of the main arc; drop the bar below.
+    const RAIL_YAW: f32 = MAIN_W / CURVE_RADIUS / 2.0 + GAP + RAIL_W / (CURVE_RADIUS - PANEL_FWD) / 2.0;
+    const BOTTOM_YOFF: f32 = -(MAIN_H / 2.0 + GAP + BOTTOM_H / 2.0);
+    // Flat fallback offsets (runtimes without cylinder layers).
+    const RAIL_DX: f32 = -(MAIN_W / 2.0 + GAP + RAIL_W / 2.0);
+    const BOTTOM_DY: f32 = BOTTOM_YOFF;
+
+    // The layout anchor (flat centre, faces the viewer). The three panels are
+    // cylinder segments sharing one axis (curved together), positioned from the
+    // anchor — so grabbing/recentring moves the whole set.
+    let mut anchor = posef([0.0, 0.0, -CURVE_RADIUS]);
+    let mut main_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        (2000, 1250), (MAIN_W, MAIN_H), anchor,
+    )?;
+    let mut rail_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        (162, 1140), (RAIL_W, RAIL_H), anchor,
+    )?;
+    let mut bottom_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        (1640, 151), (BOTTOM_W, BOTTOM_H), anchor,
     )?;
     let mut laser = make_laser(&session, format)?;
 
@@ -425,97 +464,117 @@ fn run() -> Result<()> {
         // Reflect the running game into the UI each frame.
         st.running_index = running.as_ref().and_then(|app| st.games.iter().position(|g| name_matches(&g.name, app)));
 
-        // Place the panel in front of the head on first show / on recenter.
+        // Place the layout in front of the head on first show / on recenter.
         if recenter {
             if let Some(h) = hmd {
-                panel.pose = front_pose(&h, CURVE_RADIUS, 0.0, 0.0);
+                anchor = front_pose(&h, CURVE_RADIUS, 0.0, 0.0);
                 recenter = false;
             }
         }
+        // Flat poses (used by the quad fallback + render).
+        main_panel.pose = anchor;
+        rail_panel.pose = offset_pose(&anchor, RAIL_DX, 0.0, PANEL_FWD);
+        bottom_panel.pose = offset_pose(&anchor, 0.0, BOTTOM_DY, PANEL_FWD);
+        // Curved placements on the shared cylinder (hit-test + layers).
+        let main_l = cyl_layout(&anchor, CURVE_RADIUS, CURVE_RADIUS, 0.0, 0.0, MAIN_W, MAIN_H);
+        let rail_l = cyl_layout(&anchor, CURVE_RADIUS, CURVE_RADIUS - PANEL_FWD, RAIL_YAW, 0.0, RAIL_W, RAIL_H);
+        let bottom_l = cyl_layout(&anchor, CURVE_RADIUS, CURVE_RADIUS - PANEL_FWD, 0.0, BOTTOM_YOFF, BOTTOM_W, BOTTOM_H);
+
+        // Bottom-bar live data.
+        st.clock = chrono::Local::now().format("%-I:%M %p").to_string();
+        st.batteries = monado.batteries();
 
         // Summon fade-in (1 -> 0 over ~0.22 s).
         st.fade_in = summon_at.map_or(0.0, |t| (1.0 - t.elapsed().as_secs_f32() / 0.22).clamp(0.0, 1.0));
 
-        // --- Input: laser hit-test + grip-to-move (actions already synced) --
-        let mut pointer: Option<(f32, f32, bool)> = None;
-        let mut laser_ray: Option<(xr::Posef, f32)> = None;
+        // --- Input: laser hit-test across the 3 panels + grip-to-move --------
+        let mut best: Option<Hit> = None;
         let mut scroll = (0.0f32, 0.0f32);
-        let mut point_path: Option<xr::Path> = None; // pointing hand, for haptics
         if focused {
-            // Continue an in-progress grab.
+            // Continue an in-progress grab — moves the whole layout anchor.
             if let Some((hand_i, offset)) = grab {
                 let (path, aim) = if hand_i == 0 { (left_path, &aim_left) } else { (right_path, &aim_right) };
                 let grip = grab_action.state(&session, path)?.current_state;
                 if grip < GRAB_RELEASE {
                     grab = None;
                 } else if let Some(p) = locate_pose(aim, &space, time) {
-                    panel.pose = pose_compose(&p, &offset);
+                    anchor = pose_compose(&p, &offset);
                 }
             }
 
             if grab.is_none() {
-                let (cyl_pose, cyl_angle, cyl_height) = cylinder_params(&panel, CURVE_RADIUS);
-                let mut best_t = f32::MAX;
                 for (idx, (aim, path)) in [(&aim_left, left_path), (&aim_right, right_path)].into_iter().enumerate() {
                     let Some(p) = locate_pose(aim, &space, time) else { continue };
-                    let hit = if curved {
-                        raycast_cylinder(&p, &cyl_pose, CURVE_RADIUS, cyl_angle, cyl_height)
+                    let candidates = if curved {
+                        [
+                            (PanelId::Main, raycast_cylinder(&p, &main_l.pose, main_l.radius, main_l.central_angle, main_l.height)),
+                            (PanelId::Rail, raycast_cylinder(&p, &rail_l.pose, rail_l.radius, rail_l.central_angle, rail_l.height)),
+                            (PanelId::Bottom, raycast_cylinder(&p, &bottom_l.pose, bottom_l.radius, bottom_l.central_angle, bottom_l.height)),
+                        ]
                     } else {
-                        raycast(&p, &panel.pose, panel.size_m)
+                        [
+                            (PanelId::Main, raycast(&p, &main_panel.pose, main_panel.size_m)),
+                            (PanelId::Rail, raycast(&p, &rail_panel.pose, rail_panel.size_m)),
+                            (PanelId::Bottom, raycast(&p, &bottom_panel.pose, bottom_panel.size_m)),
+                        ]
                     };
-                    let Some((u, v, t)) = hit else { continue };
-                    // Start grabbing if squeezing while pointed at the panel.
+                    let pointing = candidates.iter().any(|(_, h)| h.is_some());
+                    // Grip while pointing at any panel grabs the whole layout.
                     let grip = grab_action.state(&session, path)?.current_state;
-                    if grip > GRAB_START {
-                        grab = Some((idx, pose_compose(&pose_invert(&p), &panel.pose)));
-                        pointer = None;
-                        laser_ray = None;
+                    if grip > GRAB_START && pointing {
+                        grab = Some((idx, pose_compose(&pose_invert(&p), &anchor)));
+                        best = None;
                         break;
                     }
-                    if t < best_t {
-                        best_t = t;
-                        let down = select_action.state(&session, path)?.current_state > 0.5;
-                        pointer = Some((u, v, down));
-                        laser_ray = Some((p, t));
-                        point_path = Some(path);
-                        // Thumbstick on the pointing hand scrolls the list.
-                        let s = scroll_action.state(&session, path)?.current_state;
+                    let down = select_action.state(&session, path)?.current_state > 0.5;
+                    for (panel, hit) in candidates {
+                        if let Some((u, v, t)) = hit {
+                            if best.map_or(true, |b| t < b.t) {
+                                best = Some(Hit { panel, u, v, t, down, aim: p, path });
+                            }
+                        }
+                    }
+                }
+                // Thumbstick scrolls only when pointing at the main panel.
+                if let Some(h) = best {
+                    if h.panel == PanelId::Main {
+                        let s = scroll_action.state(&session, h.path)?.current_state;
                         scroll = deadzone(s.x, s.y);
                     }
                 }
             }
         }
 
-        // Block the game's controller input while pointing at the dashboard, so
-        // the two don't fight over the same presses (edge-triggered).
-        let want_block = pointer.is_some();
+        let main_ptr = best.filter(|h| h.panel == PanelId::Main).map(|h| (h.u, h.v, h.down));
+        let rail_ptr = best.filter(|h| h.panel == PanelId::Rail).map(|h| (h.u, h.v, h.down));
+        let bottom_ptr = best.filter(|h| h.panel == PanelId::Bottom).map(|h| (h.u, h.v, h.down));
+        let laser_ray = best.map(|h| (h.aim, h.t));
+
+        // Block the game's controller input while pointing at the dashboard.
+        let want_block = best.is_some();
         if want_block != blocked_prev {
             monado.set_block(want_block);
             blocked_prev = want_block;
         }
 
-        // --- Render + submit ------------------------------------------------
-        render_panel(
-            &mut panel,
-            &device,
-            render_pass,
-            cmd,
-            cmd_pool,
-            queue,
-            fence,
-            alpha_mode,
-            pointer,
-            scroll,
-            start.elapsed().as_secs_f64(),
-            |ctx| ui::build(ctx, &mut st),
-        )?;
+        // --- Render the three panels ----------------------------------------
+        let elapsed = start.elapsed().as_secs_f64();
+        render_panel(&mut main_panel, &device, render_pass, cmd, cmd_pool, queue, fence, false, main_ptr, scroll, elapsed, |ctx| {
+            ui::build_main(ctx, &mut st)
+        })?;
+        render_panel(&mut rail_panel, &device, render_pass, cmd, cmd_pool, queue, fence, true, rail_ptr, (0.0, 0.0), elapsed, |ctx| {
+            ui::build_rail(ctx, &mut st)
+        })?;
+        render_panel(&mut bottom_panel, &device, render_pass, cmd, cmd_pool, queue, fence, true, bottom_ptr, (0.0, 0.0), elapsed, |ctx| {
+            ui::build_bottom(ctx, &mut st)
+        })?;
 
         // --- Lazy art: upload finished decodes, request on-screen/selected --
         while let Some(res) = art.try_recv() {
             if let Some(g) = st.games.get_mut(res.index) {
                 let key = format!("art-{}-{:?}", res.index, res.kind);
                 *g.art_mut(res.kind) = match res.image {
-                    Some(img) => games::ArtState::Ready(panel.ctx.load_texture(
+                    Some(img) => games::ArtState::Ready(main_panel.ctx.load_texture(
                         key,
                         img,
                         egui::TextureOptions::LINEAR,
@@ -530,6 +589,12 @@ fn run() -> Result<()> {
             wants.push((i, games::ArtKind::Cover));
             wants.push((i, games::ArtKind::Hero));
             wants.push((i, games::ArtKind::Logo));
+        }
+        if st.show_splash {
+            if let Some(i) = st.running_index {
+                wants.push((i, games::ArtKind::Cover));
+                wants.push((i, games::ArtKind::Hero));
+            }
         }
         for (i, kind) in wants {
             want_art(&mut st.games, i, kind, &art);
@@ -567,14 +632,13 @@ fn run() -> Result<()> {
         }
 
         // --- Haptics: firm tick on click, light tick on hovering a new game --
-        if let Some(path) = point_path {
-            let down = pointer.is_some_and(|(_, _, d)| d);
-            if down && !click_prev {
-                pulse(&session, &haptic_action, path, 0.5, 28);
+        if let Some(h) = best {
+            if h.down && !click_prev {
+                pulse(&session, &haptic_action, h.path, 0.5, 28);
             }
-            click_prev = down;
+            click_prev = h.down;
             if st.hovered_index.is_some() && st.hovered_index != hover_prev {
-                pulse(&session, &haptic_action, path, 0.16, 9);
+                pulse(&session, &haptic_action, h.path, 0.16, 9);
             }
         } else {
             click_prev = false;
@@ -585,21 +649,30 @@ fn run() -> Result<()> {
             fill_laser(&mut laser, &device, cmd, queue, fence)?;
         }
 
-        // The panel as a cylinder (curved) or quad (flat) layer — declared out
-        // here so the chosen one outlives the layer-pointer vec.
-        let panel_quad;
-        let panel_cyl;
+        // All three panels as curved cylinder segments (rail + bottom alpha so
+        // they float as rounded cards); quad fallback if no cylinder support.
+        // Declared out here so each layer outlives the pointer vec.
+        let (main_cyl, rail_cyl, bottom_cyl);
+        let (main_quad, rail_quad, bottom_quad);
         let laser_q = match (laser_ray, hmd) {
             (Some((aim, t)), Some(h)) => Some(laser_quad(&laser, &space, &aim, t, &h)),
             _ => None,
         };
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
         if curved {
-            panel_cyl = cylinder_layer(&panel, &space, CURVE_RADIUS);
-            layers.push(&panel_cyl);
+            main_cyl = cylinder_layer(&main_panel, &space, &main_l, false);
+            rail_cyl = cylinder_layer(&rail_panel, &space, &rail_l, true);
+            bottom_cyl = cylinder_layer(&bottom_panel, &space, &bottom_l, true);
+            layers.push(&main_cyl);
+            layers.push(&rail_cyl);
+            layers.push(&bottom_cyl);
         } else {
-            panel_quad = quad_layer(&panel, &space, alpha_mode);
-            layers.push(&panel_quad);
+            main_quad = quad_layer(&main_panel, &space, false);
+            rail_quad = quad_layer(&rail_panel, &space, true);
+            bottom_quad = quad_layer(&bottom_panel, &space, true);
+            layers.push(&main_quad);
+            layers.push(&rail_quad);
+            layers.push(&bottom_quad);
         }
         if let Some(q) = &laser_q {
             layers.push(q);

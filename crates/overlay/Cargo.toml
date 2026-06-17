@@ -29,3 +29,5 @@ monadeck-core = { path = "../core" }
 libmonado = { git = "https://github.com/wayvr-org/libmonado-rs.git", rev = "6f66b26930c24a8a2fc57ddcd85704784894c750", version = "1.6.0" }
 # UI confirmation sounds (embedded WAVs). WAV decoding only — keep it light.
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
+# Local wall-clock for the bottom bar.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
