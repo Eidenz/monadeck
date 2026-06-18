@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { app, saveConfig } from "$lib/state.svelte";
+  import { app, saveConfig, refreshPreflight } from "$lib/state.svelte";
   import { importOpenxrStatus, writeImportOpenxr } from "$lib/api";
   import { KNOWN_ENV_VARS, type KnownVar } from "$lib/knownEnvVars";
   import LaunchOptions from "$lib/components/LaunchOptions.svelte";
@@ -114,6 +114,45 @@
       <div class="proton-note">
         Writes <code>~/.config/environment.d/…conf</code> — takes effect after a reboot.
       </div>
+    {/if}
+  </div>
+
+  <div class="readiness glass">
+    <div class="rd-head">
+      <div class="rd-meta">
+        <div class="rd-title">System readiness</div>
+        <div class="rd-sub">
+          Prerequisites outside Monadeck's control{app.preflight?.distro
+            ? ` · ${app.preflight.distro}`
+            : ""}. Install commands are best-effort hints.
+        </div>
+      </div>
+      <button class="small" onclick={refreshPreflight}>Re-check</button>
+    </div>
+
+    {#each app.preflight?.checks ?? [] as c (c.id)}
+      <div class="check">
+        <div class="check-row">
+          <div class="check-text">
+            <div class="check-title">{c.label}</div>
+            <div class="check-detail">{c.detail}</div>
+          </div>
+          <span
+            class="pill"
+            class:good={c.ok}
+            class:warn={!c.ok && c.severity === "important"}
+          >
+            {c.ok ? "ok ✓" : c.severity === "important" ? "missing" : "optional"}
+          </span>
+        </div>
+        {#if !c.ok && c.fix}
+          <code class="fix">{c.fix}</code>
+        {/if}
+      </div>
+    {/each}
+
+    {#if app.preflight && app.preflight.all_ok}
+      <div class="rd-allok">Everything's in place. ✓</div>
     {/if}
   </div>
 </section>
@@ -266,6 +305,72 @@
   }
   .accent:disabled {
     opacity: 0.6;
+  }
+
+  .readiness {
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .rd-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .rd-title {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .rd-sub {
+    font-size: 11.5px;
+    color: hsl(var(--muted));
+    line-height: 1.45;
+    margin-top: 2px;
+  }
+  .check {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 10px;
+    border-top: 1px solid hsl(var(--border) / 0.5);
+  }
+  .check-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .check-title {
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .check-detail {
+    font-size: 11.5px;
+    color: hsl(var(--muted));
+    line-height: 1.45;
+    margin-top: 2px;
+  }
+  .fix {
+    display: block;
+    background: hsl(var(--background) / 0.7);
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius-s);
+    padding: 7px 10px;
+    font-size: 11.5px;
+    font-family: ui-monospace, monospace;
+    color: hsl(var(--foreground));
+    user-select: all;
+    word-break: break-all;
+  }
+  .pill.warn {
+    color: hsl(var(--warn));
+    border-color: hsl(var(--warn) / 0.4);
+  }
+  .rd-allok {
+    font-size: 11.5px;
+    color: hsl(var(--ok));
   }
 
   .scrim {

@@ -3,6 +3,7 @@ import type {
   CapStatus,
   LogChunk,
   MonadeckConfig,
+  PreflightReport,
   RuntimeStatus,
   ServiceStatus,
   Snapshot,
@@ -36,6 +37,7 @@ export const hasNvidia = () => invoke<boolean>("has_nvidia");
 export const setAmdVrProfile = () => invoke<void>("set_amd_vr_profile");
 export const importOpenxrStatus = () => invoke<boolean>("import_openxr_status");
 export const writeImportOpenxr = () => invoke<void>("write_import_openxr");
+export const preflightCheck = () => invoke<PreflightReport>("preflight_check");
 export const getLogs = (since: number) =>
   invoke<LogChunk>("get_logs", { since });
 

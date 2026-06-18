@@ -12,6 +12,7 @@ use monadeck_core::proton;
 use monadeck_core::launch_options;
 use monadeck_core::openvr_paths::{self, OvrPathsKind};
 use monadeck_core::plugins::ExecWhen;
+use monadeck_core::preflight::{self, PreflightReport};
 use monadeck_core::setcap::{self, CapStatus};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -350,6 +351,15 @@ pub fn import_openxr_status() -> bool {
 #[tauri::command]
 pub fn write_import_openxr() -> CmdResult<()> {
     proton::write_env_file().map_err(|e| e.to_string())
+}
+
+/// Runtime prerequisite checks (xr-hardware udev rules, pkexec). All-ok on a
+/// properly set-up box; surfaces what's missing when run on another machine.
+#[tauri::command]
+pub async fn preflight_check() -> CmdResult<PreflightReport> {
+    tauri::async_runtime::spawn_blocking(preflight::run)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Installed `.desktop` applications, for the "add installed app" plugin picker.

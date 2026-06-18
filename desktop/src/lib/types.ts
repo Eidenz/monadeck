@@ -96,3 +96,20 @@ export interface LogChunk {
   cursor: number;
   lines: string[];
 }
+
+export type PreflightSeverity = "important" | "optional";
+
+export interface PreflightCheck {
+  id: string;
+  label: string;
+  ok: boolean;
+  severity: PreflightSeverity;
+  detail: string;
+  fix: string | null; // install hint, present only when !ok
+}
+
+export interface PreflightReport {
+  checks: PreflightCheck[];
+  all_ok: boolean;
+  distro: string | null;
+}

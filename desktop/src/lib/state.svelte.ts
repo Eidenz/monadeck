@@ -6,6 +6,7 @@ import type {
   ClientInfo,
   DeviceInfo,
   MonadeckConfig,
+  PreflightReport,
   RuntimeStatus,
   ServiceStatus,
 } from "./types";
@@ -16,6 +17,9 @@ export const app = $state({
   service: { running: false, connected: false, exit_code: null } as ServiceStatus,
   runtime: { openxr: "none", openvr: "none" } as RuntimeStatus,
   caps: "no_binary" as CapStatus,
+  // Runtime prerequisite report (udev rules, pkexec). Null until first checked;
+  // rarely changes, so it's fetched on load rather than polled.
+  preflight: null as PreflightReport | null,
   devices: [] as DeviceInfo[],
   clients: [] as ClientInfo[],
   busy: false,
@@ -51,6 +55,17 @@ export async function loadInitial() {
     if (changed) await api.setConfig($state.snapshot(app.config));
   }
   await refreshStatus();
+  await refreshPreflight();
+}
+
+// Re-run the runtime prerequisite checks (udev rules, pkexec). Cheap; called on
+// load and after the user may have installed something.
+export async function refreshPreflight() {
+  try {
+    app.preflight = await api.preflightCheck();
+  } catch (e) {
+    app.error = String(e);
+  }
 }
 
 // Re-pull config from the backend so changes made in the settings window (e.g.

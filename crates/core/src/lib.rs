@@ -8,6 +8,7 @@
 //! - [`active_runtime`] — point the OpenXR loader at monado, with backup/restore.
 //! - [`openvr_paths`] — register xrizer as the OpenVR runtime, with backup/restore.
 //! - [`setcap`] — set/verify `CAP_SYS_NICE=eip` on the service binary.
+//! - [`preflight`] — runtime prerequisite checks (udev rules, pkexec) for other boxes.
 //! - [`devices`] — live device list via libmonado (`auto_connect`).
 //! - [`plugins`] — launch arbitrary apps by explicit path alongside the service.
 //! - [`config`] / [`paths`] — persisted settings and well-known file locations.
@@ -27,6 +28,7 @@ pub mod overlay_config;
 pub mod paths;
 pub mod playtime;
 pub mod plugins;
+pub mod preflight;
 pub mod proton;
 pub mod setcap;
 pub mod steam;

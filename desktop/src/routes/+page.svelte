@@ -8,6 +8,7 @@
   import TitleBar from "$lib/components/TitleBar.svelte";
   import CapToast from "$lib/components/CapToast.svelte";
   import CrashToast from "$lib/components/CrashToast.svelte";
+  import PreflightBanner from "$lib/components/PreflightBanner.svelte";
   import DeviceStrip from "$lib/components/DeviceStrip.svelte";
   import AppsBar from "$lib/components/AppsBar.svelte";
   import {
@@ -21,8 +22,12 @@
   } from "$lib/state.svelte";
 
   let dismissed = $state(false);
+  let preflightDismissed = $state(false);
   const showToast = $derived(app.caps === "needs_setcap" && !dismissed);
   const showCrash = $derived(app.crash !== null);
+  const showPreflight = $derived(
+    app.preflight !== null && !app.preflight.all_ok && !preflightDismissed,
+  );
 
   // Stopped → Warming up… (process up, system not ready yet) → Now Playing.
   const heading = $derived(
@@ -49,7 +54,9 @@
   const WIN_W = 380;
   let contentH = $state(0); // measured deck (+ error) height
   let toastSlotH = $state(0); // measured toast card height
-  const toastH = $derived(showToast || showCrash ? toastSlotH : 0);
+  const toastH = $derived(
+    showToast || showCrash || showPreflight ? toastSlotH : 0,
+  );
 
   let appliedToastH = 0;
   let desired: { total: number; toast: number } | null = null;
@@ -110,9 +117,10 @@
 </script>
 
 <div class="deck-window">
-  {#if showToast || showCrash}
+  {#if showToast || showCrash || showPreflight}
     <div class="toast-slot" bind:clientHeight={toastSlotH}>
       {#if showCrash}<CrashToast />{/if}
+      {#if showPreflight}<PreflightBanner bind:dismissed={preflightDismissed} />{/if}
       {#if showToast}<CapToast bind:dismissed />{/if}
     </div>
   {/if}

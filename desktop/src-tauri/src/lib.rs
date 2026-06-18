@@ -119,6 +119,7 @@ pub fn run() {
             commands::set_amd_vr_profile,
             commands::import_openxr_status,
             commands::write_import_openxr,
+            commands::preflight_check,
             commands::list_installed_apps,
             commands::launch_plugin,
             bindings::scan_steam_games,
