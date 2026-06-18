@@ -2,9 +2,9 @@
 
 # 🎮 Monadeck
 
-**A SteamVR-style XR orchestrator & game launcher for Monado on Linux**
+**A SteamVR-style XR orchestrator & overlay for Monado on Linux**
 
-Built for a custom **Monado** fork and an **xrizer**-only workflow, where Envision's design didn't fit.
+Built for a **Monado** and **xrizer**-only workflow, where Envision's design didn't fit.
 
 ![Monadeck](screenshot.png)
 
@@ -14,7 +14,7 @@ Built for a custom **Monado** fork and an **xrizer**-only workflow, where Envisi
 
 ## What it does
 
-Monadeck is two halves that share one library: an **in-headset launcher** you live in while you're in VR, and a small **desktop control panel** that looks after your Monado runtime.
+Monadeck is two halves that share one library: an **in-headset overlay** you live in while you're in VR, and a small **desktop control panel** that looks after your Monado runtime.
 
 ### In the headset
 
@@ -22,8 +22,9 @@ Monadeck is two halves that share one library: an **in-headset launcher** you li
 - **▶️ Launch and stop without leaving VR**: start a game from the dashboard; an active-game card shows what's running, with the cover, a Stop button, and how long the current session has gone.
 - **🔍 Find things fast**: search with an on-screen keyboard, **⭐ favourite** the ones you reach for, and sort any list by *recent · name · playtime · size*.
 - **🗂️ Your own collections**: group games into named collections (*Seated*, *Standing*, whatever) and browse them as their own shelves.
-- **⏱️ A timer that finds you anywhere**: set a countdown from the Tools tab; when it's up it rings a chime and drops an in-headset notification, even over a running game. Low-battery warnings work the same way.
+- **⏱️ A handy timer**: set a countdown from the Tools tab; when it's up it rings a chime and drops an in-headset notification, even over a running game. Low-battery warnings work the same way.
 - **🛋️ Comfortable placement**: move the dashboard closer or further, resize it, flatten the curve, tilt it to match where you're looking, or just grab it and put it where you want.
+- **🧭 Playspace tools, OVRAS-style**: nudge your floor and whole play area on any axis (height, forward/back, left/right) and rotate it, in fixed steps, with recenter and reset. Your offsets persist and re-apply when the runtime restarts.
 - **🔋 At-a-glance status**: a bottom bar with the time and live controller/tracker batteries.
 
 ### On the desktop
@@ -69,7 +70,7 @@ This produces a `.rpm`, `.deb`, and `.AppImage` in `desktop/src-tauri/target/rel
 1. Launch Monadeck and open **Settings → General**. Either click **Install built-in Monado** / **Install built-in xrizer** to download a prebuilt fork build and the latest xrizer, or set your own **Monado build prefix** (e.g. `~/monado/build/install`) and **xrizer runtime path**. Monadeck also tries to autodetect both from `$PATH` and your current active runtime.
 2. **Start the runtime**, then register xrizer/OpenXR (your existing config is backed up automatically). If a rebuild left Monado without `CAP_SYS_NICE`, accept the prompt to apply it.
 3. Put the headset on, the dashboard opens. **Press the system button on your left controller** to summon or dismiss it; **point + trigger** to select, **grip** to grab and move it.
-4. Browse, search, favourite, and drop games into collections. The **Tools** and **Settings** tabs live at the bottom of the left rail; tune the panel under **Settings → Placement**.
+4. Browse, search, favourite, and drop games into collections. The **Tools**, **Playspace**, and **Settings** tabs live at the bottom of the left rail; tune the dashboard under **Settings → Placement** and your floor / play area under **Playspace**.
 
 **Artwork tip:** Monadeck reads **JPEG/PNG** cover and hero art from Steam's grid folder and library cache. If a cover came down as **AVIF** (some SteamGridDB downloads are, even with a `.png` name) it won't decode, so re-save it as PNG/JPEG, then hit **Settings → Refresh library** to re-scan without restarting.
 
