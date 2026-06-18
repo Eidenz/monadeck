@@ -6,14 +6,17 @@
 use monadeck_core::cmd_runner::CmdRunner;
 use monadeck_core::monado_conn::MonadoConn;
 use monadeck_core::MonadeckConfig;
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Mutex<MonadeckConfig>>,
     pub runner: Arc<Mutex<CmdRunner>>,
-    /// PIDs of plugins we launched this session (so we could tidy them up).
-    pub plugin_pids: Arc<Mutex<Vec<u32>>>,
+    /// Child handles for the plugins/overlay we launched on service start, so we
+    /// can stop and reap them on service stop (otherwise they linger and a fresh
+    /// start spawns colliding second instances).
+    pub plugin_children: Arc<Mutex<Vec<Child>>>,
     /// Persistent libmonado connection (one long-lived client, not per-poll).
     pub monado: Arc<MonadoConn>,
 }
@@ -23,7 +26,7 @@ impl AppState {
         Self {
             config: Arc::new(Mutex::new(MonadeckConfig::load())),
             runner: Arc::new(Mutex::new(CmdRunner::new())),
-            plugin_pids: Arc::new(Mutex::new(Vec::new())),
+            plugin_children: Arc::new(Mutex::new(Vec::new())),
             monado: Arc::new(MonadoConn::new()),
         }
     }

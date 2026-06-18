@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 /// Locate the overlay binary: env override → sidecar next to us → dev target → PATH.
 /// Mirrors nemurixr's resolver so dev (`pnpm tauri dev`) and bundled installs
@@ -46,8 +46,9 @@ fn overlay_bin() -> Option<PathBuf> {
 }
 
 /// Spawn the overlay detached, with `env` overlaid (so it inherits the same
-/// runtime wiring monado-service got). Returns the child PID on success.
-pub fn launch(env: &HashMap<String, String>) -> Result<u32, String> {
+/// runtime wiring monado-service got). Returns the spawned child so the caller
+/// can stop it when the service goes down.
+pub fn launch(env: &HashMap<String, String>) -> Result<Child, String> {
     let bin = overlay_bin()
         .ok_or_else(|| "overlay binary not found (build it: cargo build -p monadeck-overlay)".to_string())?;
     let child = Command::new(&bin)
@@ -58,5 +59,5 @@ pub fn launch(env: &HashMap<String, String>) -> Result<u32, String> {
         .spawn()
         .map_err(|e| format!("launching overlay {}: {e}", bin.display()))?;
     log::info!("launched built-in overlay: {}", bin.display());
-    Ok(child.id())
+    Ok(child)
 }

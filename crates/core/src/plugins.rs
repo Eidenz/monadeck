@@ -9,7 +9,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 /// When a plugin should run relative to the monado service lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -72,8 +73,9 @@ impl Plugin {
 
     /// Spawn the plugin detached, with `env` overlaid on the inherited
     /// environment. Works for both raw executables and installed apps. Returns
-    /// the child PID.
-    pub fn launch(&self, env: &HashMap<String, String>) -> Result<u32> {
+    /// the spawned child — the caller keeps it so the plugin can be stopped and
+    /// reaped when the service goes down (rather than lingering across restarts).
+    pub fn launch(&self, env: &HashMap<String, String>) -> Result<Child> {
         if !self.enabled {
             bail!("plugin '{}' is disabled", self.name);
         }
@@ -95,6 +97,28 @@ impl Plugin {
             .stderr(Stdio::null())
             .spawn()
             .with_context(|| format!("launching plugin '{}'", self.name))?;
-        Ok(child.id())
+        Ok(child)
     }
+}
+
+/// Stop a plugin we launched: SIGTERM, then SIGKILL after a short grace, and reap
+/// it. Without this, a plugin (e.g. WayVR) launched on service start outlives the
+/// service stop, so the next start spawns a second instance that collides with the
+/// lingering first one — and the un-reaped child becomes a zombie.
+pub fn terminate(child: &mut Child) {
+    // Already exited — just reap.
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let pid = child.id() as libc::pid_t;
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    // Give it ~1.5 s to exit cleanly (so it can release sockets/locks), then force it.
+    for _ in 0..15 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }

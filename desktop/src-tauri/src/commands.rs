@@ -181,6 +181,14 @@ fn env_map(cfg: &MonadeckConfig) -> HashMap<String, String> {
         .collect()
 }
 
+/// Stop and reap every plugin/overlay child we launched on service start.
+fn kill_plugins(st: &AppState) {
+    let mut children = st.plugin_children.lock().unwrap();
+    for mut child in children.drain(..) {
+        monadeck_core::plugins::terminate(&mut child);
+    }
+}
+
 #[tauri::command]
 pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
@@ -268,21 +276,24 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
             std::thread::sleep(Duration::from_millis(200));
         }
 
-        let mut pids = st.plugin_pids.lock().unwrap();
+        // Clean slate: stop anything still tracked from a previous run before
+        // launching fresh, so we never end up with two of the same plugin.
+        kill_plugins(&st);
+        let mut children = st.plugin_children.lock().unwrap();
         for p in cfg
             .plugins
             .iter()
             .filter(|p| p.enabled && p.when == ExecWhen::AfterStart)
         {
             match p.launch(&env) {
-                Ok(pid) => pids.push(pid),
+                Ok(child) => children.push(child),
                 Err(e) => log::warn!("plugin '{}' failed to launch: {e}", p.name),
             }
         }
         // Built-in in-headset overlay — the permanent auto-launch entry.
         if cfg.overlay_enabled {
             match crate::overlay::launch(&env) {
-                Ok(pid) => pids.push(pid),
+                Ok(child) => children.push(child),
                 Err(e) => log::warn!("built-in overlay failed to launch: {e}"),
             }
         }
@@ -297,6 +308,9 @@ pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
         st.runner.lock().unwrap().terminate();
+        // Stop the plugins/overlay we launched on start (WayVR, etc.) so they don't
+        // outlive the service and collide with the next start.
+        kill_plugins(&st);
 
         let cfg = st.config.lock().unwrap().clone();
         let env = env_map(&cfg);
@@ -313,7 +327,6 @@ pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
         // Hand the runtimes back so SteamVR keeps working when monado is off.
         let _ = active_runtime::restore_backup();
         let _ = openvr_paths::restore_backup();
-        st.plugin_pids.lock().unwrap().clear();
         Ok(())
     })
     .await
@@ -412,7 +425,8 @@ pub fn launch_plugin(state: State<AppState>, index: usize) -> CmdResult<u32> {
         .plugins
         .get(index)
         .ok_or_else(|| "no such plugin".to_string())?;
-    let pid = plugin.launch(&env_map(&cfg)).map_err(|e| e.to_string())?;
-    state.plugin_pids.lock().unwrap().push(pid);
+    let child = plugin.launch(&env_map(&cfg)).map_err(|e| e.to_string())?;
+    let pid = child.id();
+    state.plugin_children.lock().unwrap().push(child);
     Ok(pid)
 }

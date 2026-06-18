@@ -1,5 +1,5 @@
 //! Monadeck desktop backend. Thin Tauri command layer over `monadeck-core`:
-//! it owns the app state (config, the running service, launched plugin PIDs) and
+//! it owns the app state (config, the running service, launched plugin processes) and
 //! exposes a flat command surface to the SvelteKit frontend, mirroring the
 //! `invoke(...)` style used in NemuriXR/udcap-control.
 
