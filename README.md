@@ -28,6 +28,7 @@ Monadeck is two halves that share one library: an **in-headset launcher** you li
 
 ### On the desktop
 
+- **📦 Get a runtime in one click**: install a prebuilt build of the Monado fork and the latest xrizer straight from GitHub (no compiling), or point Monadeck at your own.
 - **🚀 Run your Monado service**: start and stop it with your own environment variables.
 - **🎛️ Switch runtimes safely**: register **xrizer** as the OpenVR runtime and point OpenXR at Monado, backing up and restoring your existing config so it never eats a working SteamVR setup.
 - **⚡ One-click `CAP_SYS_NICE`**: the permission Monado wants after a rebuild, applied with a single authorised click.
@@ -35,7 +36,7 @@ Monadeck is two halves that share one library: an **in-headset launcher** you li
 - **🧩 Plugins by explicit path**: no `$PATH`, no `.desktop` files.
 - **🔌 Live device list**: HMD, controllers, trackers, and battery via libmonado.
 
-It deliberately **doesn't** build Monado from source, manage drivers, or check dependencies, that's what [Envision](https://gitlab.com/gabmus/envision) is for.
+It deliberately **doesn't build Monado from source** or manage drivers, though it *can* fetch a prebuilt build of the fork and the latest xrizer for you (see [Requirements](#requirements)). For source builds, driver profiles, and full dependency management, that's what [Envision](https://gitlab.com/gabmus/envision) is for.
 
 ## How it works
 
@@ -46,8 +47,8 @@ Two parts, one configuration:
 
 ## Requirements
 
-- **Linux** with a **Monado**-based OpenXR runtime (a custom build / fork is the whole point).
-- **xrizer** as your OpenVR runtime, for SteamVR games.
+- **Linux.** That's the only hard requirement to get started.
+- A **Monado**-based OpenXR runtime and **xrizer** for OpenVR/SteamVR games, but not up front: Monadeck can **install a prebuilt build of the fork and the latest xrizer for you** (Settings → General → *Install built-in*), or use your own existing build / fork.
 - **Steam** (with **Proton** for Windows games), which Monadeck reads for your library and Steam's cover art.
 - A headset exposing info through **libmonado** for the live device and battery strip (optional).
 
@@ -65,7 +66,7 @@ This produces a `.rpm`, `.deb`, and `.AppImage` in `desktop/src-tauri/target/rel
 
 ## Using it
 
-1. Launch Monadeck, open **Settings**, and set your **Monado build prefix** (e.g. `~/monado/build/install`) and your **xrizer runtime path**. Monadeck tries to autodetect both from `$PATH` and your current active runtime.
+1. Launch Monadeck and open **Settings → General**. Either click **Install built-in Monado** / **Install built-in xrizer** to download a prebuilt fork build and the latest xrizer, or set your own **Monado build prefix** (e.g. `~/monado/build/install`) and **xrizer runtime path**. Monadeck also tries to autodetect both from `$PATH` and your current active runtime.
 2. **Start the runtime**, then register xrizer/OpenXR (your existing config is backed up automatically). If a rebuild left Monado without `CAP_SYS_NICE`, accept the prompt to apply it.
 3. Put the headset on, the dashboard opens. **Press the system button on your left controller** to summon or dismiss it; **point + trigger** to select, **grip** to grab and move it.
 4. Browse, search, favourite, and drop games into collections. The **Tools** and **Settings** tabs live at the bottom of the left rail; tune the panel under **Settings → Placement**.
