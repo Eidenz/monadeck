@@ -14,6 +14,8 @@ use monadeck_core::devices::service_connected;
 enum Cmd {
     SetBlock(bool),
     Recenter,
+    /// Set the playspace tracking-origin offset: translation (m) + yaw (rad).
+    SetOrigin { x: f32, y: f32, z: f32, yaw: f32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,19 +75,43 @@ impl MonadoLink {
     pub fn recenter(&self) {
         let _ = self.cmd_tx.send(Cmd::Recenter);
     }
+
+    /// Set the playspace offset (OVRAS-style floor/position adjust): translation
+    /// in metres + yaw in radians. Persisted by the caller; re-applied on
+    /// reconnect. `yaw` rotates the play area about the vertical axis.
+    pub fn set_origin(&self, x: f32, y: f32, z: f32, yaw: f32) {
+        let _ = self.cmd_tx.send(Cmd::SetOrigin { x, y, z, yaw });
+    }
 }
 
 fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
     let mut mon: Option<Monado> = None;
+    // The desired playspace offset, re-applied whenever we (re)connect so it
+    // survives a service restart.
+    let mut desired_origin: Option<(f32, f32, f32, f32)> = None;
     loop {
+        let was_connected = mon.is_some();
         if mon.is_none() && service_connected() {
             mon = Monado::auto_connect().ok();
+        }
+        if !was_connected && mon.is_some() {
+            if let Some((x, y, z, yaw)) = desired_origin {
+                set_origin_offset(&mon, x, y, z, yaw);
+            }
         }
         match cmd_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Cmd::Recenter) => {
                 if let Some(m) = &mon {
                     let _ = m.recenter_local_spaces();
                 }
+                // A recenter can reset spaces — re-assert our offset.
+                if let Some((x, y, z, yaw)) = desired_origin {
+                    set_origin_offset(&mon, x, y, z, yaw);
+                }
+            }
+            Ok(Cmd::SetOrigin { x, y, z, yaw }) => {
+                desired_origin = Some((x, y, z, yaw));
+                set_origin_offset(&mon, x, y, z, yaw);
             }
             Ok(Cmd::SetBlock(block)) => apply_block(&mon, block),
             Err(RecvTimeoutError::Timeout) => {
@@ -164,6 +190,23 @@ fn poll_batteries(mon: &Option<Monado>) -> Vec<BatteryInfo> {
         out.push(BatteryInfo { kind, charge: b.charge, charging: b.charging });
     }
     out
+}
+
+/// Apply a playspace offset to the primary tracking origin (OVRAS-style). `yaw`
+/// is a rotation about the vertical (Y) axis. No-op if not connected / no origin.
+fn set_origin_offset(mon: &Option<Monado>, x: f32, y: f32, z: f32, yaw: f32) {
+    let Some(m) = mon else { return };
+    let Ok(origins) = m.tracking_origins() else { return };
+    let pose = libmonado::Pose {
+        position: mint::Vector3 { x, y, z },
+        orientation: mint::Quaternion {
+            v: mint::Vector3 { x: 0.0, y: (yaw * 0.5).sin(), z: 0.0 },
+            s: (yaw * 0.5).cos(),
+        },
+    };
+    if let Some(origin) = origins.into_iter().next() {
+        let _ = origin.set_offset(pose);
+    }
 }
 
 /// Block/unblock controller input on the game client (active + visible + not an

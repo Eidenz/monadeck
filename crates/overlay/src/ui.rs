@@ -13,6 +13,7 @@ pub enum Nav {
     Favorites,
     Tags,
     Tools,
+    Playspace,
     Settings,
 }
 
@@ -71,6 +72,14 @@ pub struct LibState {
     pub panel_dist: f32,
     pub panel_scale: f32,
     pub panel_curve: f32,
+    /// Playspace offset (OVRAS-style): metres + yaw in degrees, with the chosen
+    /// nudge steps. Mirrored to/from the overlay config; applied via libmonado.
+    pub playspace_x: f32,
+    pub playspace_y: f32,
+    pub playspace_z: f32,
+    pub playspace_yaw: f32,
+    pub playspace_step: f32,     // metres per nudge
+    pub playspace_yaw_step: f32, // degrees per nudge
     /// Timer state. `timer_secs` is the configured duration (adjusted when idle);
     /// `timer_remaining`/`timer_running`/`timer_paused` are set by the loop; the
     /// request flags are drained by it.
@@ -130,6 +139,12 @@ impl LibState {
             panel_dist: 1.5,
             panel_scale: 1.0,
             panel_curve: 1.0,
+            playspace_x: 0.0,
+            playspace_y: 0.0,
+            playspace_z: 0.0,
+            playspace_yaw: 0.0,
+            playspace_step: 0.05,
+            playspace_yaw_step: 15.0,
             timer_secs: 300,
             timer_total: 300,
             timer_remaining: 300,
@@ -154,7 +169,7 @@ const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
 /// The main (centre) panel: search bar, the active view (or active-game splash),
 /// the on-screen keyboard, and the launching/fade overlays.
 pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
-    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::Tools);
+    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::Tools | Nav::Playspace);
     if (searchable || st.naming) && st.keyboard_open {
         keyboard(ctx, st);
     }
@@ -218,17 +233,22 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
                 }
                 ui.add_space(8.0);
             }
-            // Tools (timer) + Settings pinned to the bottom.
+            // Tools (timer) · Playspace · Settings pinned to the bottom.
             let avail = ui.available_height();
-            ui.add_space((avail - 112.0).max(0.0));
-            for (glyph, nav) in [(icon::TIMER, Nav::Tools), (icon::GEAR, Nav::Settings)] {
+            ui.add_space((avail - 168.0).max(0.0));
+            let bottom = [
+                (icon::TIMER, Nav::Tools),
+                (icon::ARROWS_OUT_CARDINAL, Nav::Playspace),
+                (icon::GEAR, Nav::Settings),
+            ];
+            for (k, &(glyph, nav)) in bottom.iter().enumerate() {
                 let active = st.nav == nav && !st.show_splash;
                 if rail_button(ui, glyph, active).clicked() && !active {
                     st.nav = nav;
                     st.show_splash = false;
                     st.sound_tab = true;
                 }
-                if nav == Nav::Tools {
+                if k + 1 < bottom.len() {
                     ui.add_space(8.0);
                 }
             }
@@ -282,11 +302,25 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
         .inner_margin(egui::Margin::symmetric(18, 6));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
-            // Recenter playspace.
-            let recenter = egui::Button::new(egui::RichText::new(icon::CROSSHAIR).size(22.0))
-                .min_size(egui::vec2(46.0, 40.0))
-                .fill(egui::Color32::TRANSPARENT);
-            if ui.add(recenter).on_hover_text("Recenter playspace").clicked() {
+            // Recenter playspace — transparent at rest, fades to a hover highlight
+            // with the icon brightening to white.
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(46.0, 40.0), egui::Sense::click());
+            let t = ui.ctx().animate_bool(resp.id, resp.hovered());
+            if t > 0.001 {
+                ui.painter().rect_filled(
+                    rect,
+                    egui::CornerRadius::same(10),
+                    egui::Color32::from_rgba_unmultiplied(48, 70, 74, (t * 255.0) as u8),
+                );
+            }
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                icon::CROSSHAIR,
+                egui::FontId::proportional(22.0),
+                lerp_color(theme::ON_SURFACE_VAR, egui::Color32::WHITE, t),
+            );
+            if resp.on_hover_text("Recenter playspace").clicked() {
                 st.recenter_playspace_request = true;
                 st.sound_tab = true;
             }
@@ -486,6 +520,11 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
                 st.visible_now.clear();
                 st.hovered_index = None;
                 tools_view(ui, st);
+            }
+            Nav::Playspace => {
+                st.visible_now.clear();
+                st.hovered_index = None;
+                playspace_view(ui, st);
             }
             Nav::Settings => {
                 st.visible_now.clear();
@@ -1117,6 +1156,145 @@ pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind
                 });
             });
         });
+}
+
+/// OVRAS-style playspace page: nudge the floor / play area on each axis (and
+/// rotate) with selectable steps. Applied live via libmonado and persisted.
+fn playspace_view(ui: &mut egui::Ui, st: &mut LibState) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(icon::ARROWS_OUT_CARDINAL).size(28.0).color(theme::PRIMARY));
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("Playspace").size(28.0).strong().color(egui::Color32::WHITE));
+    });
+    ui.add_space(2.0);
+    ui.label(egui::RichText::new("Nudge where your floor and play area sit.").size(14.0).color(theme::ON_SURFACE_VAR));
+    ui.add_space(16.0);
+
+    // Step selectors.
+    ui.horizontal(|ui| {
+        ui.add_sized(egui::vec2(150.0, 30.0), egui::Label::new(egui::RichText::new("Move step").size(14.0).color(theme::ON_SURFACE)));
+        for m in [0.01_f32, 0.05, 0.10] {
+            let sel = (st.playspace_step - m).abs() < 0.001;
+            if pill(ui, &format!("{} cm", (m * 100.0).round() as i32), 66.0, sel).clicked() {
+                st.playspace_step = m;
+                st.sound_tab = true;
+            }
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add_sized(egui::vec2(150.0, 30.0), egui::Label::new(egui::RichText::new("Rotate step").size(14.0).color(theme::ON_SURFACE)));
+        for d in [5.0_f32, 15.0, 45.0] {
+            let sel = (st.playspace_yaw_step - d).abs() < 0.1;
+            if pill(ui, &format!("{}°", d as i32), 56.0, sel).clicked() {
+                st.playspace_yaw_step = d;
+                st.sound_tab = true;
+            }
+        }
+    });
+    ui.add_space(18.0);
+
+    let step = st.playspace_step;
+    let ystep = st.playspace_yaw_step;
+    let mut bumped = false;
+    let t = fmt_m(st.playspace_y);
+    bumped |= ps_row(ui, "Height (up / down)", &mut st.playspace_y, step, &t, icon::MINUS, icon::PLUS);
+    let t = fmt_m(st.playspace_z);
+    bumped |= ps_row(ui, "Forward / back", &mut st.playspace_z, step, &t, icon::MINUS, icon::PLUS);
+    let t = fmt_m(st.playspace_x);
+    bumped |= ps_row(ui, "Left / right", &mut st.playspace_x, step, &t, icon::MINUS, icon::PLUS);
+    let t = fmt_deg(st.playspace_yaw);
+    bumped |= ps_row(ui, "Rotate (yaw)", &mut st.playspace_yaw, ystep, &t, icon::ARROW_COUNTER_CLOCKWISE, icon::ARROW_CLOCKWISE);
+
+    if bumped {
+        st.playspace_x = st.playspace_x.clamp(-3.0, 3.0);
+        st.playspace_y = st.playspace_y.clamp(-2.0, 2.0);
+        st.playspace_z = st.playspace_z.clamp(-3.0, 3.0);
+        if st.playspace_yaw > 180.0 {
+            st.playspace_yaw -= 360.0;
+        } else if st.playspace_yaw < -180.0 {
+            st.playspace_yaw += 360.0;
+        }
+        st.sound_tab = true;
+    }
+
+    ui.add_space(20.0);
+    ui.horizontal(|ui| {
+        let reset = egui::Button::new(
+            egui::RichText::new(format!("{}  Reset", icon::ARROW_COUNTER_CLOCKWISE)).size(16.0).color(theme::ON_SURFACE),
+        )
+        .fill(theme::SURFACE_CONTAINER_HIGH)
+        .corner_radius(10)
+        .min_size(egui::vec2(150.0, 44.0));
+        if ui.add(reset).clicked() {
+            st.playspace_x = 0.0;
+            st.playspace_y = 0.0;
+            st.playspace_z = 0.0;
+            st.playspace_yaw = 0.0;
+            st.sound_tab = true;
+        }
+        ui.add_space(10.0);
+        let rec = egui::Button::new(
+            egui::RichText::new(format!("{}  Recenter", icon::CROSSHAIR_SIMPLE)).size(16.0).color(egui::Color32::BLACK),
+        )
+        .fill(theme::PRIMARY)
+        .corner_radius(10)
+        .min_size(egui::vec2(160.0, 44.0));
+        if ui.add(rec).on_hover_text("Recenter to your current head pose").clicked() {
+            st.recenter_playspace_request = true;
+            st.sound_tab = true;
+        }
+    });
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("Offsets persist and re-apply when the runtime restarts.").size(13.0).color(theme::ON_SURFACE_VAR));
+}
+
+fn ps_row(ui: &mut egui::Ui, label: &str, value: &mut f32, step: f32, value_text: &str, minus: &str, plus: &str) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            egui::vec2(168.0, 44.0),
+            egui::Label::new(egui::RichText::new(label).size(15.0).color(theme::ON_SURFACE)),
+        );
+        if ps_btn(ui, minus).clicked() {
+            *value -= step;
+            changed = true;
+        }
+        ui.add_sized(
+            egui::vec2(116.0, 44.0),
+            egui::Label::new(egui::RichText::new(value_text).size(18.0).strong().color(egui::Color32::WHITE)),
+        );
+        if ps_btn(ui, plus).clicked() {
+            *value += step;
+            changed = true;
+        }
+    });
+    changed
+}
+
+fn ps_btn(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(egui::RichText::new(glyph).size(19.0).color(theme::ON_SURFACE))
+            .fill(theme::SURFACE_CONTAINER_HIGH)
+            .corner_radius(10)
+            .min_size(egui::vec2(66.0, 44.0)),
+    )
+}
+
+fn fmt_m(v: f32) -> String {
+    if v.abs() < 0.005 {
+        "0.00 m".to_string()
+    } else {
+        format!("{v:+.2} m")
+    }
+}
+
+fn fmt_deg(v: f32) -> String {
+    if v.abs() < 0.5 {
+        "0°".to_string()
+    } else {
+        format!("{v:+.0}°")
+    }
 }
 
 /// A labelled +/- stepper (for knobs that resize the panel the control sits on,

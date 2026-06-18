@@ -852,6 +852,7 @@ dependencies = [
  "image",
  "libmonado",
  "log",
+ "mint",
  "monadeck-core",
  "openxr",
  "rodio",

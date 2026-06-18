@@ -1,17 +1,23 @@
 <script lang="ts">
-  // Connected XR apps (wayvr, nemurixr, games, …). libmonado control connections
-  // are filtered out in the backend, so this stays clean even when several tools
-  // share one libmonado — the spammy-list problem Envision has.
+  // Connected XR tools/overlays (wayvr, nemurixr, …). libmonado control
+  // connections are filtered out in the backend; the running game is filtered
+  // here — it's the "Now Playing" card's job, not this row's — so this stays
+  // clean even when several tools share one libmonado.
   import { app } from "$lib/state.svelte";
+
+  // Drop the game: the primary app, or any focused non-overlay client.
+  const apps = $derived(
+    app.clients.filter((c) => !c.primary && !(c.focused && !c.overlay)),
+  );
 </script>
 
 <div class="apps">
   <span class="hdr">Apps</span>
   <div class="list">
-    {#if app.clients.length === 0}
+    {#if apps.length === 0}
       <span class="empty">none connected</span>
     {:else}
-      {#each app.clients as c (c.name)}
+      {#each apps as c (c.name)}
         <span class="chip" class:focused={c.focused} title={c.overlay ? "overlay" : "app"}>
           <span class="dot"></span>{c.name}
         </span>

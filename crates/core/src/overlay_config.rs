@@ -19,6 +19,11 @@ pub struct OverlayConfig {
     pub panel_scale: f32,
     /// Cylinder curvature multiplier (1.0 = wraps around you; larger = flatter).
     pub panel_curve: f32,
+    /// Playspace tracking-origin offset (OVRAS-style): metres + yaw in degrees.
+    pub playspace_x: f32,
+    pub playspace_y: f32,
+    pub playspace_z: f32,
+    pub playspace_yaw: f32,
 }
 
 impl Default for OverlayConfig {
@@ -30,6 +35,10 @@ impl Default for OverlayConfig {
             panel_dist: 1.5,
             panel_scale: 1.0,
             panel_curve: 1.0,
+            playspace_x: 0.0,
+            playspace_y: 0.0,
+            playspace_z: 0.0,
+            playspace_yaw: 0.0,
         }
     }
 }

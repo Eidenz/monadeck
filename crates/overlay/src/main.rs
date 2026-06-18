@@ -382,10 +382,26 @@ fn run() -> Result<()> {
         ov_cfg.panel_dist,
         ov_cfg.panel_scale,
         ov_cfg.panel_curve,
+        ov_cfg.playspace_x,
+        ov_cfg.playspace_y,
+        ov_cfg.playspace_z,
+        ov_cfg.playspace_yaw,
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Re-place the dashboard in front of you when the distance knob changes.
     let mut panel_dist_prev = ov_cfg.panel_dist;
+    // Playspace offset: track changes to push to libmonado, and apply the
+    // persisted offset now so it lands as soon as the service connects.
+    let mut playspace_prev =
+        (ov_cfg.playspace_x, ov_cfg.playspace_y, ov_cfg.playspace_z, ov_cfg.playspace_yaw);
+    if playspace_prev != (0.0, 0.0, 0.0, 0.0) {
+        monado.set_origin(
+            ov_cfg.playspace_x,
+            ov_cfg.playspace_y,
+            ov_cfg.playspace_z,
+            ov_cfg.playspace_yaw.to_radians(),
+        );
+    }
     // Tracked playtime: total seconds per game key + the in-progress session.
     let mut playtime: HashMap<String, u64> = monadeck_core::playtime::load();
     let mut session_start: Option<Instant> = None;
@@ -400,6 +416,10 @@ fn run() -> Result<()> {
     st.panel_dist = ov_cfg.panel_dist;
     st.panel_scale = ov_cfg.panel_scale;
     st.panel_curve = ov_cfg.panel_curve;
+    st.playspace_x = ov_cfg.playspace_x;
+    st.playspace_y = ov_cfg.playspace_y;
+    st.playspace_z = ov_cfg.playspace_z;
+    st.playspace_yaw = ov_cfg.playspace_yaw;
     st.collections = collections.iter().map(|c| c.name.clone()).collect();
 
     // --- Loop state ---------------------------------------------------------
@@ -974,6 +994,10 @@ fn run() -> Result<()> {
             st.panel_dist,
             st.panel_scale,
             st.panel_curve,
+            st.playspace_x,
+            st.playspace_y,
+            st.playspace_z,
+            st.playspace_yaw,
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -986,8 +1010,24 @@ fn run() -> Result<()> {
                 panel_dist: st.panel_dist,
                 panel_scale: st.panel_scale,
                 panel_curve: st.panel_curve,
+                playspace_x: st.playspace_x,
+                playspace_y: st.playspace_y,
+                playspace_z: st.playspace_z,
+                playspace_yaw: st.playspace_yaw,
             }
             .save();
+        }
+        // Playspace offset changed -> push it to libmonado (yaw in radians).
+        let playspace_now =
+            (st.playspace_x, st.playspace_y, st.playspace_z, st.playspace_yaw);
+        if playspace_now != playspace_prev {
+            playspace_prev = playspace_now;
+            monado.set_origin(
+                st.playspace_x,
+                st.playspace_y,
+                st.playspace_z,
+                st.playspace_yaw.to_radians(),
+            );
         }
         // Changing the distance re-places the dashboard in front of you.
         if st.panel_dist != panel_dist_prev {
