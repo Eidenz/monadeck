@@ -825,7 +825,7 @@ checksum = "e53debba6bda7a793e5f99b8dacf19e626084f525f7829104ba9898f367d85ff"
 
 [[package]]
 name = "monadeck-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "monadeck-overlay"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "ash",

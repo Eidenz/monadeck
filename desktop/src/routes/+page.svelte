@@ -9,6 +9,7 @@
   import CapToast from "$lib/components/CapToast.svelte";
   import CrashToast from "$lib/components/CrashToast.svelte";
   import PreflightBanner from "$lib/components/PreflightBanner.svelte";
+  import NoRuntimeBanner from "$lib/components/NoRuntimeBanner.svelte";
   import DeviceStrip from "$lib/components/DeviceStrip.svelte";
   import AppsBar from "$lib/components/AppsBar.svelte";
   import {
@@ -23,11 +24,14 @@
 
   let dismissed = $state(false);
   let preflightDismissed = $state(false);
+  let noRuntimeDismissed = $state(false);
   const showToast = $derived(app.caps === "needs_setcap" && !dismissed);
   const showCrash = $derived(app.crash !== null);
   const showPreflight = $derived(
     app.preflight !== null && !app.preflight.all_ok && !preflightDismissed,
   );
+  // No valid Monado prefix (service binary missing) → offer setup.
+  const showNoRuntime = $derived(app.caps === "no_binary" && !noRuntimeDismissed);
 
   // Stopped → Warming up… (process up, system not ready yet) → Now Playing.
   const heading = $derived(
@@ -55,7 +59,7 @@
   let contentH = $state(0); // measured deck (+ error) height
   let toastSlotH = $state(0); // measured toast card height
   const toastH = $derived(
-    showToast || showCrash || showPreflight ? toastSlotH : 0,
+    showToast || showCrash || showPreflight || showNoRuntime ? toastSlotH : 0,
   );
 
   let appliedToastH = 0;
@@ -117,9 +121,10 @@
 </script>
 
 <div class="deck-window">
-  {#if showToast || showCrash || showPreflight}
+  {#if showToast || showCrash || showPreflight || showNoRuntime}
     <div class="toast-slot" bind:clientHeight={toastSlotH}>
       {#if showCrash}<CrashToast />{/if}
+      {#if showNoRuntime}<NoRuntimeBanner bind:dismissed={noRuntimeDismissed} />{/if}
       {#if showPreflight}<PreflightBanner bind:dismissed={preflightDismissed} />{/if}
       {#if showToast}<CapToast bind:dismissed />{/if}
     </div>

@@ -51,6 +51,23 @@ pub fn monadeck_config_dir() -> PathBuf {
     config_home().join("monadeck")
 }
 
+/// `$XDG_DATA_HOME`, or `$HOME/.local/share` as the spec-mandated fallback.
+pub fn data_home() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        let p = PathBuf::from(xdg);
+        if p.is_absolute() {
+            return p;
+        }
+    }
+    home().join(".local/share")
+}
+
+/// `~/.local/share/monadeck` — where Monadeck parks larger downloaded payloads
+/// (built-in Monado runtimes, xrizer), kept out of the config dir.
+pub fn monadeck_data_dir() -> PathBuf {
+    data_home().join("monadeck")
+}
+
 /// Where backups of clobbered runtime files are parked, so a toggle is always
 /// reversible and we never destroy an existing SteamVR setup.
 pub fn backup_dir() -> PathBuf {

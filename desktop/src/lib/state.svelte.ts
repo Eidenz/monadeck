@@ -23,6 +23,15 @@ export const app = $state({
   devices: [] as DeviceInfo[],
   clients: [] as ClientInfo[],
   busy: false,
+  // Which built-in runtime is currently downloading/installing ("" = none).
+  installing: "" as "" | "monado" | "xrizer",
+  // Last install outcome, tagged by runtime so the UI shows it in the right
+  // section (a Monado result must not render under xrizer).
+  installResult: null as null | {
+    kind: "monado" | "xrizer";
+    ok: boolean;
+    msg: string;
+  },
   error: "" as string,
   // Set when the service stops without us asking (crash) — drives the toast.
   crash: null as { code: number | null } | null,
@@ -152,6 +161,37 @@ export async function stop() {
   } finally {
     app.busy = false;
     await refreshStatus();
+  }
+}
+
+// Download + install a built-in runtime, then pull the updated config/status so
+// the new prefix takes effect (Start enables, the no-runtime banner clears).
+export async function installMonado() {
+  app.installing = "monado";
+  app.installResult = null;
+  try {
+    const r = await api.installBuiltinMonado();
+    app.installResult = { kind: "monado", ok: true, msg: `Installed Monado ${r.tag}` };
+    await refreshConfig();
+    await refreshStatus();
+  } catch (e) {
+    app.installResult = { kind: "monado", ok: false, msg: String(e) };
+  } finally {
+    app.installing = "";
+  }
+}
+
+export async function installXrizer() {
+  app.installing = "xrizer";
+  app.installResult = null;
+  try {
+    const r = await api.installBuiltinXrizer();
+    app.installResult = { kind: "xrizer", ok: true, msg: `Installed xrizer ${r.tag}` };
+    await refreshConfig();
+  } catch (e) {
+    app.installResult = { kind: "xrizer", ok: false, msg: String(e) };
+  } finally {
+    app.installing = "";
   }
 }
 

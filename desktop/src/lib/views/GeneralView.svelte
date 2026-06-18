@@ -1,6 +1,12 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, saveConfig, applyCaps } from "$lib/state.svelte";
+  import {
+    app,
+    saveConfig,
+    applyCaps,
+    installMonado,
+    installXrizer,
+  } from "$lib/state.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
 
   async function browse(field: "monado_prefix" | "xrizer_path") {
@@ -43,6 +49,21 @@
         ? "monado-service not found under this prefix."
         : `${app.config?.monado_prefix || "—"}/bin/monado-service`}
     </span>
+    <div class="install">
+      <button
+        class:accent={app.caps === "no_binary"}
+        onclick={installMonado}
+        disabled={app.installing !== ""}
+      >
+        {app.installing === "monado"
+          ? "Downloading & installing…"
+          : "Install built-in Monado (latest)"}
+      </button>
+      <span class="install-hint">Downloads our prebuilt fork and points the prefix at it — no compiling.</span>
+    </div>
+    {#if app.installResult?.kind === "monado"}
+      <span class="install-ok" class:bad={!app.installResult.ok}>{app.installResult.msg}</span>
+    {/if}
   </div>
 
   <div class="field">
@@ -60,6 +81,20 @@
       />
       <button onclick={() => browse("xrizer_path")}>Browse…</button>
     </div>
+    <div class="install">
+      <button
+        onclick={installXrizer}
+        disabled={app.installing !== ""}
+      >
+        {app.installing === "xrizer"
+          ? "Downloading & installing…"
+          : "Install built-in xrizer (latest)"}
+      </button>
+      <span class="install-hint">Downloads the latest xrizer release and registers it as the OpenVR runtime.</span>
+    </div>
+    {#if app.installResult?.kind === "xrizer"}
+      <span class="install-ok" class:bad={!app.installResult.ok}>{app.installResult.msg}</span>
+    {/if}
   </div>
 
   <div class="field">
@@ -210,6 +245,28 @@
   }
   .note.bad {
     color: hsl(var(--danger));
+  }
+  .install {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 4px;
+    flex-wrap: wrap;
+  }
+  .install-hint {
+    font-size: 11px;
+    color: hsl(var(--muted));
+  }
+  .install-ok {
+    font-size: 11.5px;
+    color: hsl(var(--ok));
+    margin-top: 2px;
+  }
+  .install-ok.bad {
+    color: hsl(var(--danger));
+  }
+  button:disabled {
+    opacity: 0.55;
   }
   .seg {
     display: flex;

@@ -120,6 +120,8 @@ pub fn run() {
             commands::import_openxr_status,
             commands::write_import_openxr,
             commands::preflight_check,
+            commands::install_builtin_monado,
+            commands::install_builtin_xrizer,
             commands::list_installed_apps,
             commands::launch_plugin,
             bindings::scan_steam_games,

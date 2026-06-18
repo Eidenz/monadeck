@@ -38,6 +38,12 @@ export const setAmdVrProfile = () => invoke<void>("set_amd_vr_profile");
 export const importOpenxrStatus = () => invoke<boolean>("import_openxr_status");
 export const writeImportOpenxr = () => invoke<void>("write_import_openxr");
 export const preflightCheck = () => invoke<PreflightReport>("preflight_check");
+
+import type { Installed } from "./types";
+export const installBuiltinMonado = () =>
+  invoke<Installed>("install_builtin_monado");
+export const installBuiltinXrizer = () =>
+  invoke<Installed>("install_builtin_xrizer");
 export const getLogs = (since: number) =>
   invoke<LogChunk>("get_logs", { since });
 

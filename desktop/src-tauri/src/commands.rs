@@ -5,9 +5,11 @@
 use crate::state::AppState;
 use monadeck_core::active_runtime::{self, ActiveRuntimeKind};
 use monadeck_core::config::MonadeckConfig;
+use monadeck_core::config::OvrRuntime;
 use monadeck_core::desktop::{self, InstalledApp};
 use monadeck_core::devices::{self, Snapshot};
 use monadeck_core::gpu::{self, AmdGpu};
+use monadeck_core::installer::{self, Installed};
 use monadeck_core::proton;
 use monadeck_core::launch_options;
 use monadeck_core::openvr_paths::{self, OvrPathsKind};
@@ -360,6 +362,39 @@ pub async fn preflight_check() -> CmdResult<PreflightReport> {
     tauri::async_runtime::spawn_blocking(preflight::run)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Download + install the latest portable Monado fork build from GitHub Releases,
+/// then point the config's prefix at it. Blocking (network + extract).
+#[tauri::command]
+pub async fn install_builtin_monado(state: State<'_, AppState>) -> CmdResult<Installed> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<Installed> {
+        let installed = installer::install_monado().map_err(|e| e.to_string())?;
+        let mut cfg = st.config.lock().unwrap();
+        cfg.monado_prefix = PathBuf::from(&installed.path);
+        cfg.save().map_err(|e| e.to_string())?;
+        Ok(installed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Download + install the latest xrizer release and register it as the OpenVR
+/// runtime in config (path + ovr_runtime). Blocking (network + extract).
+#[tauri::command]
+pub async fn install_builtin_xrizer(state: State<'_, AppState>) -> CmdResult<Installed> {
+    let st = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<Installed> {
+        let installed = installer::install_xrizer().map_err(|e| e.to_string())?;
+        let mut cfg = st.config.lock().unwrap();
+        cfg.xrizer_path = Some(PathBuf::from(&installed.path));
+        cfg.ovr_runtime = OvrRuntime::Xrizer;
+        cfg.save().map_err(|e| e.to_string())?;
+        Ok(installed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Installed `.desktop` applications, for the "add installed app" plugin picker.

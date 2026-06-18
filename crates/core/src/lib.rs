@@ -21,6 +21,7 @@ pub mod desktop;
 pub mod devices;
 pub mod favorites;
 pub mod gpu;
+pub mod installer;
 pub mod launch_options;
 pub mod monado_conn;
 pub mod openvr_paths;
