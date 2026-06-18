@@ -43,6 +43,8 @@ pub struct LibState {
     pub launch_request: Option<usize>,
     pub stop_request: Option<usize>,
     pub favorite_toggle_request: Option<usize>,
+    /// Toggle the selected game's UEVR ("VR Mod") flag.
+    pub uevr_toggle_request: Option<usize>,
     /// User collections (names, mirrored from the loop) + drained op requests.
     pub collections: Vec<String>,
     pub collection_toggle: Option<usize>, // toggle the selected game in collection #
@@ -59,6 +61,9 @@ pub struct LibState {
     /// Name of the game being launched (shows the "Launching…" overlay), set by
     /// the loop for ~1.5 s after Play before the dashboard auto-hides.
     pub launching_name: Option<String>,
+    /// Header text for the launching card — "Launching" by default, swapped to
+    /// "Waiting for UEVR injection…" while a VR-Mod game injects. Set by the loop.
+    pub launching_status: Option<String>,
     /// Summon fade-in amount (1 = fully dark, 0 = clear), set by the loop.
     pub fade_in: f32,
     /// One-shot UI-sound requests, drained by the loop.
@@ -67,6 +72,10 @@ pub struct LibState {
     /// Settings (mirrored to/from the persisted overlay config by the loop).
     pub audio_enabled: bool,
     pub audio_volume: f32,
+    /// Seconds chihuahua waits before injecting a UEVR game (Settings slider).
+    pub uevr_delay: u32,
+    /// Whether protontricks-launch is installed — the UEVR UI is hidden if not.
+    pub uevr_available: bool,
     pub summon_tilt: bool,
     /// Panel placement comfort knobs (mirrored to/from the overlay config).
     pub panel_dist: f32,
@@ -119,6 +128,7 @@ impl LibState {
             launch_request: None,
             stop_request: None,
             favorite_toggle_request: None,
+            uevr_toggle_request: None,
             collections: Vec::new(),
             collection_toggle: None,
             collection_create: None,
@@ -130,11 +140,14 @@ impl LibState {
             refresh_request: false,
             keyboard_open: false,
             launching_name: None,
+            launching_status: None,
             fade_in: 0.0,
             sound_select: false,
             sound_tab: false,
             audio_enabled: true,
             audio_volume: 0.55,
+            uevr_delay: 30,
+            uevr_available: false,
             summon_tilt: false,
             panel_dist: 1.5,
             panel_scale: 1.0,
@@ -199,7 +212,11 @@ fn overlays(ctx: &egui::Context, st: &LibState) {
                         ui.add_space(8.0);
                         ui.add(egui::Spinner::new().size(34.0).color(theme::PRIMARY));
                         ui.add_space(12.0);
-                        ui.label(egui::RichText::new("Launching").size(15.0).color(theme::ON_SURFACE_VAR));
+                        ui.label(
+                            egui::RichText::new(st.launching_status.as_deref().unwrap_or("Launching"))
+                                .size(15.0)
+                                .color(theme::ON_SURFACE_VAR),
+                        );
                         ui.label(egui::RichText::new(name).size(22.0).strong().color(egui::Color32::WHITE));
                         ui.add_space(8.0);
                     });
@@ -1408,6 +1425,25 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
         );
     });
 
+    if st.uevr_available {
+        ui.add_space(24.0);
+        ui.label(egui::RichText::new("VR Mod (UEVR)").size(19.0).strong().color(theme::ON_SURFACE));
+        ui.add_space(8.0);
+        ui.add(
+            egui::Slider::new(&mut st.uevr_delay, 0..=120)
+                .text(egui::RichText::new("Injection delay").size(15.0).color(theme::ON_SURFACE))
+                .suffix(" s"),
+        );
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Seconds to wait after launch before injecting. Raise it if a game needs longer to reach its menu.",
+            )
+            .size(14.0)
+            .color(theme::ON_SURFACE_VAR),
+        );
+    }
+
     ui.add_space(24.0);
     ui.label(egui::RichText::new("Library").size(19.0).strong().color(theme::ON_SURFACE));
     ui.add_space(8.0);
@@ -1436,6 +1472,7 @@ enum HeroAction {
     Launch,
     Stop,
     ToggleFavorite,
+    ToggleUevr,
 }
 
 const RUNNING_GREEN: egui::Color32 = egui::Color32::from_rgb(90, 220, 120);
@@ -1446,7 +1483,7 @@ fn hero(ui: &mut egui::Ui, st: &mut LibState) {
     let sel = st.selected.filter(|&i| i < st.games.len());
     let running = sel.is_some() && sel == st.running_index;
     let action = match sel {
-        Some(i) => hero_banner(ui, &st.games[i], running),
+        Some(i) => hero_banner(ui, &st.games[i], running, st.uevr_available),
         None => {
             hero_empty(ui);
             HeroAction::None
@@ -1456,6 +1493,7 @@ fn hero(ui: &mut egui::Ui, st: &mut LibState) {
         HeroAction::Launch => st.launch_request = sel,
         HeroAction::Stop => st.stop_request = sel,
         HeroAction::ToggleFavorite => st.favorite_toggle_request = sel,
+        HeroAction::ToggleUevr => st.uevr_toggle_request = sel,
         HeroAction::None => {}
     }
 }
@@ -1471,7 +1509,7 @@ fn hero_card() -> egui::Frame {
 /// The single, consistent hero layout: a wide banner showing the game's hero art
 /// when it's loaded, or a gradient placeholder (lazy-load swaps it in later) —
 /// so the hero never switches shape or flickers between portrait/landscape.
-fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool) -> HeroAction {
+fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, uevr_available: bool) -> HeroAction {
     let w = ui.available_width();
     let h = (w * 0.30).clamp(190.0, 300.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
@@ -1568,7 +1606,20 @@ fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool) -> HeroAction {
     );
     let star_clicked = ui.put(star_rect, fav_button(g.is_favorite)).clicked();
 
-    if star_clicked {
+    // VR-Mod (UEVR) toggle, left of the star — only for non-Steam games we can
+    // inject (v1 scope: they carry the launch exe via shortcuts.vdf).
+    let can_uevr = uevr_available && g.source != "Steam" && g.exe.is_some();
+    let uevr_clicked = can_uevr && {
+        let uevr_rect = egui::Rect::from_min_size(
+            egui::pos2(star_rect.left() - 12.0 - 104.0, star_rect.top()),
+            egui::vec2(104.0, 46.0),
+        );
+        ui.put(uevr_rect, uevr_button(g.uevr)).clicked()
+    };
+
+    if uevr_clicked {
+        HeroAction::ToggleUevr
+    } else if star_clicked {
         HeroAction::ToggleFavorite
     } else if play_clicked {
         action
@@ -1583,6 +1634,14 @@ fn fav_button(is_favorite: bool) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(icon::STAR).size(20.0).color(color))
         .fill(egui::Color32::from_black_alpha(120))
         .min_size(egui::vec2(46.0, 46.0))
+}
+
+/// The VR-Mod (UEVR) toggle: headset glyph + "UEVR" label, teal when enabled.
+fn uevr_button(enabled: bool) -> egui::Button<'static> {
+    let color = if enabled { theme::PRIMARY } else { theme::ON_SURFACE_VAR };
+    egui::Button::new(egui::RichText::new(format!("{}  UEVR", icon::VIRTUAL_REALITY)).size(16.0).color(color))
+        .fill(egui::Color32::from_black_alpha(120))
+        .min_size(egui::vec2(104.0, 46.0))
 }
 
 /// A subtle vertical gradient placeholder for the hero banner when there's no

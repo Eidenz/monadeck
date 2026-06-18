@@ -43,6 +43,10 @@ pub struct LibGame {
     /// The id art is keyed on (Steam appid or non-Steam shortcut appid).
     pub cover_id: Option<String>,
     pub source: String,
+    /// Non-Steam shortcut launch exe + working dir (for UEVR injection); `None`
+    /// for Steam apps (which launch via `steam://rungameid`).
+    pub exe: Option<String>,
+    pub start_dir: Option<String>,
     pub last_played: Option<u64>,
     pub size_on_disk: Option<u64>,
     /// Steam's own playtime, if known.
@@ -51,6 +55,8 @@ pub struct LibGame {
     /// gap for non-Steam games); set from the playtime store, not the scan.
     pub tracked_minutes: Option<u32>,
     pub is_favorite: bool,
+    /// User flagged this game to launch through UEVR ("VR Mod").
+    pub uevr: bool,
     /// Indices (into the live collections list) this game belongs to.
     pub collections: Vec<usize>,
     pub cover: ArtState,
@@ -106,11 +112,14 @@ pub fn to_games(rows: Vec<steam::LibraryGame>) -> Vec<LibGame> {
                 shortcut_id: g.shortcut_id,
                 cover_id,
                 source: g.source,
+                exe: g.exe,
+                start_dir: g.start_dir,
                 last_played: g.last_played,
                 size_on_disk: g.size_on_disk,
                 playtime_minutes: g.playtime_minutes,
                 tracked_minutes: None,
                 is_favorite: false,
+                uevr: false,
                 collections: Vec::new(),
                 cover: ArtState::Idle,
                 hero: ArtState::Idle,

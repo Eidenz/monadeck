@@ -208,6 +208,11 @@ pub struct LibraryGame {
     pub size_on_disk: Option<u64>,
     /// Total playtime in minutes (from `localconfig.vdf`), if tracked.
     pub playtime_minutes: Option<u32>,
+    /// Non-Steam only: the shortcut's launch exe + working dir (Linux paths from
+    /// `shortcuts.vdf`), used to locate the game binary for UEVR injection.
+    /// `None` for installed Steam apps (which launch via `steam://rungameid`).
+    pub exe: Option<String>,
+    pub start_dir: Option<String>,
 }
 
 /// Every installed Steam game + every non-Steam shortcut, sorted by name.
@@ -246,6 +251,8 @@ pub fn scan_library() -> Vec<LibraryGame> {
                 last_played: extract_vdf_value(&content, "LastPlayed").and_then(|s| s.parse().ok()),
                 size_on_disk: extract_vdf_value(&content, "SizeOnDisk").and_then(|s| s.parse().ok()),
                 playtime_minutes: playtime,
+                exe: None,
+                start_dir: None,
             });
         }
     }
@@ -259,14 +266,17 @@ pub fn scan_library() -> Vec<LibraryGame> {
         let trimmed = s.app_name.trim().trim_end_matches(".exe").trim();
         let name = if trimmed.is_empty() { format!("Shortcut {id}") } else { trimmed.to_string() };
         let playtime = playtimes.get(&id).copied();
+        let last_played = (s.last_play > 0).then_some(s.last_play as u64);
         games.push(LibraryGame {
             name,
             app_id: None,
             shortcut_id: Some(id),
             source: "Non-Steam".into(),
-            last_played: (s.last_play > 0).then_some(s.last_play as u64),
+            last_played,
             size_on_disk: None,
             playtime_minutes: playtime,
+            exe: Some(s.exe),
+            start_dir: Some(s.start_dir),
         });
     }
 

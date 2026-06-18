@@ -90,6 +90,7 @@ fn make_toast(
 fn apply_user_meta(
     games: &mut [games::LibGame],
     favorites: &HashSet<String>,
+    uevr_games: &HashSet<String>,
     playtime: &HashMap<String, u64>,
     collections: &[monadeck_core::collections::Collection],
 ) {
@@ -97,6 +98,7 @@ fn apply_user_meta(
         match g.cover_id.as_ref() {
             Some(id) => {
                 g.is_favorite = favorites.contains(id);
+                g.uevr = uevr_games.contains(id);
                 g.tracked_minutes = playtime.get(id).map(|&s| (s / 60) as u32).filter(|&m| m > 0);
                 g.collections = collections
                     .iter()
@@ -107,6 +109,7 @@ fn apply_user_meta(
             }
             None => {
                 g.is_favorite = false;
+                g.uevr = false;
                 g.tracked_minutes = None;
                 g.collections.clear();
             }
@@ -386,8 +389,11 @@ fn run() -> Result<()> {
         ov_cfg.playspace_y,
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
+        ov_cfg.uevr_delay,
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
+    // Games the user flagged to launch through UEVR ("VR Mod").
+    let mut uevr_games: HashSet<String> = monadeck_core::uevr::load_enabled();
     // Re-place the dashboard in front of you when the distance knob changes.
     let mut panel_dist_prev = ov_cfg.panel_dist;
     // Playspace offset: track changes to push to libmonado, and apply the
@@ -420,6 +426,18 @@ fn run() -> Result<()> {
     st.playspace_y = ov_cfg.playspace_y;
     st.playspace_z = ov_cfg.playspace_z;
     st.playspace_yaw = ov_cfg.playspace_yaw;
+    st.uevr_delay = ov_cfg.uevr_delay;
+    // Hide the UEVR feature entirely if protontricks-launch isn't installed.
+    st.uevr_available = monadeck_core::uevr::protontricks_available();
+    // If protontricks is present, make sure the chihuahua injector is too —
+    // download it on first run, in the background, so it's ready before the user
+    // launches a VR-Mod game. (No-op when it's already present.)
+    if st.uevr_available {
+        std::thread::spawn(|| match monadeck_core::uevr::ensure_chihuahua() {
+            Ok(p) => log::info!("UEVR injector ready: {}", p.display()),
+            Err(e) => log::warn!("UEVR injector unavailable (download/locate failed): {e}"),
+        });
+    }
     st.collections = collections.iter().map(|c| c.name.clone()).collect();
 
     // --- Loop state ---------------------------------------------------------
@@ -437,6 +455,9 @@ fn run() -> Result<()> {
     let start = Instant::now(); // egui clock (animations)
     let mut summon_at: Option<Instant> = None; // summon fade-in
     let mut launching_until: Option<Instant> = None; // "Launching…" hold before hide
+    // For a UEVR launch: keep the dashboard up showing "Waiting for UEVR injection…"
+    // until the game appears as a VR client (= injected) or this deadline passes.
+    let mut uevr_wait: Option<Instant> = None;
     let mut click_prev = false; // haptic click edge
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     // Re-scan to refresh last-played ordering when a game starts/stops.
@@ -495,7 +516,7 @@ fn run() -> Result<()> {
         // Drain the finished scan (metadata only; art loads lazily).
         if let Ok(rows) = scan_rx.try_recv() {
             st.games = games::to_games(rows);
-            apply_user_meta(&mut st.games, &favorites, &playtime, &collections);
+            apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
             st.scanning = false;
             if st.selected.is_none() && !st.games.is_empty() {
                 st.selected = Some(0);
@@ -509,7 +530,7 @@ fn run() -> Result<()> {
             if let Some(rx) = &refresh_rx {
                 if let Ok(rows) = rx.try_recv() {
                     st.games = games::to_games(rows);
-                    apply_user_meta(&mut st.games, &favorites, &playtime, &collections);
+                    apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
                     if st.selected.map_or(false, |i| i >= st.games.len()) {
                         st.selected = (!st.games.is_empty()).then_some(0);
                     }
@@ -548,6 +569,17 @@ fn run() -> Result<()> {
                 refresh_rx = Some(games::spawn_scan());
             }
         }
+        // UEVR launch in progress: auto-close the dashboard once the game appears
+        // as a VR client (= UEVR injected) or the wait times out.
+        if let Some(timeout) = uevr_wait {
+            if running.is_some() || Instant::now() >= timeout {
+                uevr_wait = None;
+                launching_until = None;
+                st.launching_name = None;
+                st.launching_status = None;
+                visible = false;
+            }
+        }
         // Live "this session" minutes for the splash.
         st.session_minutes = session_start.map(|s| (s.elapsed().as_secs() / 60) as u32);
 
@@ -579,18 +611,26 @@ fn run() -> Result<()> {
                     }
                 } else {
                     launching_until = None; // dismissed; drop any launch overlay
+                    uevr_wait = None;
                     st.launching_name = None;
+                    st.launching_status = None;
                 }
             }
             sys_prev = sys_down;
         }
 
-        // "Launching…" hold expired → hide the dashboard.
+        // "Launching…" hold expired → hide the dashboard (normal game), or for a
+        // UEVR game swap to the injection-wait message and stay open.
         if let Some(until) = launching_until {
             if Instant::now() >= until {
                 launching_until = None;
-                st.launching_name = None;
-                visible = false;
+                if uevr_wait.is_some() {
+                    st.launching_status = Some("Waiting for UEVR injection…".into());
+                } else {
+                    st.launching_name = None;
+                    st.launching_status = None;
+                    visible = false;
+                }
             }
         }
 
@@ -693,7 +733,7 @@ fn run() -> Result<()> {
             if let Some(rx) = &refresh_rx {
                 if let Ok(rows) = rx.try_recv() {
                     st.games = games::to_games(rows);
-                    apply_user_meta(&mut st.games, &favorites, &playtime, &collections);
+                    apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
                     st.selected = (!st.games.is_empty()).then_some(0);
                     last_used.clear();
                     refresh_rx = None;
@@ -964,10 +1004,22 @@ fn run() -> Result<()> {
         // --- Drain UI actions -----------------------------------------------
         if let Some(i) = st.launch_request.take() {
             if let Some(g) = st.games.get(i) {
-                launch_game(g);
+                if g.uevr {
+                    launch_uevr(g, st.uevr_delay);
+                    // Keep the dashboard up through injection; the wait ends when the
+                    // game shows up as a VR client, or this deadline passes.
+                    uevr_wait = Some(
+                        Instant::now() + std::time::Duration::from_secs(st.uevr_delay as u64 + 90),
+                    );
+                } else {
+                    launch_game(g);
+                    uevr_wait = None;
+                }
                 audio.launch();
                 st.launching_name = Some(g.name.clone());
-                // Hold the "Launching…" overlay briefly, then auto-hide.
+                st.launching_status = None;
+                // Hold the "Launching…" card briefly; a normal game then auto-hides,
+                // a UEVR game switches to the injection-wait message and stays open.
                 launching_until = Some(Instant::now() + std::time::Duration::from_millis(1500));
             }
             // Optimistically mark it "now" so it's at the top when you return
@@ -998,6 +1050,7 @@ fn run() -> Result<()> {
             st.playspace_y,
             st.playspace_z,
             st.playspace_yaw,
+            st.uevr_delay,
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -1014,6 +1067,7 @@ fn run() -> Result<()> {
                 playspace_y: st.playspace_y,
                 playspace_z: st.playspace_z,
                 playspace_yaw: st.playspace_yaw,
+                uevr_delay: st.uevr_delay,
             }
             .save();
         }
@@ -1052,6 +1106,19 @@ fn run() -> Result<()> {
                 monadeck_core::favorites::save(&favorites);
             }
         }
+        if let Some(i) = st.uevr_toggle_request.take() {
+            if let Some(g) = st.games.get_mut(i) {
+                g.uevr = !g.uevr;
+                if let Some(id) = &g.cover_id {
+                    if g.uevr {
+                        uevr_games.insert(id.clone());
+                    } else {
+                        uevr_games.remove(id);
+                    }
+                }
+                monadeck_core::uevr::save_enabled(&uevr_games);
+            }
+        }
         // Collections: create / toggle the selected game's membership / delete.
         let mut cols_dirty = false;
         if let Some(name) = st.collection_create.take() {
@@ -1073,7 +1140,7 @@ fn run() -> Result<()> {
         if cols_dirty {
             monadeck_core::collections::save(&collections);
             st.collections = collections.iter().map(|c| c.name.clone()).collect();
-            apply_user_meta(&mut st.games, &favorites, &playtime, &collections);
+            apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
         }
         if st.refresh_request {
             st.refresh_request = false;
@@ -1208,6 +1275,26 @@ fn launch_game(g: &games::LibGame) {
     if spawn("steam").is_err() {
         if let Err(e) = spawn("xdg-open") {
             log::warn!("failed to launch '{}': {e}", g.name);
+        }
+    }
+}
+
+/// Launch a game through UEVR ("VR Mod") via the chihuahua injector under Proton.
+/// Non-Steam only (we need the shortcut's exe + working dir + appid). Falls back
+/// to a plain launch if the data is missing or the injector can't be spawned.
+/// chihuahua is located by core (downloaded on first run; see `ensure_chihuahua`).
+fn launch_uevr(g: &games::LibGame, delay: u32) {
+    match (g.shortcut_id.as_deref(), g.exe.as_deref(), g.start_dir.as_deref()) {
+        (Some(appid), Some(exe), Some(start_dir)) => {
+            let opts = monadeck_core::uevr::LaunchOpts { delay, ..Default::default() };
+            if let Err(e) = monadeck_core::uevr::launch(appid, exe, start_dir, &opts) {
+                log::warn!("UEVR launch failed for '{}': {e} — falling back to a normal launch", g.name);
+                launch_game(g);
+            }
+        }
+        _ => {
+            log::warn!("'{}' is flagged for UEVR but isn't a launchable non-Steam game; launching normally", g.name);
+            launch_game(g);
         }
     }
 }

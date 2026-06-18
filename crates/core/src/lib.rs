@@ -33,5 +33,6 @@ pub mod preflight;
 pub mod proton;
 pub mod setcap;
 pub mod steam;
+pub mod uevr;
 
 pub use config::MonadeckConfig;
