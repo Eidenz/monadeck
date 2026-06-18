@@ -16,6 +16,7 @@ use monadeck_core::openvr_paths::{self, OvrPathsKind};
 use monadeck_core::plugins::ExecWhen;
 use monadeck_core::preflight::{self, PreflightReport};
 use monadeck_core::setcap::{self, CapStatus};
+use monadeck_core::uevr;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -405,6 +406,37 @@ pub async fn install_builtin_xrizer(state: State<'_, AppState>) -> CmdResult<Ins
         cfg.ovr_runtime = OvrRuntime::Xrizer;
         cfg.save().map_err(|e| e.to_string())?;
         Ok(installed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// UEVR ("VR Mod") tooling status for the desktop settings card: whether
+/// `protontricks-launch` is on PATH, and where the chihuahua injector is (if any).
+#[derive(Serialize)]
+pub struct UevrStatus {
+    pub protontricks: bool,
+    pub chihuahua: Option<String>,
+}
+
+#[tauri::command]
+pub async fn uevr_status() -> UevrStatus {
+    tauri::async_runtime::spawn_blocking(|| UevrStatus {
+        protontricks: uevr::protontricks_available(),
+        chihuahua: uevr::detect_chihuahua().map(|p| p.to_string_lossy().into_owned()),
+    })
+    .await
+    .unwrap_or(UevrStatus { protontricks: false, chihuahua: None })
+}
+
+/// Download the chihuahua injector ahead of time. `force` re-downloads the latest
+/// even if a copy already exists; otherwise it's a no-op when one is present.
+/// Returns the resolved path. Blocking (network + unzip).
+#[tauri::command]
+pub async fn install_chihuahua(force: bool) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let r = if force { uevr::reinstall_chihuahua() } else { uevr::ensure_chihuahua() };
+        r.map(|p| p.to_string_lossy().into_owned()).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

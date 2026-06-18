@@ -27,6 +27,7 @@ pub mod monado_conn;
 pub mod openvr_paths;
 pub mod overlay_config;
 pub mod paths;
+pub mod playspace_overrides;
 pub mod playtime;
 pub mod plugins;
 pub mod preflight;

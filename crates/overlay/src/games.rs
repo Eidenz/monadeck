@@ -47,6 +47,8 @@ pub struct LibGame {
     /// for Steam apps (which launch via `steam://rungameid`).
     pub exe: Option<String>,
     pub start_dir: Option<String>,
+    /// The game looks like an Unreal Engine title UEVR can inject (gates the toggle).
+    pub uevr_capable: bool,
     pub last_played: Option<u64>,
     pub size_on_disk: Option<u64>,
     /// Steam's own playtime, if known.
@@ -114,6 +116,7 @@ pub fn to_games(rows: Vec<steam::LibraryGame>) -> Vec<LibGame> {
                 source: g.source,
                 exe: g.exe,
                 start_dir: g.start_dir,
+                uevr_capable: g.uevr_capable,
                 last_played: g.last_played,
                 size_on_disk: g.size_on_disk,
                 playtime_minutes: g.playtime_minutes,

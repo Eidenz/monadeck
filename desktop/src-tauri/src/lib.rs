@@ -122,6 +122,8 @@ pub fn run() {
             commands::preflight_check,
             commands::install_builtin_monado,
             commands::install_builtin_xrizer,
+            commands::uevr_status,
+            commands::install_chihuahua,
             commands::list_installed_apps,
             commands::launch_plugin,
             bindings::scan_steam_games,

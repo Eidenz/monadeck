@@ -15,10 +15,11 @@
 //! Linux Runtime sandbox so (a) it can see the game PID and (b) the host OpenXR
 //! runtime (monado) is directly visible to the in-prefix Wine OpenXR loader.
 //!
-//! v1 scope: **non-Steam shortcuts only** — they carry the launch exe + working
-//! dir in `shortcuts.vdf`, and `--appid <shortcut id>` names their compatdata
-//! prefix. (Steam apps launch via `steam://rungameid` and don't expose an exe path
-//! here; supporting them is a later extension.)
+//! Works for both **non-Steam shortcuts** (which carry the launch exe + working
+//! dir in `shortcuts.vdf`, with `--appid <shortcut id>` naming their compatdata
+//! prefix) and **Proton Steam games** (`--appid <steam appid>`, with the install
+//! dir probed for the Unreal shipping binary). Native Linux games can't be
+//! injected, so the caller only flags Proton games.
 
 use crate::paths::{home, monadeck_config_dir, monadeck_data_dir};
 use std::collections::HashSet;
@@ -74,10 +75,12 @@ impl Default for LaunchOpts {
     }
 }
 
-/// Launch `appid`'s game with UEVR injected. `exe`/`start_dir` come from the
-/// non-Steam shortcut (Linux paths). Fire-and-forget: chihuahua owns the game's
-/// lifetime. Returns an error (without launching) if chihuahua or the game binary
-/// can't be found, so the caller can fall back to a plain launch.
+/// Launch `appid`'s game with UEVR injected. `start_dir` is the game's working
+/// dir (probed for the shipping binary); `exe` is the explicit launch binary for
+/// non-Steam shortcuts, or empty for Steam games (probe only). Fire-and-forget:
+/// chihuahua owns the game's lifetime. Returns an error (without launching) if
+/// chihuahua or the game binary can't be found, so the caller can fall back to a
+/// plain launch.
 pub fn launch(appid: &str, exe: &str, start_dir: &str, opts: &LaunchOpts) -> std::io::Result<()> {
     let chihuahua = opts.chihuahua.clone().or_else(detect_chihuahua).ok_or_else(|| {
         std::io::Error::new(
@@ -216,6 +219,12 @@ pub fn ensure_chihuahua() -> std::io::Result<PathBuf> {
     if let Some(p) = detect_chihuahua() {
         return Ok(p);
     }
+    download_chihuahua(&monadeck_data_dir().join("chihuahua"))
+}
+
+/// Force a fresh download of the latest chihuahua into the data dir, ignoring any
+/// existing copy (the "Re-download" action in the desktop settings). **Blocking.**
+pub fn reinstall_chihuahua() -> std::io::Result<PathBuf> {
     download_chihuahua(&monadeck_data_dir().join("chihuahua"))
 }
 

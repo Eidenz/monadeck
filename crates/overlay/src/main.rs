@@ -396,11 +396,12 @@ fn run() -> Result<()> {
     let mut uevr_games: HashSet<String> = monadeck_core::uevr::load_enabled();
     // Re-place the dashboard in front of you when the distance knob changes.
     let mut panel_dist_prev = ov_cfg.panel_dist;
-    // Playspace offset: track changes to push to libmonado, and apply the
-    // persisted offset now so it lands as soon as the service connects.
-    let mut playspace_prev =
+    // Playspace offset: apply the persisted GLOBAL offset now so it lands as soon
+    // as the service connects. `applied_ps_prev` then tracks the *effective* offset
+    // in the loop — per-game overrides (below) take over while a game is running.
+    let mut applied_ps_prev =
         (ov_cfg.playspace_x, ov_cfg.playspace_y, ov_cfg.playspace_z, ov_cfg.playspace_yaw);
-    if playspace_prev != (0.0, 0.0, 0.0, 0.0) {
+    if applied_ps_prev != (0.0, 0.0, 0.0, 0.0) {
         monado.set_origin(
             ov_cfg.playspace_x,
             ov_cfg.playspace_y,
@@ -408,6 +409,9 @@ fn run() -> Result<()> {
             ov_cfg.playspace_yaw.to_radians(),
         );
     }
+    // Per-game playspace overrides (keyed by cover id) + which game is running.
+    let mut ps_overrides: HashMap<String, [f32; 4]> = monadeck_core::playspace_overrides::load();
+    let mut running_cover_prev: Option<String> = None;
     // Tracked playtime: total seconds per game key + the in-progress session.
     let mut playtime: HashMap<String, u64> = monadeck_core::playtime::load();
     let mut session_start: Option<Instant> = None;
@@ -725,6 +729,52 @@ fn run() -> Result<()> {
                 true, None, (0.0, 0.0), start.elapsed().as_secs_f64(),
                 |ctx| ui::build_toast(ctx, &t.title, &t.body, t.kind),
             )?;
+        }
+
+        // --- Playspace: per-game override tracking + apply ------------------
+        // Runs even while hidden, so a game's offset is active during play with the
+        // dashboard dismissed. Track the running game by cover id; when it changes,
+        // load its stored override into the editor's per-game buffer.
+        let running_cover = running
+            .as_ref()
+            .and_then(|app| st.games.iter().find(|g| name_matches(&g.name, app)))
+            .and_then(|g| g.cover_id.clone());
+        if running_cover != running_cover_prev {
+            running_cover_prev = running_cover.clone();
+            match &running_cover {
+                Some(cid) => {
+                    st.ps_game_active = true;
+                    st.ps_game_name = running
+                        .as_ref()
+                        .and_then(|app| st.games.iter().find(|g| name_matches(&g.name, app)))
+                        .map(|g| g.name.clone())
+                        .unwrap_or_default();
+                    if let Some(o) = ps_overrides.get(cid) {
+                        st.ps_game_override = true;
+                        st.ps_target_game = true; // it already has one — edit it by default
+                        (st.ps_game_x, st.ps_game_y, st.ps_game_z, st.ps_game_yaw) =
+                            (o[0], o[1], o[2], o[3]);
+                    } else {
+                        st.ps_game_override = false;
+                        (st.ps_game_x, st.ps_game_y, st.ps_game_z, st.ps_game_yaw) = (0.0, 0.0, 0.0, 0.0);
+                    }
+                }
+                None => {
+                    st.ps_game_active = false;
+                    st.ps_target_game = false;
+                    st.ps_game_override = false;
+                }
+            }
+        }
+        // Effective offset = the running game's override (if any) else the global.
+        let eff_ps = if st.ps_game_active && st.ps_game_override {
+            (st.ps_game_x, st.ps_game_y, st.ps_game_z, st.ps_game_yaw)
+        } else {
+            (st.playspace_x, st.playspace_y, st.playspace_z, st.playspace_yaw)
+        };
+        if eff_ps != applied_ps_prev {
+            applied_ps_prev = eff_ps;
+            monado.set_origin(eff_ps.0, eff_ps.1, eff_ps.2, eff_ps.3.to_radians());
         }
 
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
@@ -1071,17 +1121,27 @@ fn run() -> Result<()> {
             }
             .save();
         }
-        // Playspace offset changed -> push it to libmonado (yaw in radians).
-        let playspace_now =
-            (st.playspace_x, st.playspace_y, st.playspace_z, st.playspace_yaw);
-        if playspace_now != playspace_prev {
-            playspace_prev = playspace_now;
-            monado.set_origin(
-                st.playspace_x,
-                st.playspace_y,
-                st.playspace_z,
-                st.playspace_yaw.to_radians(),
-            );
+        // Per-game playspace edits (from the Playspace tab) -> persist. The
+        // effective offset is pushed to libmonado at the top of the loop (which
+        // also runs while hidden), so global edits land there too.
+        if st.ps_game_save_request {
+            st.ps_game_save_request = false;
+            if let Some(cid) = &running_cover {
+                ps_overrides.insert(
+                    cid.clone(),
+                    [st.ps_game_x, st.ps_game_y, st.ps_game_z, st.ps_game_yaw],
+                );
+                monadeck_core::playspace_overrides::save(&ps_overrides);
+                st.ps_game_override = true;
+            }
+        }
+        if st.ps_game_clear_request {
+            st.ps_game_clear_request = false;
+            if let Some(cid) = &running_cover {
+                ps_overrides.remove(cid);
+                monadeck_core::playspace_overrides::save(&ps_overrides);
+            }
+            st.ps_game_override = false;
         }
         // Changing the distance re-places the dashboard in front of you.
         if st.panel_dist != panel_dist_prev {
@@ -1280,12 +1340,19 @@ fn launch_game(g: &games::LibGame) {
 }
 
 /// Launch a game through UEVR ("VR Mod") via the chihuahua injector under Proton.
-/// Non-Steam only (we need the shortcut's exe + working dir + appid). Falls back
-/// to a plain launch if the data is missing or the injector can't be spawned.
+/// Works for non-Steam shortcuts (exe + working dir from `shortcuts.vdf`) and
+/// Proton Steam games (install dir probed for the shipping binary). Falls back to
+/// a plain launch if the data is missing or the injector can't be spawned.
 /// chihuahua is located by core (downloaded on first run; see `ensure_chihuahua`).
 fn launch_uevr(g: &games::LibGame, delay: u32) {
-    match (g.shortcut_id.as_deref(), g.exe.as_deref(), g.start_dir.as_deref()) {
-        (Some(appid), Some(exe), Some(start_dir)) => {
+    // protontricks `--appid`: the Steam appid for Steam games, or the non-Steam
+    // shortcut's unsigned appid (which names its compatdata prefix) otherwise.
+    let appid = g.shortcut_id.as_deref().or(g.app_id.as_deref());
+    match (appid, g.start_dir.as_deref()) {
+        (Some(appid), Some(start_dir)) => {
+            // Steam games have no explicit exe here — the shipping binary is found
+            // by probing `start_dir`; non-Steam shortcuts pass their launch exe.
+            let exe = g.exe.as_deref().unwrap_or("");
             let opts = monadeck_core::uevr::LaunchOpts { delay, ..Default::default() };
             if let Err(e) = monadeck_core::uevr::launch(appid, exe, start_dir, &opts) {
                 log::warn!("UEVR launch failed for '{}': {e} — falling back to a normal launch", g.name);
@@ -1293,7 +1360,7 @@ fn launch_uevr(g: &games::LibGame, delay: u32) {
             }
         }
         _ => {
-            log::warn!("'{}' is flagged for UEVR but isn't a launchable non-Steam game; launching normally", g.name);
+            log::warn!("'{}' is flagged for UEVR but has no injectable launch path; launching normally", g.name);
             launch_game(g);
         }
     }

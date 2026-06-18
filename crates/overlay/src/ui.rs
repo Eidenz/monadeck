@@ -89,6 +89,19 @@ pub struct LibState {
     pub playspace_yaw: f32,
     pub playspace_step: f32,     // metres per nudge
     pub playspace_yaw_step: f32, // degrees per nudge
+    /// Per-game playspace override editing. The steppers edit the running game's
+    /// override (`ps_game_*`) when `ps_target_game` is set and a game is running,
+    /// otherwise the global offset above. Maintained + persisted by the loop.
+    pub ps_target_game: bool, // editor target: false = Global, true = running game
+    pub ps_game_active: bool, // a game is running (override target available)
+    pub ps_game_name: String, // running game's name (for the target switch label)
+    pub ps_game_override: bool, // the running game currently has a saved override
+    pub ps_game_x: f32,
+    pub ps_game_y: f32,
+    pub ps_game_z: f32,
+    pub ps_game_yaw: f32,
+    pub ps_game_save_request: bool,  // persist ps_game_* for the running game
+    pub ps_game_clear_request: bool, // drop the running game's override
     /// Timer state. `timer_secs` is the configured duration (adjusted when idle);
     /// `timer_remaining`/`timer_running`/`timer_paused` are set by the loop; the
     /// request flags are drained by it.
@@ -158,6 +171,16 @@ impl LibState {
             playspace_yaw: 0.0,
             playspace_step: 0.05,
             playspace_yaw_step: 15.0,
+            ps_target_game: false,
+            ps_game_active: false,
+            ps_game_name: String::new(),
+            ps_game_override: false,
+            ps_game_x: 0.0,
+            ps_game_y: 0.0,
+            ps_game_z: 0.0,
+            ps_game_yaw: 0.0,
+            ps_game_save_request: false,
+            ps_game_clear_request: false,
             timer_secs: 300,
             timer_total: 300,
             timer_remaining: 300,
@@ -250,9 +273,11 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
                 }
                 ui.add_space(8.0);
             }
-            // Tools (timer) · Playspace · Settings pinned to the bottom.
+            // Tools (timer) · Playspace · Settings pinned to the bottom. Reserve
+            // enough for the 3 icons PLUS item-spacing + the rounded-corner margin,
+            // or the last icon overruns the panel's rounded bottom (clipped).
             let avail = ui.available_height();
-            ui.add_space((avail - 168.0).max(0.0));
+            ui.add_space((avail - 208.0).max(0.0));
             let bottom = [
                 (icon::TIMER, Nav::Tools),
                 (icon::ARROWS_OUT_CARDINAL, Nav::Playspace),
@@ -932,12 +957,7 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
 /// A countdown timer that fires a toast + chime when it reaches zero. Centred on
 /// a circular progress ring with the time inside it.
 fn tools_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(icon::TIMER).size(28.0).color(theme::PRIMARY));
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new("Timer").size(28.0).strong().color(egui::Color32::WHITE));
-    });
-    ui.add_space(6.0);
+    page_header(ui, icon::TIMER, "Timer");
 
     ui.vertical_centered(|ui| {
         // Progress ring with the remaining time inside it.
@@ -992,75 +1012,90 @@ fn tools_view(ui: &mut egui::Ui, st: &mut LibState) {
             egui::FontId::proportional(15.0),
             theme::ON_SURFACE_VAR,
         );
+    });
 
-        ui.add_space(22.0);
+    ui.add_space(24.0);
 
-        if !st.timer_running && !st.timer_paused {
-            centered_row(ui, 310.0, |ui| {
-                if pill(ui, "−1m", 70.0, false).clicked() {
-                    st.timer_secs = st.timer_secs.saturating_sub(60);
-                }
-                if pill(ui, "−10s", 70.0, false).clicked() {
-                    st.timer_secs = st.timer_secs.saturating_sub(10);
-                }
-                if pill(ui, "+10s", 70.0, false).clicked() {
-                    st.timer_secs = (st.timer_secs + 10).min(86_400);
-                }
-                if pill(ui, "+1m", 70.0, false).clicked() {
-                    st.timer_secs = (st.timer_secs + 60).min(86_400);
-                }
-            });
-            ui.add_space(10.0);
-            centered_row(ui, 278.0, |ui| {
-                for m in [1u32, 5, 10, 30] {
-                    let sel = st.timer_secs == m * 60;
-                    if pill(ui, &format!("{m}m"), 62.0, sel).clicked() {
-                        st.timer_secs = m * 60;
+    // Controls grouped in a centred card. The card lives in a vertical_centered so
+    // its content inherits a VERTICAL layout (a Frame inside a `horizontal` would
+    // lay the rows out side-by-side and run off the panel).
+    let card_w = 360.0;
+    ui.vertical_centered(|ui| {
+        egui::Frame::default()
+            .fill(theme::SURFACE_CONTAINER)
+            .corner_radius(16)
+            .inner_margin(egui::Margin::symmetric(16, 16))
+            .show(ui, |ui| {
+                ui.set_width(card_w);
+                ui.vertical(|ui| {
+                    if !st.timer_running && !st.timer_paused {
+                        centered_row(ui, 336.0, |ui| {
+                            if pill(ui, "−1m", 78.0, false).clicked() {
+                                st.timer_secs = st.timer_secs.saturating_sub(60);
+                            }
+                            if pill(ui, "−10s", 78.0, false).clicked() {
+                                st.timer_secs = st.timer_secs.saturating_sub(10);
+                            }
+                            if pill(ui, "+10s", 78.0, false).clicked() {
+                                st.timer_secs = (st.timer_secs + 10).min(86_400);
+                            }
+                            if pill(ui, "+1m", 78.0, false).clicked() {
+                                st.timer_secs = (st.timer_secs + 60).min(86_400);
+                            }
+                        });
+                        ui.add_space(10.0);
+                        centered_row(ui, 286.0, |ui| {
+                            for m in [1u32, 5, 10, 30] {
+                                let sel = st.timer_secs == m * 60;
+                                if pill(ui, &format!("{m}m"), 64.0, sel).clicked() {
+                                    st.timer_secs = m * 60;
+                                }
+                            }
+                        });
+                        ui.add_space(16.0);
+                        centered_row(ui, card_w, |ui| {
+                            let start = egui::Button::new(
+                                egui::RichText::new(format!("{}  Start", icon::PLAY)).size(20.0).color(egui::Color32::BLACK),
+                            )
+                            .fill(theme::PRIMARY)
+                            .corner_radius(12)
+                            .min_size(egui::vec2(card_w, 52.0));
+                            if st.timer_secs > 0 && ui.add(start).clicked() {
+                                st.timer_toggle_request = true;
+                                st.sound_tab = true;
+                            }
+                        });
+                    } else {
+                        centered_row(ui, 350.0, |ui| {
+                            let (label, glyph) = if st.timer_running {
+                                ("Pause", icon::PAUSE)
+                            } else {
+                                ("Resume", icon::PLAY)
+                            };
+                            let toggle = egui::Button::new(
+                                egui::RichText::new(format!("{glyph}  {label}")).size(19.0).color(egui::Color32::BLACK),
+                            )
+                            .fill(theme::PRIMARY)
+                            .corner_radius(12)
+                            .min_size(egui::vec2(170.0, 52.0));
+                            if ui.add(toggle).clicked() {
+                                st.timer_toggle_request = true;
+                                st.sound_tab = true;
+                            }
+                            let reset = egui::Button::new(
+                                egui::RichText::new(format!("{}  Reset", icon::ARROW_COUNTER_CLOCKWISE)).size(19.0).color(theme::ON_SURFACE),
+                            )
+                            .fill(theme::SURFACE_CONTAINER_HIGH)
+                            .corner_radius(12)
+                            .min_size(egui::vec2(170.0, 52.0));
+                            if ui.add(reset).clicked() {
+                                st.timer_reset_request = true;
+                                st.sound_tab = true;
+                            }
+                        });
                     }
-                }
+                });
             });
-            ui.add_space(20.0);
-            centered_row(ui, 220.0, |ui| {
-                let start = egui::Button::new(
-                    egui::RichText::new(format!("{}  Start", icon::PLAY)).size(20.0).color(egui::Color32::BLACK),
-                )
-                .fill(theme::PRIMARY)
-                .corner_radius(12)
-                .min_size(egui::vec2(220.0, 54.0));
-                if st.timer_secs > 0 && ui.add(start).clicked() {
-                    st.timer_toggle_request = true;
-                    st.sound_tab = true;
-                }
-            });
-        } else {
-            centered_row(ui, 350.0, |ui| {
-                let (label, glyph) = if st.timer_running {
-                    ("Pause", icon::PAUSE)
-                } else {
-                    ("Resume", icon::PLAY)
-                };
-                let toggle = egui::Button::new(
-                    egui::RichText::new(format!("{glyph}  {label}")).size(19.0).color(egui::Color32::BLACK),
-                )
-                .fill(theme::PRIMARY)
-                .corner_radius(12)
-                .min_size(egui::vec2(170.0, 52.0));
-                if ui.add(toggle).clicked() {
-                    st.timer_toggle_request = true;
-                    st.sound_tab = true;
-                }
-                let reset = egui::Button::new(
-                    egui::RichText::new(format!("{}  Reset", icon::ARROW_COUNTER_CLOCKWISE)).size(19.0).color(theme::ON_SURFACE),
-                )
-                .fill(theme::SURFACE_CONTAINER_HIGH)
-                .corner_radius(12)
-                .min_size(egui::vec2(170.0, 52.0));
-                if ui.add(reset).clicked() {
-                    st.timer_reset_request = true;
-                    st.sound_tab = true;
-                }
-            });
-        }
     });
 }
 
@@ -1112,6 +1147,216 @@ fn pill(ui: &mut egui::Ui, label: &str, w: f32, selected: bool) -> egui::Respons
             .fill(fill)
             .corner_radius(10)
             .min_size(egui::vec2(w, 42.0)),
+    )
+}
+
+// --- modern settings widgets (SteamVR-style: grouped cards, label-left/control-
+// right rows, segmented toggles, sliders with a value chip) ------------------
+
+/// A page heading with an accent icon (e.g. ⚙ Settings).
+fn page_header(ui: &mut egui::Ui, glyph: &str, title: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(glyph).size(28.0).color(theme::PRIMARY));
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new(title).size(28.0).strong().color(egui::Color32::WHITE));
+    });
+    ui.add_space(16.0);
+}
+
+/// A titled group of rows inside a rounded card.
+fn section(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
+    if !title.is_empty() {
+        ui.label(egui::RichText::new(title).size(14.0).strong().color(theme::ON_SURFACE_VAR));
+        ui.add_space(7.0);
+    }
+    egui::Frame::default()
+        .fill(theme::SURFACE_CONTAINER)
+        .corner_radius(16)
+        .inner_margin(egui::Margin::symmetric(18, 8))
+        .show(ui, |ui| {
+            contents(ui);
+        });
+    ui.add_space(18.0);
+}
+
+/// One settings row: a label (+ optional sub-line) on the left, a control on the
+/// right. The classic SteamVR layout.
+fn setting_row(ui: &mut egui::Ui, label: &str, sub: Option<&str>, control: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_space(2.0);
+        ui.vertical(|ui| {
+            ui.add_space(9.0);
+            ui.label(egui::RichText::new(label).size(16.0).color(theme::ON_SURFACE));
+            if let Some(s) = sub {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(s).size(12.0).color(theme::ON_SURFACE_VAR));
+            }
+            ui.add_space(9.0);
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
+    });
+}
+
+/// A faint full-width separator between rows in a card.
+fn divider(ui: &mut egui::Ui) {
+    ui.add_space(2.0);
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 16)),
+    );
+    ui.add_space(2.0);
+}
+
+/// A two-segment Off / On switch. Returns true if the value changed.
+fn seg_toggle(ui: &mut egui::Ui, value: &mut bool) -> bool {
+    let before = *value;
+    egui::Frame::default()
+        .fill(egui::Color32::from_rgb(22, 26, 32))
+        .corner_radius(11)
+        .inner_margin(egui::Margin::same(3))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                if seg_btn(ui, "Off", !*value, false).clicked() {
+                    *value = false;
+                }
+                if seg_btn(ui, "On", *value, true).clicked() {
+                    *value = true;
+                }
+            });
+        });
+    *value != before
+}
+
+fn seg_btn(ui: &mut egui::Ui, label: &str, selected: bool, accent: bool) -> egui::Response {
+    let (fg, fill) = if selected {
+        if accent {
+            (egui::Color32::BLACK, theme::PRIMARY)
+        } else {
+            (egui::Color32::WHITE, theme::SURFACE_CONTAINER_HIGH)
+        }
+    } else {
+        (theme::ON_SURFACE_VAR, egui::Color32::TRANSPARENT)
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(14.0).color(fg))
+            .fill(fill)
+            .corner_radius(8)
+            .min_size(egui::vec2(58.0, 32.0)),
+    )
+}
+
+/// A SteamVR-style horizontal slider: rounded track, teal fill, round thumb, with
+/// the value shown in a chip on the right. `width` spans the track + chip. A laser
+/// click on the track jumps to that value; drag fine-tunes. Returns true if changed.
+fn modern_slider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    width: f32,
+    fmt: impl Fn(f32) -> String,
+) -> bool {
+    let (lo, hi) = (*range.start(), *range.end());
+    let h = 36.0;
+    let chip_w = 74.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::click_and_drag());
+    let track_left = rect.left() + 10.0;
+    let track_right = rect.right() - chip_w - 12.0;
+    let cy = rect.center().y;
+    let th = 4.0;
+
+    let mut changed = false;
+    if (resp.dragged() || resp.clicked()) && (track_right > track_left) {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let t = ((p.x - track_left) / (track_right - track_left)).clamp(0.0, 1.0);
+            let nv = lo + t * (hi - lo);
+            if (nv - *value).abs() > f32::EPSILON {
+                *value = nv;
+                changed = true;
+            }
+        }
+    }
+    *value = value.clamp(lo, hi);
+    let t = if hi > lo { ((*value - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 };
+    let tx = track_left + t * (track_right - track_left);
+
+    let painter = ui.painter();
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(track_left, cy - th), egui::pos2(track_right, cy + th)),
+        th,
+        egui::Color32::from_rgb(26, 31, 38),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(track_left, cy - th), egui::pos2(tx, cy + th)),
+        th,
+        theme::PRIMARY,
+    );
+    painter.circle_filled(egui::pos2(tx, cy), 10.0, theme::PRIMARY);
+    painter.circle_filled(egui::pos2(tx, cy), 5.0, egui::Color32::WHITE);
+    let chip = egui::Rect::from_min_size(egui::pos2(rect.right() - chip_w, cy - 14.0), egui::vec2(chip_w, 28.0));
+    painter.rect_filled(chip, 8.0, theme::SURFACE_CONTAINER_HIGH);
+    painter.text(
+        chip.center(),
+        egui::Align2::CENTER_CENTER,
+        fmt(*value),
+        egui::FontId::proportional(14.0),
+        egui::Color32::WHITE,
+    );
+    changed
+}
+
+/// An inline −/value/+ stepper (right side of a row) for values a slider suits
+/// poorly (e.g. panel size, whose slider would sit on the panel it resizes).
+fn stepper_inline(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    fmt: impl Fn(f32) -> String,
+) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if step_btn(ui, icon::MINUS).clicked() {
+            *value = (*value - step).max(min);
+        }
+        ui.add_sized(
+            egui::vec2(70.0, 34.0),
+            egui::Label::new(egui::RichText::new(fmt(*value)).size(16.0).strong().color(egui::Color32::WHITE)),
+        );
+        if step_btn(ui, icon::PLUS).clicked() {
+            *value = (*value + step).min(max);
+        }
+    });
+}
+
+/// A neutral pill button for a row's right-hand action (Recenter, Refresh, …).
+fn action_button(ui: &mut egui::Ui, glyph: &str, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(format!("{glyph}  {label}")).size(15.0).color(theme::ON_SURFACE),
+        )
+        .fill(theme::SURFACE_CONTAINER_HIGH)
+        .corner_radius(10)
+        .min_size(egui::vec2(150.0, 42.0)),
+    )
+}
+
+/// An outlined "reset" button (SteamVR's RESET PAGE TO DEFAULT vibe).
+fn reset_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(format!("{}  {label}", icon::ARROW_COUNTER_CLOCKWISE))
+                .size(15.0)
+                .color(theme::ON_SURFACE_VAR),
+        )
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0, theme::SURFACE_CONTAINER_HIGH))
+        .corner_radius(10)
+        .min_size(egui::vec2(200.0, 42.0)),
     )
 }
 
@@ -1178,113 +1423,187 @@ pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind
 /// OVRAS-style playspace page: nudge the floor / play area on each axis (and
 /// rotate) with selectable steps. Applied live via libmonado and persisted.
 fn playspace_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(icon::ARROWS_OUT_CARDINAL).size(28.0).color(theme::PRIMARY));
+    page_header(ui, icon::ARROWS_OUT_CARDINAL, "Playspace");
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.label(
+            egui::RichText::new("Nudge where your floor and play area sit.")
+                .size(14.0)
+                .color(theme::ON_SURFACE_VAR),
+        );
+        ui.add_space(14.0);
+
+        let editing_game = st.ps_target_game && st.ps_game_active;
+
+        // Per-game vs global target — only while a game runs (a per-game offset
+        // only applies, and is only felt, during play).
+        if st.ps_game_active {
+            section(ui, "Apply to", |ui| {
+                setting_row(ui, "Target", None, |ui| {
+                    let label = if st.ps_game_name.chars().count() > 14 {
+                        format!("{}…", st.ps_game_name.chars().take(14).collect::<String>())
+                    } else {
+                        st.ps_game_name.clone()
+                    };
+                    if pill(ui, &label, 150.0, st.ps_target_game).clicked() {
+                        st.ps_target_game = true;
+                        st.sound_tab = true;
+                    }
+                    if pill(ui, "Global", 88.0, !st.ps_target_game).clicked() {
+                        st.ps_target_game = false;
+                        st.sound_tab = true;
+                    }
+                });
+            });
+        }
+
+        // Step sizes.
+        section(ui, "Step size", |ui| {
+            setting_row(ui, "Move", None, |ui| {
+                ui.horizontal(|ui| {
+                    for m in [0.01_f32, 0.05, 0.10] {
+                        let sel = (st.playspace_step - m).abs() < 0.001;
+                        if pill(ui, &format!("{} cm", (m * 100.0).round() as i32), 66.0, sel).clicked() {
+                            st.playspace_step = m;
+                            st.sound_tab = true;
+                        }
+                    }
+                });
+            });
+            divider(ui);
+            setting_row(ui, "Rotate", None, |ui| {
+                ui.horizontal(|ui| {
+                    for d in [5.0_f32, 15.0, 45.0] {
+                        let sel = (st.playspace_yaw_step - d).abs() < 0.1;
+                        if pill(ui, &format!("{}°", d as i32), 56.0, sel).clicked() {
+                            st.playspace_yaw_step = d;
+                            st.sound_tab = true;
+                        }
+                    }
+                });
+            });
+        });
+
+        let step = st.playspace_step;
+        let ystep = st.playspace_yaw_step;
+        let mut bumped = false;
+        section(ui, "Offset", |ui| {
+            if editing_game {
+                let t = fmt_m(st.ps_game_y);
+                bumped |= ps_row(ui, "Height", &mut st.ps_game_y, step, &t, icon::MINUS, icon::PLUS);
+                divider(ui);
+                let t = fmt_m(st.ps_game_z);
+                bumped |= ps_row(ui, "Forward / back", &mut st.ps_game_z, step, &t, icon::MINUS, icon::PLUS);
+                divider(ui);
+                let t = fmt_m(st.ps_game_x);
+                bumped |= ps_row(ui, "Left / right", &mut st.ps_game_x, step, &t, icon::MINUS, icon::PLUS);
+                divider(ui);
+                let t = fmt_deg(st.ps_game_yaw);
+                bumped |= ps_row(ui, "Rotate", &mut st.ps_game_yaw, ystep, &t, icon::ARROW_COUNTER_CLOCKWISE, icon::ARROW_CLOCKWISE);
+                if bumped {
+                    st.ps_game_x = st.ps_game_x.clamp(-3.0, 3.0);
+                    st.ps_game_y = st.ps_game_y.clamp(-2.0, 2.0);
+                    st.ps_game_z = st.ps_game_z.clamp(-3.0, 3.0);
+                    st.ps_game_yaw = wrap_deg(st.ps_game_yaw);
+                    st.ps_game_override = true;
+                    st.ps_game_save_request = true;
+                    st.sound_tab = true;
+                }
+            } else {
+                let t = fmt_m(st.playspace_y);
+                bumped |= ps_row(ui, "Height", &mut st.playspace_y, step, &t, icon::MINUS, icon::PLUS);
+                divider(ui);
+                let t = fmt_m(st.playspace_z);
+                bumped |= ps_row(ui, "Forward / back", &mut st.playspace_z, step, &t, icon::MINUS, icon::PLUS);
+                divider(ui);
+                let t = fmt_m(st.playspace_x);
+                bumped |= ps_row(ui, "Left / right", &mut st.playspace_x, step, &t, icon::MINUS, icon::PLUS);
+                divider(ui);
+                let t = fmt_deg(st.playspace_yaw);
+                bumped |= ps_row(ui, "Rotate", &mut st.playspace_yaw, ystep, &t, icon::ARROW_COUNTER_CLOCKWISE, icon::ARROW_CLOCKWISE);
+                if bumped {
+                    st.playspace_x = st.playspace_x.clamp(-3.0, 3.0);
+                    st.playspace_y = st.playspace_y.clamp(-2.0, 2.0);
+                    st.playspace_z = st.playspace_z.clamp(-3.0, 3.0);
+                    st.playspace_yaw = wrap_deg(st.playspace_yaw);
+                    st.sound_tab = true;
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            let reset_label = if editing_game { "Use global" } else { "Reset" };
+            if reset_button(ui, reset_label).clicked() {
+                if editing_game {
+                    st.ps_game_x = 0.0;
+                    st.ps_game_y = 0.0;
+                    st.ps_game_z = 0.0;
+                    st.ps_game_yaw = 0.0;
+                    st.ps_game_override = false;
+                    st.ps_game_clear_request = true;
+                } else {
+                    st.playspace_x = 0.0;
+                    st.playspace_y = 0.0;
+                    st.playspace_z = 0.0;
+                    st.playspace_yaw = 0.0;
+                }
+                st.sound_tab = true;
+            }
+            ui.add_space(10.0);
+            let rec = egui::Button::new(
+                egui::RichText::new(format!("{}  Recenter", icon::CROSSHAIR_SIMPLE)).size(15.0).color(egui::Color32::BLACK),
+            )
+            .fill(theme::PRIMARY)
+            .corner_radius(10)
+            .min_size(egui::vec2(170.0, 42.0));
+            if ui.add(rec).on_hover_text("Recenter to your current head pose").clicked() {
+                st.recenter_playspace_request = true;
+                st.sound_tab = true;
+            }
+        });
         ui.add_space(10.0);
-        ui.label(egui::RichText::new("Playspace").size(28.0).strong().color(egui::Color32::WHITE));
+        let note = if editing_game {
+            "Overrides your global offset only while this game runs. Persists across restarts."
+        } else {
+            "Offsets persist and re-apply when the runtime restarts."
+        };
+        ui.label(egui::RichText::new(note).size(13.0).color(theme::ON_SURFACE_VAR));
     });
-    ui.add_space(2.0);
-    ui.label(egui::RichText::new("Nudge where your floor and play area sit.").size(14.0).color(theme::ON_SURFACE_VAR));
-    ui.add_space(16.0);
+}
 
-    // Step selectors.
-    ui.horizontal(|ui| {
-        ui.add_sized(egui::vec2(150.0, 30.0), egui::Label::new(egui::RichText::new("Move step").size(14.0).color(theme::ON_SURFACE)));
-        for m in [0.01_f32, 0.05, 0.10] {
-            let sel = (st.playspace_step - m).abs() < 0.001;
-            if pill(ui, &format!("{} cm", (m * 100.0).round() as i32), 66.0, sel).clicked() {
-                st.playspace_step = m;
-                st.sound_tab = true;
-            }
-        }
-    });
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.add_sized(egui::vec2(150.0, 30.0), egui::Label::new(egui::RichText::new("Rotate step").size(14.0).color(theme::ON_SURFACE)));
-        for d in [5.0_f32, 15.0, 45.0] {
-            let sel = (st.playspace_yaw_step - d).abs() < 0.1;
-            if pill(ui, &format!("{}°", d as i32), 56.0, sel).clicked() {
-                st.playspace_yaw_step = d;
-                st.sound_tab = true;
-            }
-        }
-    });
-    ui.add_space(18.0);
-
-    let step = st.playspace_step;
-    let ystep = st.playspace_yaw_step;
-    let mut bumped = false;
-    let t = fmt_m(st.playspace_y);
-    bumped |= ps_row(ui, "Height (up / down)", &mut st.playspace_y, step, &t, icon::MINUS, icon::PLUS);
-    let t = fmt_m(st.playspace_z);
-    bumped |= ps_row(ui, "Forward / back", &mut st.playspace_z, step, &t, icon::MINUS, icon::PLUS);
-    let t = fmt_m(st.playspace_x);
-    bumped |= ps_row(ui, "Left / right", &mut st.playspace_x, step, &t, icon::MINUS, icon::PLUS);
-    let t = fmt_deg(st.playspace_yaw);
-    bumped |= ps_row(ui, "Rotate (yaw)", &mut st.playspace_yaw, ystep, &t, icon::ARROW_COUNTER_CLOCKWISE, icon::ARROW_CLOCKWISE);
-
-    if bumped {
-        st.playspace_x = st.playspace_x.clamp(-3.0, 3.0);
-        st.playspace_y = st.playspace_y.clamp(-2.0, 2.0);
-        st.playspace_z = st.playspace_z.clamp(-3.0, 3.0);
-        if st.playspace_yaw > 180.0 {
-            st.playspace_yaw -= 360.0;
-        } else if st.playspace_yaw < -180.0 {
-            st.playspace_yaw += 360.0;
-        }
-        st.sound_tab = true;
+/// Wrap an angle (degrees) into (-180, 180].
+fn wrap_deg(mut v: f32) -> f32 {
+    if v > 180.0 {
+        v -= 360.0;
+    } else if v < -180.0 {
+        v += 360.0;
     }
-
-    ui.add_space(20.0);
-    ui.horizontal(|ui| {
-        let reset = egui::Button::new(
-            egui::RichText::new(format!("{}  Reset", icon::ARROW_COUNTER_CLOCKWISE)).size(16.0).color(theme::ON_SURFACE),
-        )
-        .fill(theme::SURFACE_CONTAINER_HIGH)
-        .corner_radius(10)
-        .min_size(egui::vec2(150.0, 44.0));
-        if ui.add(reset).clicked() {
-            st.playspace_x = 0.0;
-            st.playspace_y = 0.0;
-            st.playspace_z = 0.0;
-            st.playspace_yaw = 0.0;
-            st.sound_tab = true;
-        }
-        ui.add_space(10.0);
-        let rec = egui::Button::new(
-            egui::RichText::new(format!("{}  Recenter", icon::CROSSHAIR_SIMPLE)).size(16.0).color(egui::Color32::BLACK),
-        )
-        .fill(theme::PRIMARY)
-        .corner_radius(10)
-        .min_size(egui::vec2(160.0, 44.0));
-        if ui.add(rec).on_hover_text("Recenter to your current head pose").clicked() {
-            st.recenter_playspace_request = true;
-            st.sound_tab = true;
-        }
-    });
-    ui.add_space(10.0);
-    ui.label(egui::RichText::new("Offsets persist and re-apply when the runtime restarts.").size(13.0).color(theme::ON_SURFACE_VAR));
+    v
 }
 
 fn ps_row(ui: &mut egui::Ui, label: &str, value: &mut f32, step: f32, value_text: &str, minus: &str, plus: &str) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
+        ui.add_space(2.0);
         ui.add_sized(
-            egui::vec2(168.0, 44.0),
-            egui::Label::new(egui::RichText::new(label).size(15.0).color(theme::ON_SURFACE)),
+            egui::vec2(60.0, 44.0),
+            egui::Label::new(egui::RichText::new(label).size(16.0).color(theme::ON_SURFACE)),
         );
-        if ps_btn(ui, minus).clicked() {
-            *value -= step;
-            changed = true;
-        }
-        ui.add_sized(
-            egui::vec2(116.0, 44.0),
-            egui::Label::new(egui::RichText::new(value_text).size(18.0).strong().color(egui::Color32::WHITE)),
-        );
-        if ps_btn(ui, plus).clicked() {
-            *value += step;
-            changed = true;
-        }
+        // Stepper right-aligned: in a right-to-left layout, add +, value, − so they
+        // read −  value  + left-to-right.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ps_btn(ui, plus).clicked() {
+                *value += step;
+                changed = true;
+            }
+            ui.add_sized(
+                egui::vec2(104.0, 44.0),
+                egui::Label::new(egui::RichText::new(value_text).size(18.0).strong().color(egui::Color32::WHITE)),
+            );
+            if ps_btn(ui, minus).clicked() {
+                *value -= step;
+                changed = true;
+            }
+        });
     });
     changed
 }
@@ -1316,25 +1635,6 @@ fn fmt_deg(v: f32) -> String {
 
 /// A labelled +/- stepper (for knobs that resize the panel the control sits on,
 /// where a slider's grab point would jump out from under you).
-fn comfort_stepper(ui: &mut egui::Ui, label: &str, value: &mut f32, min: f32, max: f32, step: f32) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            egui::vec2(78.0, 30.0),
-            egui::Label::new(egui::RichText::new(label).size(15.0).color(theme::ON_SURFACE)),
-        );
-        if step_btn(ui, icon::MINUS).clicked() {
-            *value = (*value - step).max(min);
-        }
-        ui.add_sized(
-            egui::vec2(60.0, 30.0),
-            egui::Label::new(egui::RichText::new(format!("{:.0}%", *value * 100.0)).size(15.0).strong().color(egui::Color32::WHITE)),
-        );
-        if step_btn(ui, icon::PLUS).clicked() {
-            *value = (*value + step).min(max);
-        }
-    });
-}
-
 fn step_btn(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
     ui.add(
         egui::Button::new(egui::RichText::new(glyph).size(15.0).color(theme::ON_SURFACE))
@@ -1344,125 +1644,95 @@ fn step_btn(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
     )
 }
 
-/// A labelled comfort slider (fixed-width label + value slider).
-fn comfort_slider(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    suffix: &str,
-) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            egui::vec2(78.0, 24.0),
-            egui::Label::new(egui::RichText::new(label).size(15.0).color(theme::ON_SURFACE)),
-        );
-        ui.add(egui::Slider::new(value, range).suffix(suffix).max_decimals(2));
-    });
-}
 
 fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.label(egui::RichText::new("Settings").size(30.0).strong().color(egui::Color32::WHITE));
-    ui.add_space(18.0);
+    page_header(ui, icon::GEAR, "Settings");
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        section(ui, "Panel", |ui| {
+            setting_row(ui, "Recenter panel", Some("Bring it back in front of you · grip to grab & move"), |ui| {
+                if action_button(ui, icon::CROSSHAIR_SIMPLE, "Recenter").clicked() {
+                    st.recenter_request = true;
+                    st.sound_tab = true;
+                }
+            });
+            divider(ui);
+            let mut t = false;
+            setting_row(ui, "Tilt on summon", Some("Match the panel to your headset's pitch"), |ui| {
+                t = seg_toggle(ui, &mut st.summon_tilt);
+            });
+            if t {
+                st.sound_tab = true;
+            }
+            divider(ui);
+            setting_row(ui, "Distance", None, |ui| {
+                modern_slider(ui, &mut st.panel_dist, 0.8..=2.5, 360.0, |v| format!("{v:.2} m"));
+            });
+            divider(ui);
+            // Size is a stepper, not a slider: the slider would sit on the panel it
+            // resizes, so dragging makes the grab point jump as it grows under you.
+            setting_row(ui, "Size", None, |ui| {
+                stepper_inline(ui, &mut st.panel_scale, 0.7, 1.4, 0.05, |v| format!("{:.0}%", v * 100.0));
+            });
+            divider(ui);
+            setting_row(ui, "Curve", None, |ui| {
+                modern_slider(ui, &mut st.panel_curve, 1.0..=3.0, 360.0, |v| format!("{v:.2}"));
+            });
+        });
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if reset_button(ui, "Reset placement").clicked() {
+                    st.panel_dist = 1.5;
+                    st.panel_scale = 1.0;
+                    st.panel_curve = 1.0;
+                    st.sound_tab = true;
+                }
+            });
+        });
+        ui.add_space(18.0);
 
-    ui.label(egui::RichText::new("Panel").size(19.0).strong().color(theme::ON_SURFACE));
-    ui.add_space(8.0);
-    let recenter = egui::Button::new(
-        egui::RichText::new(format!("{}  Recenter panel", icon::CROSSHAIR_SIMPLE)).size(17.0).color(theme::ON_SURFACE),
-    )
-    .min_size(egui::vec2(240.0, 46.0));
-    if ui.add(recenter).clicked() {
-        st.recenter_request = true;
-        st.sound_tab = true;
-    }
-    ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new("Brings the panel back in front of you. Grip to grab and move it.")
-            .size(14.0)
-            .color(theme::ON_SURFACE_VAR),
-    );
-    ui.add_space(10.0);
-    ui.checkbox(
-        &mut st.summon_tilt,
-        egui::RichText::new("Tilt to match headset angle on summon").size(16.0).color(theme::ON_SURFACE),
-    );
+        section(ui, "Sound", |ui| {
+            let mut t = false;
+            setting_row(ui, "UI sounds", Some("Select, launch and tab clicks"), |ui| {
+                t = seg_toggle(ui, &mut st.audio_enabled);
+            });
+            if t {
+                st.sound_tab = true;
+            }
+            divider(ui);
+            let enabled = st.audio_enabled;
+            setting_row(ui, "Volume", None, |ui| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    modern_slider(ui, &mut st.audio_volume, 0.0..=1.0, 360.0, |v| format!("{:.0}%", v * 100.0));
+                });
+            });
+        });
 
-    ui.add_space(14.0);
-    ui.label(egui::RichText::new("Placement").size(15.0).color(theme::ON_SURFACE_VAR));
-    ui.add_space(6.0);
-    comfort_slider(ui, "Distance", &mut st.panel_dist, 0.8..=2.5, " m");
-    // Size is a stepper, not a slider: the slider sits on the panel it resizes, so
-    // dragging it makes the grab point jump as the panel grows/shrinks under you.
-    comfort_stepper(ui, "Size", &mut st.panel_scale, 0.7, 1.4, 0.05);
-    comfort_slider(ui, "Curve", &mut st.panel_curve, 1.0..=3.0, "");
-    ui.add_space(8.0);
-    let reset = egui::Button::new(
-        egui::RichText::new(format!("{}  Reset placement", icon::ARROW_COUNTER_CLOCKWISE)).size(15.0).color(theme::ON_SURFACE),
-    )
-    .fill(theme::SURFACE_CONTAINER_HIGH)
-    .corner_radius(10)
-    .min_size(egui::vec2(210.0, 40.0));
-    if ui.add(reset).clicked() {
-        st.panel_dist = 1.5;
-        st.panel_scale = 1.0;
-        st.panel_curve = 1.0;
-        st.sound_tab = true;
-    }
+        if st.uevr_available {
+            section(ui, "VR Mod (UEVR)", |ui| {
+                setting_row(
+                    ui,
+                    "Injection delay",
+                    Some("Wait after launch before injecting · raise for slow games"),
+                    |ui| {
+                        let mut d = st.uevr_delay as f32;
+                        if modern_slider(ui, &mut d, 0.0..=120.0, 360.0, |v| format!("{v:.0} s")) {
+                            st.uevr_delay = d.round() as u32;
+                        }
+                    },
+                );
+            });
+        }
 
-    ui.add_space(24.0);
-    ui.label(egui::RichText::new("Sound").size(19.0).strong().color(theme::ON_SURFACE));
-    ui.add_space(8.0);
-    ui.checkbox(
-        &mut st.audio_enabled,
-        egui::RichText::new("UI sounds (select, launch, tabs)").size(16.0).color(theme::ON_SURFACE),
-    );
-    ui.add_space(8.0);
-    ui.add_enabled_ui(st.audio_enabled, |ui| {
-        ui.add(
-            egui::Slider::new(&mut st.audio_volume, 0.0..=1.0)
-                .text(egui::RichText::new("Volume").size(15.0).color(theme::ON_SURFACE))
-                .show_value(false),
-        );
+        let n = st.games.len();
+        section(ui, "Library", |ui| {
+            setting_row(ui, "Refresh library", Some(&format!("{n} games · re-scan to pick up new artwork")), |ui| {
+                if action_button(ui, icon::ARROW_CLOCKWISE, "Refresh").clicked() {
+                    st.refresh_request = true;
+                    st.sound_tab = true;
+                }
+            });
+        });
     });
-
-    if st.uevr_available {
-        ui.add_space(24.0);
-        ui.label(egui::RichText::new("VR Mod (UEVR)").size(19.0).strong().color(theme::ON_SURFACE));
-        ui.add_space(8.0);
-        ui.add(
-            egui::Slider::new(&mut st.uevr_delay, 0..=120)
-                .text(egui::RichText::new("Injection delay").size(15.0).color(theme::ON_SURFACE))
-                .suffix(" s"),
-        );
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(
-                "Seconds to wait after launch before injecting. Raise it if a game needs longer to reach its menu.",
-            )
-            .size(14.0)
-            .color(theme::ON_SURFACE_VAR),
-        );
-    }
-
-    ui.add_space(24.0);
-    ui.label(egui::RichText::new("Library").size(19.0).strong().color(theme::ON_SURFACE));
-    ui.add_space(8.0);
-    let refresh = egui::Button::new(
-        egui::RichText::new(format!("{}  Refresh library", icon::ARROW_CLOCKWISE)).size(16.0).color(theme::ON_SURFACE),
-    )
-    .fill(theme::SURFACE_CONTAINER_HIGH)
-    .corner_radius(10)
-    .min_size(egui::vec2(220.0, 44.0));
-    if ui.add(refresh).clicked() {
-        st.refresh_request = true;
-        st.sound_tab = true;
-    }
-    ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new(format!("{} games · re-scan to pick up artwork added while running", st.games.len()))
-            .size(14.0)
-            .color(theme::ON_SURFACE_VAR),
-    );
 }
 
 // --- hero banner ------------------------------------------------------------
@@ -1608,7 +1878,9 @@ fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, uevr_available: bo
 
     // VR-Mod (UEVR) toggle, left of the star — only for non-Steam games we can
     // inject (v1 scope: they carry the launch exe via shortcuts.vdf).
-    let can_uevr = uevr_available && g.source != "Steam" && g.exe.is_some();
+    // Offer the VR-Mod toggle only for Unreal Engine games we can inject: non-Steam
+    // UE shortcuts and Proton UE Steam games (detected by their install layout).
+    let can_uevr = uevr_available && g.uevr_capable;
     let uevr_clicked = can_uevr && {
         let uevr_rect = egui::Rect::from_min_size(
             egui::pos2(star_rect.left() - 12.0 - 104.0, star_rect.top()),

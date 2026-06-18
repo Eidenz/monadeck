@@ -6,6 +6,7 @@
     applyCaps,
     installMonado,
     installXrizer,
+    installChihuahua,
   } from "$lib/state.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
 
@@ -179,6 +180,56 @@
         </button>
       {/if}
     </div>
+  </div>
+
+  <div class="field">
+    <span class="lbl">VR Mods (UEVR)</span>
+    <div class="row">
+      <span
+        class="pill"
+        class:good={app.uevr.protontricks}
+        class:warn={!app.uevr.protontricks}
+      >
+        protontricks {app.uevr.protontricks ? "✓" : "missing"}
+      </span>
+      <span
+        class="pill"
+        class:good={!!app.uevr.chihuahua}
+        class:warn={!app.uevr.chihuahua}
+      >
+        chihuahua {app.uevr.chihuahua ? "✓" : "not installed"}
+      </span>
+    </div>
+    {#if !app.uevr.protontricks}
+      <span class="note bad"
+        >Install <code>protontricks</code> to launch flat Unreal Engine games in VR.
+        The in-headset VR-Mod toggle stays hidden until it's present.</span
+      >
+    {/if}
+    {#if app.uevr.chihuahua}
+      <span class="note">{app.uevr.chihuahua}</span>
+    {/if}
+    <div class="install">
+      <button
+        onclick={() => installChihuahua(!!app.uevr.chihuahua)}
+        disabled={app.installingChihuahua}
+      >
+        {app.installingChihuahua
+          ? "Downloading…"
+          : app.uevr.chihuahua
+            ? "Re-download chihuahua"
+            : "Install chihuahua"}
+      </button>
+      <span class="install-hint"
+        >The headless UEVR injector. Downloaded automatically on the first VR-Mod
+        launch — fetch it here ahead of time.</span
+      >
+    </div>
+    {#if app.chihuahuaResult}
+      <span class="install-ok" class:bad={!app.chihuahuaResult.ok}
+        >{app.chihuahuaResult.msg}</span
+      >
+    {/if}
   </div>
 </section>
 

@@ -9,6 +9,7 @@ import type {
   PreflightReport,
   RuntimeStatus,
   ServiceStatus,
+  UevrStatus,
 } from "./types";
 
 export const app = $state({
@@ -35,6 +36,10 @@ export const app = $state({
   error: "" as string,
   // Set when the service stops without us asking (crash) — drives the toast.
   crash: null as { code: number | null } | null,
+  // UEVR ("VR Mod") tooling status + the chihuahua install action's progress.
+  uevr: { protontricks: false, chihuahua: null } as UevrStatus,
+  installingChihuahua: false,
+  chihuahuaResult: null as null | { ok: boolean; msg: string },
 });
 
 // Crash detection: a running→stopped transition we didn't initiate.
@@ -65,6 +70,32 @@ export async function loadInitial() {
   }
   await refreshStatus();
   await refreshPreflight();
+  await refreshUevr();
+}
+
+// Re-check UEVR tooling (protontricks + chihuahua). Cheap; called on load and
+// after installing the injector.
+export async function refreshUevr() {
+  try {
+    app.uevr = await api.uevrStatus();
+  } catch (e) {
+    app.error = String(e);
+  }
+}
+
+// Download the chihuahua injector ahead of time (or re-download with `force`).
+export async function installChihuahua(force = false) {
+  app.installingChihuahua = true;
+  app.chihuahuaResult = null;
+  try {
+    const path = await api.installChihuahua(force);
+    app.chihuahuaResult = { ok: true, msg: `Ready: ${path}` };
+    await refreshUevr();
+  } catch (e) {
+    app.chihuahuaResult = { ok: false, msg: String(e) };
+  } finally {
+    app.installingChihuahua = false;
+  }
 }
 
 // Re-run the runtime prerequisite checks (udev rules, pkexec). Cheap; called on

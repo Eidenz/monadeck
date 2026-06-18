@@ -118,3 +118,8 @@ export interface Installed {
   tag: string; // release tag installed, e.g. "v25.1.0-eidenz1"
   path: string; // monado prefix, or xrizer runtime dir
 }
+
+export interface UevrStatus {
+  protontricks: boolean; // protontricks-launch on PATH (needed for VR-Mod launches)
+  chihuahua: string | null; // resolved path to the injector, or null if not installed
+}

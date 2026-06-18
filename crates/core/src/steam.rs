@@ -208,11 +208,16 @@ pub struct LibraryGame {
     pub size_on_disk: Option<u64>,
     /// Total playtime in minutes (from `localconfig.vdf`), if tracked.
     pub playtime_minutes: Option<u32>,
-    /// Non-Steam only: the shortcut's launch exe + working dir (Linux paths from
-    /// `shortcuts.vdf`), used to locate the game binary for UEVR injection.
-    /// `None` for installed Steam apps (which launch via `steam://rungameid`).
+    /// For UEVR injection: a working dir to probe for the game binary, plus (for
+    /// non-Steam shortcuts) the launch exe itself — Linux paths. Non-Steam games
+    /// get both from `shortcuts.vdf`; Proton Steam games get `start_dir` = their
+    /// install dir and `exe = None` (the shipping binary is found by probing).
+    /// `start_dir` is `None` for native/non-Proton games (no injectable target).
     pub exe: Option<String>,
     pub start_dir: Option<String>,
+    /// The game looks like an Unreal Engine title UEVR can inject (and, for Steam,
+    /// has a Proton prefix). Gates the in-headset VR-Mod toggle to UE games only.
+    pub uevr_capable: bool,
 }
 
 /// Every installed Steam game + every non-Steam shortcut, sorted by name.
@@ -243,6 +248,19 @@ pub fn scan_library() -> Vec<LibraryGame> {
                 continue;
             }
             let playtime = playtimes.get(&app_id).copied();
+            // For UEVR: a Proton (Windows) game's install dir, so the injector can
+            // probe it for the Unreal shipping binary. Only set when the game has a
+            // Proton prefix (compatdata/<appid> exists) — native Linux games can't
+            // be injected, and protontricks needs the prefix anyway. `None` here is
+            // also what hides the in-headset VR-Mod toggle for non-Proton games.
+            let start_dir = extract_vdf_value(&content, "installdir").and_then(|d| {
+                let install = steamapps.join("common").join(&d);
+                let prefix = steamapps.join("compatdata").join(&app_id);
+                (install.is_dir() && prefix.is_dir())
+                    .then(|| install.to_string_lossy().into_owned())
+            });
+            // Only a Proton game (start_dir set) that looks like Unreal can be modded.
+            let uevr_capable = start_dir.as_deref().is_some_and(|d| looks_like_ue(Path::new(d)));
             games.push(LibraryGame {
                 name,
                 app_id: Some(app_id),
@@ -252,7 +270,8 @@ pub fn scan_library() -> Vec<LibraryGame> {
                 size_on_disk: extract_vdf_value(&content, "SizeOnDisk").and_then(|s| s.parse().ok()),
                 playtime_minutes: playtime,
                 exe: None,
-                start_dir: None,
+                start_dir,
+                uevr_capable,
             });
         }
     }
@@ -267,6 +286,16 @@ pub fn scan_library() -> Vec<LibraryGame> {
         let name = if trimmed.is_empty() { format!("Shortcut {id}") } else { trimmed.to_string() };
         let playtime = playtimes.get(&id).copied();
         let last_played = (s.last_play > 0).then_some(s.last_play as u64);
+        // UE check on the working dir (or the exe's folder if the shortcut has none).
+        let ue_dir = {
+            let sd = s.start_dir.trim().trim_matches('"');
+            if !sd.is_empty() {
+                PathBuf::from(sd)
+            } else {
+                PathBuf::from(s.exe.trim().trim_matches('"')).parent().map(Path::to_path_buf).unwrap_or_default()
+            }
+        };
+        let uevr_capable = looks_like_ue(&ue_dir);
         games.push(LibraryGame {
             name,
             app_id: None,
@@ -277,11 +306,34 @@ pub fn scan_library() -> Vec<LibraryGame> {
             playtime_minutes: playtime,
             exe: Some(s.exe),
             start_dir: Some(s.start_dir),
+            uevr_capable,
         });
     }
 
     games.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     games
+}
+
+/// Cheap heuristic: does this install dir look like an Unreal Engine game UEVR can
+/// inject? Shallow stats only — NO recursive walk (must not hang on a cold
+/// NTFS/FUSE Steam library). UE-packaged games ship a top-level `Engine/` dir next
+/// to the project, or a `<Project>/Binaries/Win64` one level down.
+fn looks_like_ue(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    if dir.join("Engine").is_dir() {
+        return true;
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() && p.join("Binaries").join("Win64").is_dir() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Steam infrastructure that isn't a launchable game (runtimes, Proton, etc.).
