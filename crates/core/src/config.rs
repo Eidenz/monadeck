@@ -102,8 +102,8 @@ pub struct MonadeckConfig {
 
     /// Launch the built-in in-headset library overlay after the service comes
     /// up. It's a permanent, non-removable entry in the auto-launch list (ships
-    /// inside the bundle); off by default, the user flips this to enable it.
-    #[serde(default)]
+    /// inside the bundle); on by default, the user can disable it in Plugins.
+    #[serde(default = "default_true")]
     pub overlay_enabled: bool,
 
     /// Environment variables injected into `monado-service` (your custom vars).
@@ -132,7 +132,7 @@ impl Default for MonadeckConfig {
             nvidia_mitigation: true,
             lighthouse_driver: default_lh_driver(),
             simulated_hmd: false,
-            overlay_enabled: false,
+            overlay_enabled: true,
             environment: BTreeMap::new(),
             plugins: Vec::new(),
         }

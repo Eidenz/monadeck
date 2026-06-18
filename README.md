@@ -6,7 +6,16 @@
 
 Built for a **Monado** and **xrizer**-only workflow, where Envision's design didn't fit.
 
-![Monadeck](screenshot.png)
+<img src="screenshots/dashboard.jpg" width="800" alt="Monadeck in-headset dashboard"><br>
+<sub>The in-headset game-library dashboard</sub>
+
+<table>
+<tr>
+<td align="center" valign="top"><img src="screenshots/settings.png" width="260" alt="In-headset settings"><br><sub>In-headset settings</sub></td>
+<td align="center" valign="top"><img src="screenshots/playspace.png" width="260" alt="Playspace tools"><br><sub>Playspace tools</sub></td>
+<td align="center" valign="center"><img src="screenshots/desktop.png" width="260" alt="Desktop control panel"><br><sub>Desktop control panel</sub></td>
+</tr>
+</table>
 
 > **AI usage:** This project was developed with AI assistance (Anthropic's Claude), under human direction, testing, and review.
 
