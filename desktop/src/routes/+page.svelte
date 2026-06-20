@@ -1,10 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import {
-    getCurrentWindow,
-    LogicalSize,
-    LogicalPosition,
-  } from "@tauri-apps/api/window";
+  import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import TitleBar from "$lib/components/TitleBar.svelte";
   import CapToast from "$lib/components/CapToast.svelte";
   import CrashToast from "$lib/components/CrashToast.svelte";
@@ -52,42 +48,33 @@
   );
 
   // The window auto-sizes to the deck's measured content — compact by default,
-  // growing as devices/apps appear. The toasts float detached above the deck,
-  // growing the (transparent) window UPWARD so the deck stays put; device and
-  // app growth just extends the window downward.
+  // growing as devices/apps appear. Notices float detached BELOW the deck: the
+  // window only ever grows downward from a fixed top-left (a resize is anchored
+  // top-left on KWin/Wayland), so the deck stays pinned in place. We deliberately
+  // never reposition the window — moving it to grow upward is a no-op on Wayland
+  // and only ever shoved the deck down.
   const WIN_W = 380;
   let contentH = $state(0); // measured deck (+ error) height
-  let toastSlotH = $state(0); // measured toast card height
+  let toastSlotH = $state(0); // measured notice card height
   const toastH = $derived(
     showToast || showCrash || showPreflight || showNoRuntime ? toastSlotH : 0,
   );
 
-  let appliedToastH = 0;
-  let desired: { total: number; toast: number } | null = null;
+  let desiredH: number | null = null;
   let applying = false;
 
-  function requestResize(total: number, toast: number) {
-    desired = { total, toast };
+  function requestResize(total: number) {
+    desiredH = total;
     if (!applying) drainResize();
   }
   async function drainResize() {
     applying = true;
     const win = getCurrentWindow();
-    while (desired) {
-      const { total, toast } = desired;
-      desired = null;
+    while (desiredH !== null) {
+      const total = desiredH;
+      desiredH = null;
       try {
-        const delta = toast - appliedToastH;
-        appliedToastH = toast;
-        const scale = await win.scaleFactor();
-        const pos = await win.outerPosition();
-        const x = Math.round(pos.x / scale);
-        const y = Math.round(pos.y / scale);
         await win.setSize(new LogicalSize(WIN_W, Math.max(1, Math.round(total))));
-        // Only a toast change moves the window (grow/shrink upward).
-        if (delta !== 0) {
-          await win.setPosition(new LogicalPosition(x, Math.max(0, y - delta)));
-        }
       } catch {
         // transient window-op failures are harmless; next change re-applies
       }
@@ -96,7 +83,7 @@
   }
 
   $effect(() => {
-    if (contentH > 0) requestResize(contentH + toastH, toastH);
+    if (contentH > 0) requestResize(contentH + toastH);
   });
 
   onMount(() => {
@@ -121,15 +108,6 @@
 </script>
 
 <div class="deck-window">
-  {#if showToast || showCrash || showPreflight || showNoRuntime}
-    <div class="toast-slot" bind:clientHeight={toastSlotH}>
-      {#if showCrash}<CrashToast />{/if}
-      {#if showNoRuntime}<NoRuntimeBanner bind:dismissed={noRuntimeDismissed} />{/if}
-      {#if showPreflight}<PreflightBanner bind:dismissed={preflightDismissed} />{/if}
-      {#if showToast}<CapToast bind:dismissed />{/if}
-    </div>
-  {/if}
-
   <div class="content" bind:clientHeight={contentH}>
     <div class="deck">
       <TitleBar />
@@ -168,6 +146,15 @@
       </div>
     {/if}
   </div>
+
+  {#if showToast || showCrash || showPreflight || showNoRuntime}
+    <div class="toast-slot" bind:clientHeight={toastSlotH}>
+      {#if showCrash}<CrashToast />{/if}
+      {#if showNoRuntime}<NoRuntimeBanner bind:dismissed={noRuntimeDismissed} />{/if}
+      {#if showPreflight}<PreflightBanner bind:dismissed={preflightDismissed} />{/if}
+      {#if showToast}<CapToast bind:dismissed />{/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -176,11 +163,11 @@
     display: flex;
     flex-direction: column;
   }
-  /* The toast floats detached above the deck: inset on the sides with a gap
-     below, the surrounding transparency showing the desktop (SteamVR-style). */
+  /* Notices float detached below the deck: inset on the sides with a gap above,
+     the surrounding transparency showing the desktop (SteamVR-style). */
   .toast-slot {
     flex: none;
-    padding: 8px 8px 12px;
+    padding: 12px 8px 8px;
     display: flex;
     flex-direction: column;
     gap: 8px;

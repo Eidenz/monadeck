@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
+  import { listen, emit } from "@tauri-apps/api/event";
   import WindowControls from "$lib/components/WindowControls.svelte";
   import GeneralView from "$lib/views/GeneralView.svelte";
   import CompositorView from "$lib/views/CompositorView.svelte";
@@ -27,6 +27,10 @@
     const un = listen<SettingsSection>("monadeck:section", (e) => {
       active = e.payload;
     });
+    // Once the section listener is actually registered, tell any opener that
+    // deep-linked us (e.g. "View logs") so it can re-send the section if its
+    // first emit raced our setup while the webview was still loading.
+    un.then(() => emit("monadeck:settings-ready"));
     return () => {
       clearInterval(t);
       un.then((f) => f());
