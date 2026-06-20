@@ -202,6 +202,16 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
             ));
         }
 
+        // A previous unclean exit (freeze/crash/SIGKILL) can leave monado's IPC
+        // socket behind with nothing listening; the next bind() then fails with
+        // "Address already in use" and the service refuses to boot. If a live
+        // service is still listening, don't spawn a colliding second instance —
+        // report it. Otherwise clear any stale leftover before we spawn.
+        if devices::service_connected() {
+            return Err("monado is already running — stop it before starting again.".into());
+        }
+        devices::reclaim_stale_socket();
+
         // Wire up runtimes (each backs up what it replaces).
         active_runtime::set_to_monado(&cfg).map_err(|e| e.to_string())?;
         if cfg.ovr_runtime == monadeck_core::config::OvrRuntime::Xrizer {

@@ -9,7 +9,7 @@
 use libmonado::{ClientLogic, ClientState, DeviceLogic, DeviceRole, Monado};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A coarse device class the frontend maps to an icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,8 +224,111 @@ pub fn list() -> Result<Vec<DeviceInfo>, String> {
     snapshot().map(|s| s.devices)
 }
 
-/// Whether the monado service is up, by presence of its IPC socket. Cheap and
-/// silent (no libmonado call), so it's safe to poll while the service is down.
+/// Whether a process is actually listening on `path`, by scanning
+/// `/proc/net/unix`. This distinguishes a live service from a *stale* socket
+/// file left behind by an unclean exit (freeze/crash/SIGKILL): the leftover file
+/// still passes `Path::exists()`, but with no listener the kernel never lists it
+/// here.
+///
+/// Passive on purpose — unlike a `connect()` probe it opens no connection, so it
+/// adds zero client connect/disconnect churn to monado's log even when polled
+/// every tick (the whole reason [`crate::monado_conn`] holds one persistent
+/// connection). If procfs is somehow unreadable we fall back to file presence.
+fn socket_is_listening(path: &Path) -> bool {
+    // /proc/net/unix columns: Num RefCount Protocol Flags Type St Inode Path.
+    // A bound, listening socket has the SO_ACCEPTCON flag (0x10000) set in
+    // `Flags`; a stale path has no row at all.
+    const SO_ACCEPTCON: u64 = 0x1_0000;
+    let Ok(table) = std::fs::read_to_string("/proc/net/unix") else {
+        return path.exists();
+    };
+    let want = path.to_string_lossy();
+    table.lines().skip(1).any(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 8 {
+            return false;
+        }
+        let listening = u64::from_str_radix(cols[3], 16).unwrap_or(0) & SO_ACCEPTCON != 0;
+        // Join the tail in case a socket path ever contains a space.
+        listening && cols[7..].join(" ") == want
+    })
+}
+
+/// Whether the monado service is up — i.e. something is actually listening on
+/// its IPC socket, not merely that the socket file exists. Cheap and silent (no
+/// libmonado call, no connection opened), so it's safe to poll while the service
+/// is down. Returning `false` on a leftover socket is deliberate: an unclean
+/// exit leaves the file behind, and treating that as "up" would make the UI lie
+/// and make the persistent worker keep retrying `auto_connect` against a corpse.
 pub fn service_connected() -> bool {
-    ipc_socket_path().exists()
+    let path = ipc_socket_path();
+    // Stat first: in the common down-state there's no file, so we never read
+    // /proc/net/unix at all.
+    path.exists() && socket_is_listening(&path)
+}
+
+/// Remove monado's IPC socket if it's *stale* — the file exists but nothing is
+/// listening, as left by an unclean exit (freeze/crash/SIGKILL). Without this the
+/// next `monado-service` start fails to `bind()` with "Address already in use"
+/// and refuses to boot.
+///
+/// A socket a live service is still listening on is never removed (we check
+/// first), so this can't disrupt a running runtime. Returns whether a stale
+/// socket was removed.
+pub fn reclaim_stale_socket() -> bool {
+    let path = ipc_socket_path();
+    if !path.exists() || socket_is_listening(&path) {
+        return false; // absent, or a live service owns it — leave it alone.
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            log::info!(
+                "removed stale monado IPC socket {} left by a previous unclean exit",
+                path.display()
+            );
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "could not remove stale monado IPC socket {}: {e}",
+                path.display()
+            );
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn live_listener_reads_up_stale_socket_reads_down() {
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let live = dir.join(format!("monadeck_live_{pid}.sock"));
+        let stale = dir.join(format!("monadeck_stale_{pid}.sock"));
+        let _ = std::fs::remove_file(&live);
+        let _ = std::fs::remove_file(&stale);
+
+        // A real listener is accepting → shows up in /proc/net/unix.
+        let listener = UnixListener::bind(&live).expect("bind live socket");
+        // Bind then drop: the path lingers as a socket file with no listener —
+        // exactly the leftover an unclean monado exit leaves behind. (Rust does
+        // not unlink a UnixListener's path on drop.)
+        let dead = UnixListener::bind(&stale).expect("bind stale socket");
+        drop(dead);
+
+        assert!(stale.exists(), "dropped listener should leave the socket file");
+        assert!(socket_is_listening(&live), "live listener must read as up");
+        assert!(
+            !socket_is_listening(&stale),
+            "stale socket must read as down"
+        );
+
+        drop(listener);
+        let _ = std::fs::remove_file(&live);
+        let _ = std::fs::remove_file(&stale);
+    }
 }
