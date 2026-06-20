@@ -1,6 +1,6 @@
 [package]
 name = "monadeck-desktop"
-version = "0.5.0"
+version = "0.6.0"
 description = "Monadeck — a SteamVR-style launcher/orchestrator for a Monado fork"
 authors = ["Eidenz"]
 edition = "2021"

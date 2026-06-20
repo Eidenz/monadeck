@@ -7,7 +7,13 @@ members = ["crates/core", "crates/overlay"]
 exclude = ["desktop"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT"
 authors = ["Eidenz"]
+
+# Redirect the libmonado git dep (used by core + overlay) to our vendored, patched
+# copy that adds the 1.8 controller-freeze binding. Keeps every dependant on one
+# consistent libmonado without changing their individual dependency lines.
+[patch."https://github.com/wayvr-org/libmonado-rs.git"]
+libmonado = { path = "vendor/libmonado-rs" }

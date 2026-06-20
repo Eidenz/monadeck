@@ -29,6 +29,7 @@ Monadeck is two halves that share one library: an **in-headset overlay** you liv
 
 - **🎮 Your whole library, curved around you**: Steam games and non-Steam shortcuts together on a SteamVR-style dashboard, with cover art, hero banners, and logos pulled from your Steam artwork.
 - **▶️ Launch and stop without leaving VR**: start a game from the dashboard; an active-game card shows what's running, with the cover, a Stop button, and how long the current session has gone.
+- **🪟 Juggle multiple VR apps**: Monado can run several VR apps at once, so the **Monado** tab lists them and lets you pick which one your headset shows, freeze an app's controllers in place, or kill it. The freeze action only shows on a runtime that supports it.
 - **🥽 Flat games in VR with UEVR**: toggle *VR Mod* on a non-Steam Unreal Engine game and Monadeck launches it with [UEVR](https://github.com/praydog/UEVR) injected automatically (via [chihuahua](https://github.com/keton/chihuahua), under Proton; needs `protontricks`).
 - **🔍 Find things fast**: search with an on-screen keyboard, **⭐ favourite** the ones you reach for, and sort any list by *recent · name · playtime · size*.
 - **🗂️ Your own collections**: group games into named collections (*Seated*, *Standing*, whatever) and browse them as their own shelves.

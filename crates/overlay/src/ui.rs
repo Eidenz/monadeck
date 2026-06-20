@@ -14,6 +14,7 @@ pub enum Nav {
     Tags,
     Tools,
     Playspace,
+    Monado,
     Settings,
 }
 
@@ -118,6 +119,15 @@ pub struct LibState {
     /// Device batteries + wall clock, refreshed by the loop for the bottom bar.
     pub batteries: Vec<crate::monado::BatteryInfo>,
     pub clock: String,
+    /// Monado page: running app clients (set by the loop) + drained per-row
+    /// action requests (freeze toggle / set-active by id, kill by app name).
+    pub monado_clients: Vec<crate::monado::ClientInfo>,
+    /// Whether the active runtime's libmonado supports controller freezing (our
+    /// fork). Hides the per-row freeze button when false.
+    pub monado_freeze_supported: bool,
+    pub freeze_toggle_request: Option<u32>,
+    pub set_active_request: Option<u32>,
+    pub kill_request: Option<String>,
     /// Minutes the currently-running game has been up this session (for the splash).
     pub session_minutes: Option<u32>,
     /// Central-view fade-in animation (resets when the tab / splash changes).
@@ -191,6 +201,11 @@ impl LibState {
             show_splash: false,
             batteries: Vec::new(),
             clock: String::new(),
+            monado_clients: Vec::new(),
+            monado_freeze_supported: false,
+            freeze_toggle_request: None,
+            set_active_request: None,
+            kill_request: None,
             session_minutes: None,
             last_nav: Nav::Home,
             last_splash: false,
@@ -273,14 +288,16 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
                 }
                 ui.add_space(8.0);
             }
-            // Tools (timer) · Playspace · Settings pinned to the bottom. Reserve
-            // enough for the 3 icons PLUS item-spacing + the rounded-corner margin,
-            // or the last icon overruns the panel's rounded bottom (clipped).
+            // Tools (timer) · Playspace · Freeze · Settings pinned to the bottom.
+            // Reserve enough for the icons PLUS item-spacing + the rounded-corner
+            // margin, or the last icon overruns the panel's rounded bottom (clipped).
+            // ~64 px per icon (48 button + 8 add_space + spacing) — bump when adding.
             let avail = ui.available_height();
-            ui.add_space((avail - 208.0).max(0.0));
+            ui.add_space((avail - 272.0).max(0.0));
             let bottom = [
                 (icon::TIMER, Nav::Tools),
                 (icon::ARROWS_OUT_CARDINAL, Nav::Playspace),
+                (icon::STACK, Nav::Monado),
                 (icon::GEAR, Nav::Settings),
             ];
             for (k, &(glyph, nav)) in bottom.iter().enumerate() {
@@ -567,6 +584,11 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
                 st.visible_now.clear();
                 st.hovered_index = None;
                 playspace_view(ui, st);
+            }
+            Nav::Monado => {
+                st.visible_now.clear();
+                st.hovered_index = None;
+                monado_view(ui, st);
             }
             Nav::Settings => {
                 st.visible_now.clear();
@@ -1644,6 +1666,85 @@ fn step_btn(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
     )
 }
 
+
+/// Monado page: Monado runs several VR apps at once. Per running app, switch which
+/// one your headset displays ("Set active" = primary), freeze its hands in place, or
+/// close it. Overlays (monadeck itself, WayVR) are excluded.
+fn monado_view(ui: &mut egui::Ui, st: &mut LibState) {
+    page_header(ui, icon::STACK, "Monado");
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.label(
+            egui::RichText::new(
+                "Manage your running Monado apps — set which one is active, freeze \
+                 controllers, or kill apps.",
+            )
+            .size(14.0)
+            .color(theme::ON_SURFACE_VAR),
+        );
+        ui.add_space(14.0);
+
+        let clients = st.monado_clients.clone();
+        if clients.is_empty() {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(icon::STACK).size(40.0).color(theme::ON_SURFACE_VAR));
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("No running apps.")
+                        .size(15.0)
+                        .color(theme::ON_SURFACE_VAR),
+                );
+            });
+            return;
+        }
+
+        section(ui, "Running apps", |ui| {
+            let n = clients.len();
+            for (i, c) in clients.iter().enumerate() {
+                let label = if c.name.chars().count() > 14 {
+                    format!("{}…", c.name.chars().take(14).collect::<String>())
+                } else {
+                    c.name.clone()
+                };
+                let sub = if !c.is_app { Some("backgrounded") } else { None };
+                // Laid out right-to-left, so add Kill, then Freeze, then Set active
+                // to read [Set active] [Freeze] [Kill] left-to-right.
+                setting_row(ui, &label, sub, |ui| {
+                    let kill = egui::Button::new(
+                        egui::RichText::new(format!("{}  Kill", icon::X)).size(16.0).color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(176, 64, 64))
+                    .corner_radius(10)
+                    .min_size(egui::vec2(78.0, 42.0));
+                    if ui.add(kill).clicked() {
+                        st.kill_request = Some(c.name.clone());
+                        st.sound_tab = true;
+                    }
+
+                    // Freeze only shows on a fork that supports it (stock Monado lacks
+                    // the symbol, so the button would no-op).
+                    if st.monado_freeze_supported {
+                        let txt = if c.frozen { "Unfreeze controllers" } else { "Freeze controllers" };
+                        if pill(ui, txt, 192.0, c.frozen).clicked() {
+                            st.freeze_toggle_request = Some(c.id);
+                            st.sound_tab = true;
+                        }
+                    }
+
+                    if c.is_primary {
+                        let _ = pill(ui, &format!("{}  Active", icon::MONITOR), 104.0, true);
+                    } else if pill(ui, "Set active", 104.0, false).clicked() {
+                        st.set_active_request = Some(c.id);
+                        st.sound_tab = true;
+                    }
+                });
+                if i + 1 < n {
+                    divider(ui);
+                }
+            }
+        });
+    });
+}
 
 fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     page_header(ui, icon::GEAR, "Settings");

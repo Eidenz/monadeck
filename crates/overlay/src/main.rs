@@ -641,6 +641,8 @@ fn run() -> Result<()> {
         // --- Timer, low-battery warning, toasts (run even while hidden) ------
         let now = Instant::now();
         st.batteries = monado.batteries();
+        st.monado_clients = monado.clients();
+        st.monado_freeze_supported = monado.freeze_supported();
 
         // Timer: start / pause / resume / reset, then count down + fire.
         if st.timer_toggle_request {
@@ -1216,6 +1218,16 @@ fn run() -> Result<()> {
         if st.recenter_playspace_request {
             st.recenter_playspace_request = false;
             monado.recenter();
+        }
+        if let Some(id) = st.freeze_toggle_request.take() {
+            let frozen = st.monado_clients.iter().find(|c| c.id == id).map(|c| c.frozen).unwrap_or(false);
+            monado.set_freeze(id, !frozen);
+        }
+        if let Some(id) = st.set_active_request.take() {
+            monado.set_primary(id);
+        }
+        if let Some(name) = st.kill_request.take() {
+            stop_game(&name);
         }
     }
 }
