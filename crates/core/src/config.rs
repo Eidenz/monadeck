@@ -40,6 +40,10 @@ fn default_lh_driver() -> String {
     "steamvr".to_string()
 }
 
+fn default_bsb_cams_port() -> u16 {
+    8080
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonadeckConfig {
     /// Install/build prefix of the monado fork, e.g. `~/monado/build/install`.
@@ -113,6 +117,15 @@ pub struct MonadeckConfig {
     /// Apps to launch by explicit path alongside the service.
     #[serde(default)]
     pub plugins: Vec<Plugin>,
+
+    /// Path to the `go-bsb-cams` binary for Bigscreen Beyond eye tracking. The
+    /// one-click download fills this in; the user can also point at their own.
+    #[serde(default)]
+    pub bsb_cams_path: Option<PathBuf>,
+
+    /// Port go-bsb-cams serves the eye-camera MJPEG stream on (Babble/VRCFT read it).
+    #[serde(default = "default_bsb_cams_port")]
+    pub bsb_cams_port: u16,
 }
 
 impl Default for MonadeckConfig {
@@ -135,6 +148,8 @@ impl Default for MonadeckConfig {
             overlay_enabled: true,
             environment: BTreeMap::new(),
             plugins: Vec::new(),
+            bsb_cams_path: None,
+            bsb_cams_port: default_bsb_cams_port(),
         }
     }
 }

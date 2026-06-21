@@ -26,6 +26,9 @@ pub struct OverlayConfig {
     pub playspace_yaw: f32,
     /// Seconds chihuahua waits after launching a UEVR game before injecting.
     pub uevr_delay: u32,
+    /// Seconds to count down before a "Freeze controllers" actually applies, so
+    /// you can settle into position first.
+    pub freeze_delay_secs: f32,
 }
 
 impl Default for OverlayConfig {
@@ -42,6 +45,7 @@ impl Default for OverlayConfig {
             playspace_z: 0.0,
             playspace_yaw: 0.0,
             uevr_delay: 30,
+            freeze_delay_secs: 3.0,
         }
     }
 }

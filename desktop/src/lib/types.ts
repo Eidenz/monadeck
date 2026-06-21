@@ -119,6 +119,14 @@ export interface Installed {
   path: string; // monado prefix, or xrizer runtime dir
 }
 
+export interface EyeStatus {
+  present: boolean; // a Bigscreen Beyond is connected (USB 35bd)
+  running: boolean; // go-bsb-cams is running
+  rule_installed: boolean; // camera-access udev rule is in place
+  binary: string | null; // resolved go-bsb-cams path, or null if not found
+  port: number; // MJPEG stream port
+}
+
 export interface UevrStatus {
   protontricks: boolean; // protontricks-launch on PATH (needed for VR-Mod launches)
   chihuahua: string | null; // resolved path to the injector, or null if not installed

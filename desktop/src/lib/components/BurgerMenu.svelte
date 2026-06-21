@@ -1,12 +1,38 @@
 <script lang="ts">
   import { openSettings, openBindings } from "$lib/windows";
+  import { beyondPresent } from "$lib/api";
 
   let open = $state(false);
+  // Only Beyond owners get the eye-tracking entry. Re-checked each time the menu
+  // opens, so plugging the headset in mid-session doesn't need a restart.
+  let hasBeyond = $state(false);
 
-  const items = [
+  const baseItems = [
     { label: "Settings", run: () => openSettings() },
     { label: "Binding editor", run: () => openBindings() },
+    { label: "Logs", run: () => openSettings("logs") },
   ];
+
+  // The Beyond entry just deep-links the Settings window to its tab.
+  let items = $derived(
+    hasBeyond
+      ? [
+          ...baseItems,
+          { label: "Beyond eye tracking", run: () => openSettings("beyond") },
+        ]
+      : baseItems,
+  );
+
+  async function toggle() {
+    open = !open;
+    if (open) {
+      try {
+        hasBeyond = await beyondPresent();
+      } catch {
+        hasBeyond = false;
+      }
+    }
+  }
 
   function pick(run: () => void) {
     open = false;
@@ -19,7 +45,7 @@
     class="trigger state-layer"
     aria-label="Menu"
     aria-expanded={open}
-    onclick={() => (open = !open)}
+    onclick={toggle}
   >
     <svg width="16" height="16" viewBox="0 0 16 16">
       <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />

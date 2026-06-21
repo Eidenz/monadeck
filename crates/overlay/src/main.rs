@@ -431,6 +431,7 @@ fn run() -> Result<()> {
     st.playspace_z = ov_cfg.playspace_z;
     st.playspace_yaw = ov_cfg.playspace_yaw;
     st.uevr_delay = ov_cfg.uevr_delay;
+    st.freeze_delay_secs = ov_cfg.freeze_delay_secs;
     // Hide the UEVR feature entirely if protontricks-launch isn't installed.
     st.uevr_available = monadeck_core::uevr::protontricks_available();
     // If protontricks is present, make sure the chihuahua injector is too —
@@ -462,6 +463,8 @@ fn run() -> Result<()> {
     // For a UEVR launch: keep the dashboard up showing "Waiting for UEVR injection…"
     // until the game appears as a VR client (= injected) or this deadline passes.
     let mut uevr_wait: Option<Instant> = None;
+    // A freeze counting down before it applies: (client id, deadline).
+    let mut pending_freeze: Option<(u32, Instant)> = None;
     let mut click_prev = false; // haptic click edge
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     // Re-scan to refresh last-played ordering when a game starts/stops.
@@ -1055,32 +1058,61 @@ fn run() -> Result<()> {
 
         // --- Drain UI actions -----------------------------------------------
         if let Some(i) = st.launch_request.take() {
+            let mut launched = false;
             if let Some(g) = st.games.get(i) {
-                if g.uevr {
-                    launch_uevr(g, st.uevr_delay);
-                    // Keep the dashboard up through injection; the wait ends when the
-                    // game shows up as a VR client, or this deadline passes.
-                    uevr_wait = Some(
-                        Instant::now() + std::time::Duration::from_secs(st.uevr_delay as u64 + 90),
-                    );
+                // UEVR injection needs a Proton prefix. A non-Steam shortcut only gets
+                // one after it's been launched once through Steam (with Proton forced),
+                // so without it protontricks silently no-ops. Detect + warn instead of
+                // pretending to launch.
+                let uevr_blocked = g.uevr && {
+                    let appid = g.shortcut_id.as_deref().or(g.app_id.as_deref());
+                    !appid.is_some_and(monadeck_core::steam::has_proton_prefix)
+                };
+                if uevr_blocked {
+                    if let Some(h) = hmd {
+                        toast = Some(make_toast(
+                            "Launch it in Steam first",
+                            format!(
+                                "{} has no Proton prefix yet. Force Proton in its Steam properties and run \
+                                 it once, then VR Mod will work.",
+                                g.name
+                            ),
+                            ui::ToastKind::Info,
+                            &h,
+                        ));
+                    }
+                    st.sound_tab = true;
                 } else {
-                    launch_game(g);
-                    uevr_wait = None;
+                    if g.uevr {
+                        launch_uevr(g, st.uevr_delay);
+                        // Keep the dashboard up through injection; the wait ends when the
+                        // game shows up as a VR client, or this deadline passes.
+                        uevr_wait = Some(
+                            Instant::now() + std::time::Duration::from_secs(st.uevr_delay as u64 + 90),
+                        );
+                    } else {
+                        launch_game(g);
+                        uevr_wait = None;
+                    }
+                    audio.launch();
+                    st.launching_name = Some(g.name.clone());
+                    st.launching_status = None;
+                    // Hold the "Launching…" card briefly; a normal game then auto-hides,
+                    // a UEVR game switches to the injection-wait message and stays open.
+                    launching_until = Some(Instant::now() + std::time::Duration::from_millis(1500));
+                    launched = true;
                 }
-                audio.launch();
-                st.launching_name = Some(g.name.clone());
-                st.launching_status = None;
-                // Hold the "Launching…" card briefly; a normal game then auto-hides,
-                // a UEVR game switches to the injection-wait message and stays open.
-                launching_until = Some(Instant::now() + std::time::Duration::from_millis(1500));
             }
             // Optimistically mark it "now" so it's at the top when you return
-            // (a real re-scan confirms it when the game starts/stops).
-            if let Some(g) = st.games.get_mut(i) {
-                g.last_played = Some(now_unix());
+            // (a real re-scan confirms it when the game starts/stops). Only when we
+            // actually launched — a blocked UEVR warning shouldn't reorder anything.
+            if launched {
+                if let Some(g) = st.games.get_mut(i) {
+                    g.last_played = Some(now_unix());
+                }
+                resort_recency(&mut st);
+                last_used.clear();
             }
-            resort_recency(&mut st);
-            last_used.clear();
         }
         if st.sound_select {
             st.sound_select = false;
@@ -1120,6 +1152,7 @@ fn run() -> Result<()> {
                 playspace_z: st.playspace_z,
                 playspace_yaw: st.playspace_yaw,
                 uevr_delay: st.uevr_delay,
+                freeze_delay_secs: st.freeze_delay_secs,
             }
             .save();
         }
@@ -1221,7 +1254,31 @@ fn run() -> Result<()> {
         }
         if let Some(id) = st.freeze_toggle_request.take() {
             let frozen = st.monado_clients.iter().find(|c| c.id == id).map(|c| c.frozen).unwrap_or(false);
-            monado.set_freeze(id, !frozen);
+            let counting_down = matches!(pending_freeze, Some((p, _)) if p == id);
+            if frozen {
+                // Unfreeze is immediate.
+                monado.set_freeze(id, false);
+                pending_freeze = None;
+            } else if counting_down {
+                // Tapping again during the countdown cancels it.
+                pending_freeze = None;
+            } else if st.freeze_delay_secs > 0.0 {
+                // Count down first so the user can settle into position.
+                pending_freeze = Some((id, now + std::time::Duration::from_secs_f32(st.freeze_delay_secs)));
+            } else {
+                monado.set_freeze(id, true);
+            }
+        }
+        // Fire a pending freeze when its countdown elapses; expose the remaining
+        // seconds for the button label meanwhile.
+        match pending_freeze {
+            Some((id, deadline)) if now >= deadline => {
+                monado.set_freeze(id, true);
+                pending_freeze = None;
+                st.freeze_pending = None;
+            }
+            Some((id, deadline)) => st.freeze_pending = Some((id, (deadline - now).as_secs_f32())),
+            None => st.freeze_pending = None,
         }
         if let Some(id) = st.set_active_request.take() {
             monado.set_primary(id);

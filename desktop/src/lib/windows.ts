@@ -10,6 +10,7 @@ export type SettingsSection =
   | "environment"
   | "plugins"
   | "logs"
+  | "beyond"
   | "about";
 
 export async function openBindings() {
@@ -22,6 +23,7 @@ export async function openBindings() {
     // setFocus above triggers it, so no cross-window event is needed.
   }
 }
+
 
 export async function openSettings(section: SettingsSection = "general") {
   const win = await Window.getByLabel("settings");

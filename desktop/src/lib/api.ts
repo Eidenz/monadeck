@@ -57,3 +57,13 @@ export const listInstalledApps = () =>
 
 export const launchPlugin = (index: number) =>
   invoke<number>("launch_plugin", { index });
+
+import type { EyeStatus } from "./types";
+export const beyondPresent = () => invoke<boolean>("beyond_present");
+export const eyetrackingStatus = () => invoke<EyeStatus>("eyetracking_status");
+export const eyetrackingStart = () => invoke<void>("eyetracking_start");
+export const eyetrackingStop = () => invoke<void>("eyetracking_stop");
+export const installBsbcams = () => invoke<Installed>("install_bsbcams_cmd");
+export const installBsbcamsRule = () => invoke<void>("install_bsbcams_rule");
+export const setBsbcamsPath = (path: string) =>
+  invoke<void>("set_bsbcams_path", { path });

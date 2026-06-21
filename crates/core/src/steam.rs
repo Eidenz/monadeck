@@ -314,6 +314,17 @@ pub fn scan_library() -> Vec<LibraryGame> {
     games
 }
 
+/// Does a Proton compatdata prefix exist for this appid (Steam app or non-Steam
+/// shortcut)? UEVR injection needs one, and a non-Steam shortcut only gets it
+/// after being launched once through Steam with Proton forced — so this is what
+/// "launch it in Steam first" detects. Checked across every Steam library.
+pub fn has_proton_prefix(appid: &str) -> bool {
+    let roots = find_steam_roots();
+    find_library_folders(&roots)
+        .into_iter()
+        .any(|lib| lib.join("steamapps").join("compatdata").join(appid).is_dir())
+}
+
 /// Cheap heuristic: does this install dir look like an Unreal Engine game UEVR can
 /// inject? Shallow stats only — NO recursive walk (must not hang on a cold
 /// NTFS/FUSE Steam library). UE-packaged games ship a top-level `Engine/` dir next

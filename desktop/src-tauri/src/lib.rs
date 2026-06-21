@@ -3,6 +3,7 @@
 //! exposes a flat command surface to the SvelteKit frontend, mirroring the
 //! `invoke(...)` style used in NemuriXR/udcap-control.
 
+mod beyond;
 mod bindings;
 mod commands;
 mod overlay;
@@ -135,6 +136,13 @@ pub fn run() {
             bindings::remove_custom_cover,
             bindings::get_custom_paths,
             bindings::set_custom_paths,
+            beyond::beyond_present,
+            beyond::eyetracking_status,
+            beyond::eyetracking_start,
+            beyond::eyetracking_stop,
+            beyond::install_bsbcams_cmd,
+            beyond::install_bsbcams_rule,
+            beyond::set_bsbcams_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Monadeck");

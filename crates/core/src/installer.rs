@@ -20,6 +20,7 @@ use std::process::Command;
 
 const MONADO_REPO: &str = "Eidenz/Monado";
 const XRIZER_REPO: &str = "Supreeeme/xrizer";
+const BSB_CAMS_REPO: &str = "Eidenz/go-bsb-cams";
 
 /// What an install produced, handed back so the caller can update config.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -236,6 +237,37 @@ pub fn install_xrizer() -> Result<Installed> {
 
     if !dest.join("bin/linux64/vrclient.so").is_file() {
         bail!("installed xrizer is missing bin/linux64/vrclient.so");
+    }
+    Ok(Installed {
+        tag: rel.tag_name,
+        path: dest.to_string_lossy().to_string(),
+    })
+}
+
+/// Download the latest `go-bsb-cams` binary (Bigscreen Beyond eye-camera server)
+/// into a Monadeck-owned, versioned dir and mark it executable; returns its path.
+/// A single binary asset, so no extract step.
+pub fn install_bsbcams() -> Result<Installed> {
+    use std::os::unix::fs::PermissionsExt;
+
+    require_tools(&["curl"])?;
+    let rel = latest_release(BSB_CAMS_REPO)?;
+    let bin = rel
+        .asset(|n| n == "go-bsb-cams")
+        .ok_or_else(|| anyhow!("no go-bsb-cams binary in the latest {BSB_CAMS_REPO} release"))?;
+
+    let dest_dir = monadeck_data_dir().join("bsb-cams").join(&rel.tag_name);
+    let _ = fs::remove_dir_all(&dest_dir);
+    fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join("go-bsb-cams");
+    download(&bin.browser_download_url, &dest)?;
+
+    let mut perms = fs::metadata(&dest)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&dest, perms).with_context(|| format!("chmod +x {}", dest.display()))?;
+
+    if !dest.is_file() {
+        bail!("downloaded go-bsb-cams is missing at {}", dest.display());
     }
     Ok(Installed {
         tag: rel.tag_name,

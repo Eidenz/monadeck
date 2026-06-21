@@ -1,7 +1,12 @@
 <script lang="ts">
   import type { DeviceInfo, DeviceKind } from "$lib/types";
 
-  let { devices }: { devices: DeviceInfo[] } = $props();
+  let { devices, eyeActive = false }: { devices: DeviceInfo[]; eyeActive?: boolean } =
+    $props();
+
+  // Bigscreen Beyond eye tracking (go-bsb-cams running): shown beside the devices.
+  const EYE_PATH =
+    "M12 6c-4.6 0-8.2 4-9.2 6 1 2 4.6 6 9.2 6s8.2-4 9.2-6c-1-2-4.6-6-9.2-6zm0 2.6a3.4 3.4 0 1 1 0 6.8 3.4 3.4 0 0 1 0-6.8z";
 
   const ICONS: Record<DeviceKind, string> = {
     hmd: "M4 8.5h16a2 2 0 0 1 2 2v3.2a3 3 0 0 1-3 3h-2.4a2 2 0 0 1-1.7-.95L13.6 14.8a2 2 0 0 0-3.2 0l-1.3 1.95A2 2 0 0 1 7.4 17.7H5a3 3 0 0 1-3-3V10.5a2 2 0 0 1 2-2z",
@@ -97,6 +102,14 @@
       {/if}
     </div>
   {/each}
+
+  {#if eyeActive}
+    <div class="dev" title="Beyond eye tracking active">
+      <svg viewBox="0 0 24 24" width="46" height="46" aria-hidden="true">
+        <path d={EYE_PATH} fill="url(#devgrad)" />
+      </svg>
+    </div>
+  {/if}
 </div>
 
 <style>

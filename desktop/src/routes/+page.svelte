@@ -17,8 +17,11 @@
     start,
     stop,
   } from "$lib/state.svelte";
+  import { eyetrackingStatus } from "$lib/api";
 
   let dismissed = $state(false);
+  // Beyond eye tracking running -> show an eye in the device strip.
+  let eyeRunning = $state(false);
   let preflightDismissed = $state(false);
   let noRuntimeDismissed = $state(false);
   const showToast = $derived(app.caps === "needs_setcap" && !dismissed);
@@ -29,13 +32,12 @@
   // No valid Monado prefix (service binary missing) → offer setup.
   const showNoRuntime = $derived(app.caps === "no_binary" && !noRuntimeDismissed);
 
-  // Stopped → Warming up… (process up, system not ready yet) → Now Playing.
-  const heading = $derived(
-    app.service.connected
-      ? "Now Playing"
-      : app.service.running
-        ? "Warming up…"
-        : "Stopped",
+  // The HMD only appears in the device snapshot (its icon turns green) once Monado
+  // actually has the headset ready — a truer "ready" signal than the raw IPC
+  // connection, which flips well before the headset is up. Same check DeviceStrip
+  // uses for the head slot.
+  const headsetReady = $derived(
+    app.devices.some((d) => d.role === "head" || d.kind === "hmd"),
   );
 
   // The detected "game": the primary app (fall back to a focused non-overlay).
@@ -45,6 +47,18 @@
           app.clients.find((c) => c.focused && !c.overlay) ??
           null)
       : null,
+  );
+
+  // Stopped → Warming up… (headset not ready) → Ready (headset up, idle) →
+  // Now Playing (a game is running).
+  const heading = $derived(
+    !app.service.running
+      ? "Stopped"
+      : !headsetReady
+        ? "Warming up…"
+        : game
+          ? "Now Playing"
+          : "Ready",
   );
 
   // The window auto-sizes to the deck's measured content — compact by default,
@@ -102,6 +116,11 @@
       await refreshStatus();
       await refreshSnapshot();
       await refreshConfig();
+      try {
+        eyeRunning = (await eyetrackingStatus()).running;
+      } catch {
+        eyeRunning = false;
+      }
     }, 1500);
     return () => clearInterval(t);
   });
@@ -133,7 +152,7 @@
           {/if}
         </div>
         <div class="divider"></div>
-        <DeviceStrip devices={app.devices} />
+        <DeviceStrip devices={app.devices} eyeActive={eyeRunning} />
         <div class="divider"></div>
         <AppsBar />
       </div>

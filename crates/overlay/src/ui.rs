@@ -128,6 +128,12 @@ pub struct LibState {
     pub freeze_toggle_request: Option<u32>,
     pub set_active_request: Option<u32>,
     pub kill_request: Option<String>,
+    /// Seconds to count down before a freeze applies (Settings; mirrored from the
+    /// overlay config). 0 = freeze immediately.
+    pub freeze_delay_secs: f32,
+    /// A freeze counting down: (client id, seconds remaining). Set by the loop,
+    /// drives the button's countdown label.
+    pub freeze_pending: Option<(u32, f32)>,
     /// Minutes the currently-running game has been up this session (for the splash).
     pub session_minutes: Option<u32>,
     /// Central-view fade-in animation (resets when the tab / splash changes).
@@ -206,6 +212,8 @@ impl LibState {
             freeze_toggle_request: None,
             set_active_request: None,
             kill_request: None,
+            freeze_delay_secs: 3.0,
+            freeze_pending: None,
             session_minutes: None,
             last_nav: Nav::Home,
             last_splash: false,
@@ -1722,10 +1730,23 @@ fn monado_view(ui: &mut egui::Ui, st: &mut LibState) {
                     }
 
                     // Freeze only shows on a fork that supports it (stock Monado lacks
-                    // the symbol, so the button would no-op).
+                    // the symbol, so the button would no-op). A freeze counts down
+                    // first (Settings) so you can settle into position; tapping during
+                    // the countdown cancels it.
                     if st.monado_freeze_supported {
-                        let txt = if c.frozen { "Unfreeze controllers" } else { "Freeze controllers" };
-                        if pill(ui, txt, 192.0, c.frozen).clicked() {
+                        let pending_secs = match st.freeze_pending {
+                            Some((pid, secs)) if pid == c.id => Some(secs),
+                            _ => None,
+                        };
+                        let txt = if c.frozen {
+                            "Unfreeze controllers".to_string()
+                        } else if let Some(secs) = pending_secs {
+                            format!("Cancel ({}s)", secs.ceil() as u32)
+                        } else {
+                            "Freeze controllers".to_string()
+                        };
+                        let selected = c.frozen || pending_secs.is_some();
+                        if pill(ui, &txt, 192.0, selected).clicked() {
                             st.freeze_toggle_request = Some(c.id);
                             st.sound_tab = true;
                         }
@@ -1823,6 +1844,17 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                 );
             });
         }
+
+        section(ui, "Controllers", |ui| {
+            setting_row(
+                ui,
+                "Freeze delay",
+                Some("Countdown before a freeze applies · time to get into position"),
+                |ui| {
+                    modern_slider(ui, &mut st.freeze_delay_secs, 0.0..=10.0, 360.0, |v| format!("{v:.0} s"));
+                },
+            );
+        });
 
         let n = st.games.len();
         section(ui, "Library", |ui| {
