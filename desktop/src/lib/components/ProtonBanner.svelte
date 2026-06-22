@@ -13,8 +13,8 @@
   <div class="desc">
     Proton 11 / Steam Linux Runtime 4 need
     <code>PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES</code> set for the whole session
-    or OpenXR games won't launch in VR. Harmless on Proton 10 — set it now to be
-    ready. Writes a config file that applies after a reboot.
+    or OpenXR games won't launch in VR. Set it now to be ready.
+    Writes a config file that applies after a reboot.
   </div>
   {#if app.protonResult}
     <div class="hint" class:err={!app.protonResult.ok}>{app.protonResult.msg}</div>

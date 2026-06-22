@@ -28,6 +28,13 @@ fn default_true() -> bool {
     true
 }
 
+fn default_setup_seen() -> bool {
+    // Configs written before this field existed lack it — treat those users as
+    // already onboarded. A genuine first run has NO config file, so `load()`
+    // returns `Default` (below) which sets this false → the welcome shows once.
+    true
+}
+
 fn default_render_scale() -> u32 {
     // Match Envision's Lighthouse default — a sharper image out of the box.
     140
@@ -66,6 +73,12 @@ pub struct MonadeckConfig {
     /// Start monado-service automatically when Monadeck launches.
     #[serde(default)]
     pub auto_start: bool,
+
+    /// Whether the first-run welcome / setup checklist has been dismissed (skipped
+    /// or completed). False only on a fresh install (no config file) → the deck
+    /// shows the welcome screen once instead of stacking individual notices.
+    #[serde(default = "default_setup_seen")]
+    pub setup_seen: bool,
 
     /// Compositor render scale, percent (`XRT_COMPOSITOR_SCALE_PERCENTAGE`).
     /// 100 = native; >100 supersamples for a sharper image (Envision uses 140).
@@ -138,6 +151,7 @@ impl Default for MonadeckConfig {
             ovr_runtime: OvrRuntime::default(),
             minimize_to_tray: true,
             auto_start: false,
+            setup_seen: false,
             render_scale: default_render_scale(),
             min_frame_period: true,
             compute_compositor: true,

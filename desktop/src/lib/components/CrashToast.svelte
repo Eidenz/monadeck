@@ -12,7 +12,7 @@
 <div class="toast" role="alert">
   <div class="title">Monado service stopped unexpectedly{codeText}</div>
   <div class="desc">
-    It exited without you pressing Stop — likely a crash or a failed startup
+    It exited without you pressing Stop, likely a crash or a failed startup
     (e.g. HMD/driver). The logs have the details.
   </div>
   <div class="acts">

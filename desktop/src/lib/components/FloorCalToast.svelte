@@ -17,11 +17,10 @@
   <div class="desc">
     The SteamVR Lighthouse driver has no play space set, so your floor height and
     forward direction will be off. Put your headset on the floor in the middle of
-    your play area (controllers off), then calibrate — the headset's facing sets
-    “forward”.
+    your play area (controllers off), facing your "forward", then calibrate.
   </div>
   {#if blocked}
-    <div class="hint">Stop the service first — calibration needs the headset.</div>
+    <div class="hint">Stop the service first, calibration needs the headset.</div>
   {:else if app.floorCalResult && !app.floorCalResult.ok}
     <div class="hint err">{app.floorCalResult.msg}</div>
   {/if}

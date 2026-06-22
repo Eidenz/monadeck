@@ -22,6 +22,7 @@ export interface MonadeckConfig {
   ovr_runtime: OvrRuntime;
   minimize_to_tray: boolean;
   auto_start: boolean;
+  setup_seen: boolean;
   render_scale: number;
   min_frame_period: boolean;
   compute_compositor: boolean;

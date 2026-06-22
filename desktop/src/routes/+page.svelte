@@ -8,6 +8,7 @@
   import FloorCalToast from "$lib/components/FloorCalToast.svelte";
   import ProtonBanner from "$lib/components/ProtonBanner.svelte";
   import NoRuntimeBanner from "$lib/components/NoRuntimeBanner.svelte";
+  import WelcomeSetup from "$lib/components/WelcomeSetup.svelte";
   import DeviceStrip from "$lib/components/DeviceStrip.svelte";
   import AppsBar from "$lib/components/AppsBar.svelte";
   import {
@@ -47,6 +48,9 @@
   );
   // Proton 11 / SLR4 OpenXR import var not set yet → prepare-ahead nudge.
   const showProton = $derived(!app.importOpenxr && !protonDismissed);
+  // First run (no config file existed) → onboarding checklist instead of the
+  // deck + a stack of individual notices.
+  const showWelcome = $derived(!!app.config && app.config.setup_seen === false);
 
   // The HMD only appears in the device snapshot (its icon turns green) once Monado
   // actually has the headset ready — a truer "ready" signal than the raw IPC
@@ -87,12 +91,13 @@
   let contentH = $state(0); // measured deck (+ error) height
   let toastSlotH = $state(0); // measured notice card height
   const toastH = $derived(
-    showToast ||
-      showCrash ||
-      showPreflight ||
-      showNoRuntime ||
-      showFloorCal ||
-      showProton
+    !showWelcome &&
+      (showToast ||
+        showCrash ||
+        showPreflight ||
+        showNoRuntime ||
+        showFloorCal ||
+        showProton)
       ? toastSlotH
       : 0,
   );
@@ -152,6 +157,11 @@
 </script>
 
 <div class="deck-window">
+  {#if showWelcome}
+    <div class="content" bind:clientHeight={contentH}>
+      <WelcomeSetup />
+    </div>
+  {:else}
   <div class="content" bind:clientHeight={contentH}>
     <div class="deck">
       <TitleBar />
@@ -200,6 +210,7 @@
       {#if showFloorCal}<FloorCalToast bind:dismissed={floorCalDismissed} />{/if}
       {#if showToast}<CapToast bind:dismissed />{/if}
     </div>
+  {/if}
   {/if}
 </div>
 

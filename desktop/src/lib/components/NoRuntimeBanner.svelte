@@ -16,7 +16,7 @@
   <div class="title">No Monado runtime</div>
   <div class="desc">
     Monadeck couldn't find <code>monado-service</code>. Install the built-in build
-    or point it at your own — both are in Settings.
+    or point it at your own, both are in Settings.
   </div>
   <div class="acts">
     <button class="btn ghost" onclick={() => (dismissed = true)}>Dismiss</button>
