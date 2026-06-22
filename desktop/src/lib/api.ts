@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CapStatus,
+  FloorCalStatus,
   LogChunk,
   MonadeckConfig,
   PreflightReport,
@@ -38,6 +39,10 @@ export const setAmdVrProfile = () => invoke<void>("set_amd_vr_profile");
 export const importOpenxrStatus = () => invoke<boolean>("import_openxr_status");
 export const writeImportOpenxr = () => invoke<void>("write_import_openxr");
 export const preflightCheck = () => invoke<PreflightReport>("preflight_check");
+
+export const floorCalStatus = () => invoke<FloorCalStatus>("floor_cal_status");
+export const runFloorCalibration = () =>
+  invoke<void>("run_floor_calibration");
 
 import type { Installed, UevrStatus } from "./types";
 export const installBuiltinMonado = () =>

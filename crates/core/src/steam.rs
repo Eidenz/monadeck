@@ -741,6 +741,20 @@ fn match_shortcut<'a>(game: &DetectedGame, shortcuts: &'a [Shortcut]) -> Option<
 
 // --- discovery internals (verbatim from xrbind, dirs -> paths) ----------------
 
+/// Steam root directories (`~/.steam/steam`, `~/.local/share/Steam`, the flatpak
+/// path), resolved and de-duplicated. Exposed so floor-calibration detection can
+/// look for SteamVR's chaperone data without re-deriving these paths.
+pub fn steam_roots() -> Vec<PathBuf> {
+    find_steam_roots()
+}
+
+/// Every Steam library folder (each root plus the extra libraries listed in their
+/// `libraryfolders.vdf`). Exposed so callers can locate SteamVR's install dir
+/// (`<lib>/steamapps/common/SteamVR`).
+pub fn library_folders() -> Vec<PathBuf> {
+    find_library_folders(&find_steam_roots())
+}
+
 fn find_steam_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let h = home();

@@ -114,6 +114,11 @@ export interface PreflightReport {
   distro: string | null;
 }
 
+export interface FloorCalStatus {
+  available: boolean; // SteamVR's vrcmd tool was found (calibration is possible)
+  calibrated: boolean; // a chaperone_info.vrchap exists (room setup has been run)
+}
+
 export interface Installed {
   tag: string; // release tag installed, e.g. "v25.1.0-eidenz1"
   path: string; // monado prefix, or xrizer runtime dir

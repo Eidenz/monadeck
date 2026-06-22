@@ -7,6 +7,7 @@
     installMonado,
     installXrizer,
     installChihuahua,
+    runFloorCalibration,
   } from "$lib/state.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
 
@@ -167,6 +168,53 @@
     </div>
     <span class="note">steamvr (default) drives the Bigscreen Beyond via monado's SteamVR wrapper. vive/survive are the FLOSS drivers for Vive/Index.</span>
   </div>
+
+  {#if app.config?.lighthouse_driver === "steamvr"}
+    <div class="field">
+      <span class="lbl">Floor calibration</span>
+      <div class="row">
+        <span
+          class="pill"
+          class:good={app.floorCal?.calibrated}
+          class:warn={app.floorCal && app.floorCal.available && !app.floorCal.calibrated}
+        >
+          {!app.floorCal
+            ? "…"
+            : !app.floorCal.available
+              ? "SteamVR not found"
+              : app.floorCal.calibrated
+                ? "Calibrated ✓"
+                : "Not calibrated"}
+        </span>
+        <button
+          class:accent={app.floorCal && app.floorCal.available && !app.floorCal.calibrated}
+          onclick={runFloorCalibration}
+          disabled={app.calibratingFloor ||
+            !app.floorCal?.available ||
+            app.service.running}
+        >
+          {app.calibratingFloor
+            ? "Calibrating…"
+            : app.floorCal?.calibrated
+              ? "Re-run floor calibration"
+              : "Calibrate floor"}
+        </button>
+      </div>
+      <span class="note">
+        monado's SteamVR wrapper reads the floor height + forward direction from
+        SteamVR's room setup. Place the headset on the floor in the middle of your
+        play area (controllers off) and calibrate — its facing sets “forward”.
+        Re-run after moving your base stations.{app.service.running
+          ? " Stop the service first."
+          : ""}
+      </span>
+      {#if app.floorCalResult}
+        <span class="install-ok" class:bad={!app.floorCalResult.ok}
+          >{app.floorCalResult.msg}</span
+        >
+      {/if}
+    </div>
+  {/if}
 
   <div class="field">
     <span class="lbl">Service capabilities (CAP_SYS_NICE)</span>

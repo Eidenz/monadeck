@@ -9,6 +9,7 @@
 //! - [`openvr_paths`] — register xrizer as the OpenVR runtime, with backup/restore.
 //! - [`setcap`] — set/verify `CAP_SYS_NICE=eip` on the service binary.
 //! - [`preflight`] — runtime prerequisite checks (udev rules, pkexec) for other boxes.
+//! - [`floor_calibration`] — detect/run SteamVR floor calibration for steamvr_lh.
 //! - [`devices`] — live device list via libmonado (`auto_connect`).
 //! - [`plugins`] — launch arbitrary apps by explicit path alongside the service.
 //! - [`config`] / [`paths`] — persisted settings and well-known file locations.
@@ -20,6 +21,7 @@ pub mod config;
 pub mod desktop;
 pub mod devices;
 pub mod favorites;
+pub mod floor_calibration;
 pub mod gpu;
 pub mod installer;
 pub mod launch_options;

@@ -5,6 +5,7 @@ import type {
   CapStatus,
   ClientInfo,
   DeviceInfo,
+  FloorCalStatus,
   MonadeckConfig,
   PreflightReport,
   RuntimeStatus,
@@ -21,6 +22,16 @@ export const app = $state({
   // Runtime prerequisite report (udev rules, pkexec). Null until first checked;
   // rarely changes, so it's fetched on load rather than polled.
   preflight: null as PreflightReport | null,
+  // SteamVR floor-calibration status (steamvr_lh driver only). Null until first
+  // checked; drives the "floor not calibrated" nudge and the Settings action.
+  floorCal: null as FloorCalStatus | null,
+  calibratingFloor: false,
+  floorCalResult: null as null | { ok: boolean; msg: string },
+  // Proton 11 / SLR4 OpenXR import. True until first checked (so the nudge doesn't
+  // flash). Drives the "import not set" popup + the Environment settings card.
+  importOpenxr: true,
+  applyingProton: false,
+  protonResult: null as null | { ok: boolean; msg: string },
   devices: [] as DeviceInfo[],
   clients: [] as ClientInfo[],
   busy: false,
@@ -70,7 +81,63 @@ export async function loadInitial() {
   }
   await refreshStatus();
   await refreshPreflight();
+  await refreshFloorCal();
+  await refreshImportOpenxr();
   await refreshUevr();
+}
+
+// Re-check the Proton 11 / SLR4 OpenXR-import var (session env or our
+// environment.d file). Cheap; called on load, in the deck poll loop, and after
+// writing the config file.
+export async function refreshImportOpenxr() {
+  try {
+    app.importOpenxr = await api.importOpenxrStatus();
+  } catch (e) {
+    app.error = String(e);
+  }
+}
+
+// Write the environment.d file that sets the import var session-wide (Proton 11 /
+// SLR4). Takes effect after a reboot / re-login.
+export async function applyImportOpenxr() {
+  app.applyingProton = true;
+  app.protonResult = null;
+  try {
+    await api.writeImportOpenxr();
+    app.protonResult = { ok: true, msg: "Config written — reboot or re-login to apply." };
+  } catch (e) {
+    app.protonResult = { ok: false, msg: String(e) };
+  } finally {
+    app.applyingProton = false;
+    await refreshImportOpenxr();
+  }
+}
+
+// Re-check the SteamVR floor-calibration status. Cheap fs probe; called on load,
+// in the deck poll loop (so the nudge clears if calibrated elsewhere), and after
+// running a calibration.
+export async function refreshFloorCal() {
+  try {
+    app.floorCal = await api.floorCalStatus();
+  } catch (e) {
+    app.error = String(e);
+  }
+}
+
+// Run a quick SteamVR floor calibration (vrcmd --resetroomsetup). The backend
+// refuses while the service is running; callers also disable the button then.
+export async function runFloorCalibration() {
+  app.calibratingFloor = true;
+  app.floorCalResult = null;
+  try {
+    await api.runFloorCalibration();
+    app.floorCalResult = { ok: true, msg: "Floor calibrated" };
+  } catch (e) {
+    app.floorCalResult = { ok: false, msg: String(e) };
+  } finally {
+    app.calibratingFloor = false;
+    await refreshFloorCal();
+  }
 }
 
 // Re-check UEVR tooling (protontricks + chihuahua). Cheap; called on load and

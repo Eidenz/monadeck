@@ -59,12 +59,6 @@ pub struct LibState {
     /// Re-scan the catalogue + re-probe artwork (picks up covers added at runtime).
     pub refresh_request: bool,
     pub keyboard_open: bool,
-    /// Name of the game being launched (shows the "Launching…" overlay), set by
-    /// the loop for ~1.5 s after Play before the dashboard auto-hides.
-    pub launching_name: Option<String>,
-    /// Header text for the launching card — "Launching" by default, swapped to
-    /// "Waiting for UEVR injection…" while a VR-Mod game injects. Set by the loop.
-    pub launching_status: Option<String>,
     /// Summon fade-in amount (1 = fully dark, 0 = clear), set by the loop.
     pub fade_in: f32,
     /// One-shot UI-sound requests, drained by the loop.
@@ -168,8 +162,6 @@ impl LibState {
             recenter_playspace_request: false,
             refresh_request: false,
             keyboard_open: false,
-            launching_name: None,
-            launching_status: None,
             fade_in: 0.0,
             sound_select: false,
             sound_tab: false,
@@ -239,35 +231,14 @@ pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
     overlays(ctx, st);
 }
 
-/// Foreground overlays: the summon fade-in and the "Launching…" modal.
+/// Foreground overlay: the summon fade-in. (The launch/loading card is now a
+/// standalone composition layer — see `build_launch_popup` — so it survives the
+/// dashboard closing.)
 fn overlays(ctx: &egui::Context, st: &LibState) {
-    let screen = ctx.screen_rect();
-    if st.launching_name.is_some() || st.fade_in > 0.001 {
+    if st.fade_in > 0.001 {
+        let screen = ctx.screen_rect();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("overlay-dim")));
-        let dim = if st.launching_name.is_some() { 180 } else { (st.fade_in * 255.0) as u8 };
-        painter.rect_filled(screen, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha(dim));
-    }
-    if let Some(name) = &st.launching_name {
-        egui::Area::new(egui::Id::new("launching"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                hero_card().show(ui, |ui| {
-                    ui.set_width(360.0);
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(8.0);
-                        ui.add(egui::Spinner::new().size(34.0).color(theme::PRIMARY));
-                        ui.add_space(12.0);
-                        ui.label(
-                            egui::RichText::new(st.launching_status.as_deref().unwrap_or("Launching"))
-                                .size(15.0)
-                                .color(theme::ON_SURFACE_VAR),
-                        );
-                        ui.label(egui::RichText::new(name).size(22.0).strong().color(egui::Color32::WHITE));
-                        ui.add_space(8.0);
-                    });
-                });
-            });
+        painter.rect_filled(screen, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha((st.fade_in * 255.0) as u8));
     }
 }
 
@@ -1450,6 +1421,59 @@ pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind
         });
 }
 
+/// The game-launch popup (its own composition layer, SteamVR-style): the game's
+/// hero art — or a name-tinted gradient when there's none — behind a centred
+/// spinner, title, and status line. Shown while a game starts up, independent of
+/// the dashboard, so closing the overlay doesn't hide it. The panel is cleared
+/// transparent, so the rounded card is the whole visible popup.
+pub fn build_launch_popup(ctx: &egui::Context, name: &str, status: &str, hero: &ArtState) {
+    egui::Area::new(egui::Id::new("launch-popup")).fixed_pos(egui::pos2(0.0, 0.0)).show(ctx, |ui| {
+        let rect = ctx.screen_rect().shrink(5.0);
+        let radius = egui::CornerRadius::same(26);
+        let painter = ui.painter().clone();
+        // Rounded base fill, so the card's corners stay transparent.
+        painter.rect_filled(rect, radius, egui::Color32::from_rgb(11, 14, 18));
+        match hero {
+            ArtState::Ready(tex) => {
+                egui::Image::new(egui::load::SizedTexture::new(tex.id(), rect.size()))
+                    .uv(cover_uv(tex.size(), rect))
+                    .corner_radius(radius)
+                    .paint_at(ui, rect);
+                // Scrim for legible text over the art.
+                painter.rect_filled(rect, radius, egui::Color32::from_black_alpha(170));
+            }
+            _ => {
+                painter.rect_filled(rect, radius, hero_tint(name));
+                painter.rect_filled(rect, radius, egui::Color32::from_black_alpha(60));
+            }
+        }
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 52, 62)),
+            egui::StrokeKind::Inside,
+        );
+        // Centred content: spinner, title, status.
+        let c = rect.center();
+        let spin = egui::Rect::from_center_size(egui::pos2(c.x, c.y - 66.0), egui::vec2(46.0, 46.0));
+        ui.put(spin, egui::Spinner::new().size(44.0).color(theme::PRIMARY));
+        painter.text(
+            egui::pos2(c.x, c.y),
+            egui::Align2::CENTER_CENTER,
+            name,
+            egui::FontId::proportional(34.0),
+            egui::Color32::WHITE,
+        );
+        painter.text(
+            egui::pos2(c.x, c.y + 40.0),
+            egui::Align2::CENTER_CENTER,
+            status,
+            egui::FontId::proportional(17.0),
+            theme::ON_SURFACE_VAR,
+        );
+    });
+}
+
 /// OVRAS-style playspace page: nudge the floor / play area on each axis (and
 /// rotate) with selectable steps. Applied live via libmonado and persisted.
 fn playspace_view(ui: &mut egui::Ui, st: &mut LibState) {
@@ -2244,10 +2268,17 @@ fn draw_art(painter: &egui::Painter, rect: egui::Rect, art: &ArtState, name: &st
 
 /// Paint a texture into `rect` with center-crop (object-fit: cover).
 fn draw_texture_cover(painter: &egui::Painter, rect: egui::Rect, tex: &egui::TextureHandle) {
-    let [tw, th] = tex.size();
+    painter.rect_filled(rect, egui::CornerRadius::same(8), egui::Color32::from_rgb(12, 14, 18));
+    painter.image(tex.id(), rect, cover_uv(tex.size(), rect), egui::Color32::WHITE);
+}
+
+/// The UV sub-rect that center-crops a `tw x th` texture to fill `rect` without
+/// distortion (object-fit: cover).
+fn cover_uv(tex_size: [usize; 2], rect: egui::Rect) -> egui::Rect {
+    let [tw, th] = tex_size;
     let img_aspect = tw as f32 / th.max(1) as f32;
     let tile_aspect = rect.width() / rect.height().max(1.0);
-    let uv = if img_aspect > tile_aspect {
+    if img_aspect > tile_aspect {
         let keep = tile_aspect / img_aspect;
         let x0 = (1.0 - keep) * 0.5;
         egui::Rect::from_min_max(egui::pos2(x0, 0.0), egui::pos2(x0 + keep, 1.0))
@@ -2255,9 +2286,21 @@ fn draw_texture_cover(painter: &egui::Painter, rect: egui::Rect, tex: &egui::Tex
         let keep = img_aspect / tile_aspect;
         let y0 = (1.0 - keep) * 0.5;
         egui::Rect::from_min_max(egui::pos2(0.0, y0), egui::pos2(1.0, y0 + keep))
-    };
-    painter.rect_filled(rect, egui::CornerRadius::same(8), egui::Color32::from_rgb(12, 14, 18));
-    painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
+    }
+}
+
+/// A distinct, name-seeded tint for the launch popup's gradient fallback (used
+/// when a game has no hero art), so each game still gets a recognisable colour.
+fn hero_tint(name: &str) -> egui::Color32 {
+    const PALETTE: [egui::Color32; 6] = [
+        egui::Color32::from_rgb(33, 44, 62),
+        egui::Color32::from_rgb(46, 33, 58),
+        egui::Color32::from_rgb(26, 50, 46),
+        egui::Color32::from_rgb(54, 40, 28),
+        egui::Color32::from_rgb(56, 31, 42),
+        egui::Color32::from_rgb(33, 48, 35),
+    ];
+    PALETTE[name_hash(name) as usize % PALETTE.len()]
 }
 
 fn short(name: &str) -> String {

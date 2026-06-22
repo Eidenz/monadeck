@@ -186,7 +186,11 @@ impl ArtLoader {
     }
 }
 
-fn decode(cover_id: &str, kind: ArtKind) -> Option<egui::ColorImage> {
+/// Decode one art image to a `ColorImage` (synchronously, on the caller's thread).
+/// Public so the launch popup can decode a game's hero into its own egui context
+/// — textures are per-context, so the dashboard's loaded handle can't be reused
+/// on the popup's separate layer.
+pub fn decode(cover_id: &str, kind: ArtKind) -> Option<egui::ColorImage> {
     let (bytes, (max_w, max_h)) = match kind {
         ArtKind::Cover => (steam::game_cover_bytes(cover_id, None)?.0, (300, 450)),
         ArtKind::Hero => (steam::game_hero_bytes(cover_id)?.0, (900, 360)),

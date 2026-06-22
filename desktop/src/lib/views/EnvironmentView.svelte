@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { app, saveConfig, refreshPreflight } from "$lib/state.svelte";
-  import { importOpenxrStatus, writeImportOpenxr } from "$lib/api";
+  import {
+    app,
+    saveConfig,
+    refreshPreflight,
+    refreshImportOpenxr,
+    applyImportOpenxr,
+  } from "$lib/state.svelte";
   import { KNOWN_ENV_VARS, type KnownVar } from "$lib/knownEnvVars";
   import LaunchOptions from "$lib/components/LaunchOptions.svelte";
 
@@ -29,20 +34,10 @@
   }
 
   // --- Proton 11 / SLR import-openxr config file ---
-  let importSet = $state(true);
-  let writingProton = $state(false);
-  onMount(async () => {
-    importSet = await importOpenxrStatus();
+  // Shared app state (so the deck's ProtonBanner popup and this card agree).
+  onMount(() => {
+    refreshImportOpenxr();
   });
-  async function createProtonFile() {
-    writingProton = true;
-    try {
-      await writeImportOpenxr();
-      importSet = true;
-    } finally {
-      writingProton = false;
-    }
-  }
 
   function persist() {
     if (!app.config) return;
@@ -102,18 +97,21 @@
           set session-wide, not just per game.
         </div>
       </div>
-      {#if importSet}
+      {#if app.importOpenxr}
         <span class="pill good">set ✓</span>
       {:else}
-        <button class="accent" onclick={createProtonFile} disabled={writingProton}>
-          {writingProton ? "…" : "Create config file"}
+        <button class="accent" onclick={applyImportOpenxr} disabled={app.applyingProton}>
+          {app.applyingProton ? "…" : "Create config file"}
         </button>
       {/if}
     </div>
-    {#if !importSet}
+    {#if !app.importOpenxr}
       <div class="proton-note">
         Writes <code>~/.config/environment.d/…conf</code> — takes effect after a reboot.
       </div>
+    {/if}
+    {#if app.protonResult}
+      <div class="proton-note" class:bad={!app.protonResult.ok}>{app.protonResult.msg}</div>
     {/if}
   </div>
 
@@ -278,6 +276,9 @@
     color: hsl(var(--muted));
     line-height: 1.45;
     margin-top: 2px;
+  }
+  .proton-note.bad {
+    color: hsl(var(--danger));
   }
   .pill {
     flex: none;

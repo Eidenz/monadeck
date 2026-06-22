@@ -8,6 +8,7 @@ use monadeck_core::config::MonadeckConfig;
 use monadeck_core::config::OvrRuntime;
 use monadeck_core::desktop::{self, InstalledApp};
 use monadeck_core::devices::{self, Snapshot};
+use monadeck_core::floor_calibration::{self, FloorCalStatus};
 use monadeck_core::gpu::{self, AmdGpu};
 use monadeck_core::installer::{self, Installed};
 use monadeck_core::proton;
@@ -386,6 +387,35 @@ pub async fn preflight_check() -> CmdResult<PreflightReport> {
     tauri::async_runtime::spawn_blocking(preflight::run)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// SteamVR floor-calibration status for the `steamvr_lh` driver: whether `vrcmd`
+/// is available and whether a `chaperone_info.vrchap` already exists. Cheap fs
+/// probe, fetched on load and after a calibration.
+#[tauri::command]
+pub async fn floor_cal_status() -> CmdResult<FloorCalStatus> {
+    tauri::async_runtime::spawn_blocking(floor_calibration::status)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Run a quick SteamVR floor calibration (writes `chaperone_info.vrchap`).
+/// Refuses while monado is running — vrcmd needs exclusive access to the headset.
+/// Blocking (spawns vrserver, waits for the reset to finish).
+#[tauri::command]
+pub async fn run_floor_calibration() -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(|| -> CmdResult<()> {
+        if devices::service_connected() {
+            return Err(
+                "Stop the Monado service first — floor calibration needs exclusive \
+                 access to the headset."
+                    .into(),
+            );
+        }
+        floor_calibration::run()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Download + install the latest portable Monado fork build from GitHub Releases,

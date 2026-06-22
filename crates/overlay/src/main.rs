@@ -68,6 +68,35 @@ struct ToastState {
     until: Instant,
 }
 
+/// The SteamVR-style game-launch popup: its own composition layer (so it
+/// survives the dashboard closing), placed in front of the head when the game is
+/// launched. Lives until the game is detected running, or `deadline` passes. The
+/// hero art is decoded on a background thread into `hero` (loaded into the popup
+/// panel's own egui context — textures are per-context).
+struct LaunchPopup {
+    name: String,
+    /// VR-Mod (UEVR) launch — its status switches to the injection-wait message.
+    uevr: bool,
+    pose: xr::Posef,
+    started: Instant,
+    deadline: Instant,
+    hero: games::ArtState,
+    /// Pending background decode of the game's hero art (None once resolved).
+    hero_rx: Option<std::sync::mpsc::Receiver<Option<egui::ColorImage>>>,
+}
+
+impl LaunchPopup {
+    /// The status line under the title. A UEVR launch shows a brief "Starting…"
+    /// then the injection-wait message (chihuahua waits before injecting).
+    fn status(&self) -> &'static str {
+        if self.uevr && self.started.elapsed().as_secs_f32() > 1.5 {
+            "Waiting for VR Mod injection…"
+        } else {
+            "Starting…"
+        }
+    }
+}
+
 /// A toast tucked into the lower view (~1.3 m ahead, dropped below the gaze) so
 /// it's read at a glance without blocking what you're looking at.
 fn make_toast(
@@ -337,6 +366,13 @@ fn run() -> Result<()> {
         &session, &device, allocator.clone(), render_pass, format, srgb,
         (720, 168), (0.44, 0.44 * 168.0 / 720.0), anchor,
     )?;
+    // The game-launch popup ("now starting" card). Its own layer, so it persists
+    // after the dashboard auto-closes on launch (SteamVR-style); shows hero art.
+    const LAUNCH_W: f32 = 0.58;
+    let mut launch_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        (840, 480), (LAUNCH_W, LAUNCH_W * 480.0 / 840.0), anchor,
+    )?;
     let mut laser = make_laser(&session, format)?;
 
     // --- Actions ------------------------------------------------------------
@@ -459,10 +495,8 @@ fn run() -> Result<()> {
     let mut grab: Option<(usize, xr::Posef)> = None;
     let start = Instant::now(); // egui clock (animations)
     let mut summon_at: Option<Instant> = None; // summon fade-in
-    let mut launching_until: Option<Instant> = None; // "Launching…" hold before hide
-    // For a UEVR launch: keep the dashboard up showing "Waiting for UEVR injection…"
-    // until the game appears as a VR client (= injected) or this deadline passes.
-    let mut uevr_wait: Option<Instant> = None;
+    // The active launch popup (own layer; persists after the dashboard closes).
+    let mut launch_popup: Option<LaunchPopup> = None;
     // A freeze counting down before it applies: (client id, deadline).
     let mut pending_freeze: Option<(u32, Instant)> = None;
     let mut click_prev = false; // haptic click edge
@@ -576,17 +610,6 @@ fn run() -> Result<()> {
                 refresh_rx = Some(games::spawn_scan());
             }
         }
-        // UEVR launch in progress: auto-close the dashboard once the game appears
-        // as a VR client (= UEVR injected) or the wait times out.
-        if let Some(timeout) = uevr_wait {
-            if running.is_some() || Instant::now() >= timeout {
-                uevr_wait = None;
-                launching_until = None;
-                st.launching_name = None;
-                st.launching_status = None;
-                visible = false;
-            }
-        }
         // Live "this session" minutes for the splash.
         st.session_minutes = session_start.map(|s| (s.elapsed().as_secs() / 60) as u32);
 
@@ -616,29 +639,9 @@ fn run() -> Result<()> {
                             st.selected = Some(i);
                         }
                     }
-                } else {
-                    launching_until = None; // dismissed; drop any launch overlay
-                    uevr_wait = None;
-                    st.launching_name = None;
-                    st.launching_status = None;
                 }
             }
             sys_prev = sys_down;
-        }
-
-        // "Launching…" hold expired → hide the dashboard (normal game), or for a
-        // UEVR game swap to the injection-wait message and stay open.
-        if let Some(until) = launching_until {
-            if Instant::now() >= until {
-                launching_until = None;
-                if uevr_wait.is_some() {
-                    st.launching_status = Some("Waiting for UEVR injection…".into());
-                } else {
-                    st.launching_name = None;
-                    st.launching_status = None;
-                    visible = false;
-                }
-            }
         }
 
         // --- Timer, low-battery warning, toasts (run even while hidden) ------
@@ -736,6 +739,41 @@ fn run() -> Result<()> {
             )?;
         }
 
+        // --- Launch popup (own layer; runs even while the dashboard is hidden) ---
+        // Pump the background hero decode, then dismiss the popup when the game
+        // shows up as a running client (it's up — its own frames take over) or the
+        // deadline passes (gave up waiting / it never started). Render it onto its
+        // dedicated panel so the quad below can be composited in either path.
+        if let Some(p) = &mut launch_popup {
+            if let Some(rx) = &p.hero_rx {
+                if let Ok(img) = rx.try_recv() {
+                    p.hero = match img {
+                        Some(img) => games::ArtState::Ready(launch_panel.ctx.load_texture(
+                            "launch-hero",
+                            img,
+                            egui::TextureOptions::LINEAR,
+                        )),
+                        None => games::ArtState::Missing,
+                    };
+                    p.hero_rx = None;
+                }
+            }
+            let appeared = running.as_ref().map_or(false, |app| name_matches(&p.name, app));
+            if appeared || now >= p.deadline {
+                launch_popup = None;
+            }
+        }
+        let popup_active = launch_popup.is_some();
+        if let Some(p) = &launch_popup {
+            launch_panel.pose = p.pose;
+            let (name, status, hero) = (&p.name, p.status(), &p.hero);
+            render_panel(
+                &mut launch_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
+                true, None, (0.0, 0.0), start.elapsed().as_secs_f64(),
+                |ctx| ui::build_launch_popup(ctx, name, status, hero),
+            )?;
+        }
+
         // --- Playspace: per-game override tracking + apply ------------------
         // Runs even while hidden, so a game's offset is active during play with the
         // dashboard dismissed. Track the running game by cover id; when it changes,
@@ -782,6 +820,40 @@ fn run() -> Result<()> {
             monado.set_origin(eff_ps.0, eff_ps.1, eff_ps.2, eff_ps.3.to_radians());
         }
 
+        // --- Controller freeze: countdown + apply (runs even while hidden) --
+        // Handled before the visibility gate so a freeze armed from the Monado
+        // page still fires after you close the overlay — otherwise the countdown
+        // was stuck until you reopened it. The toggle request itself can only be
+        // set while the dashboard is up, but the delayed apply must not be.
+        if let Some(id) = st.freeze_toggle_request.take() {
+            let frozen = st.monado_clients.iter().find(|c| c.id == id).map(|c| c.frozen).unwrap_or(false);
+            let counting_down = matches!(pending_freeze, Some((p, _)) if p == id);
+            if frozen {
+                // Unfreeze is immediate.
+                monado.set_freeze(id, false);
+                pending_freeze = None;
+            } else if counting_down {
+                // Tapping again during the countdown cancels it.
+                pending_freeze = None;
+            } else if st.freeze_delay_secs > 0.0 {
+                // Count down first so the user can settle into position.
+                pending_freeze = Some((id, now + std::time::Duration::from_secs_f32(st.freeze_delay_secs)));
+            } else {
+                monado.set_freeze(id, true);
+            }
+        }
+        // Fire a pending freeze when its countdown elapses; expose the remaining
+        // seconds for the button label meanwhile.
+        match pending_freeze {
+            Some((id, deadline)) if now >= deadline => {
+                monado.set_freeze(id, true);
+                pending_freeze = None;
+                st.freeze_pending = None;
+            }
+            Some((id, deadline)) => st.freeze_pending = Some((id, (deadline - now).as_secs_f32())),
+            None => st.freeze_pending = None,
+        }
+
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
         // order is fresh on the next summon), drop input block, render only toasts.
         if !visible {
@@ -798,8 +870,12 @@ fn run() -> Result<()> {
                 monado.set_block(false);
                 blocked_prev = false;
             }
-            let toast_q;
+            let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+            if popup_active {
+                popup_q = quad_layer(&launch_panel, &space, true);
+                layers.push(&popup_q);
+            }
             if toast_active {
                 toast_q = quad_layer(&toast_panel, &space, true);
                 layers.push(&toast_q);
@@ -1046,7 +1122,11 @@ fn run() -> Result<()> {
             layers.push(&rail_quad);
             layers.push(&bottom_quad);
         }
-        let toast_q;
+        let (toast_q, popup_q);
+        if popup_active {
+            popup_q = quad_layer(&launch_panel, &space, true);
+            layers.push(&popup_q);
+        }
         if toast_active {
             toast_q = quad_layer(&toast_panel, &space, true);
             layers.push(&toast_q);
@@ -1085,21 +1165,42 @@ fn run() -> Result<()> {
                 } else {
                     if g.uevr {
                         launch_uevr(g, st.uevr_delay);
-                        // Keep the dashboard up through injection; the wait ends when the
-                        // game shows up as a VR client, or this deadline passes.
-                        uevr_wait = Some(
-                            Instant::now() + std::time::Duration::from_secs(st.uevr_delay as u64 + 90),
-                        );
                     } else {
                         launch_game(g);
-                        uevr_wait = None;
                     }
                     audio.launch();
-                    st.launching_name = Some(g.name.clone());
-                    st.launching_status = None;
-                    // Hold the "Launching…" card briefly; a normal game then auto-hides,
-                    // a UEVR game switches to the injection-wait message and stays open.
-                    launching_until = Some(Instant::now() + std::time::Duration::from_millis(1500));
+                    // Hand off to the standalone launch popup (SteamVR-style): close
+                    // the dashboard and put a "now starting" card in front of the
+                    // head. Assigning `launch_popup` below replaces any popup already
+                    // showing, so launching another game just takes over (no stacking).
+                    // It lives until the game appears as a running client or a short
+                    // timeout — since we can't detect a crash/close mid-load, the popup
+                    // gives up quickly rather than lingering: 15 s for a normal game,
+                    // uevr_delay + 15 s for a UEVR game (chihuahua waits before injecting).
+                    let timeout = if g.uevr { st.uevr_delay as u64 + 15 } else { 15 };
+                    let pose = match hmd {
+                        Some(h) => front_pose(&h, 1.25, 0.0, 0.0, false),
+                        None => posef([0.0, 0.0, -1.25]),
+                    };
+                    // Decode the hero art on a worker; loaded into the popup panel's
+                    // own egui context when it lands (textures are per-context).
+                    let hero_rx = g.cover_id.clone().map(|id| {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(games::decode(&id, games::ArtKind::Hero));
+                        });
+                        rx
+                    });
+                    launch_popup = Some(LaunchPopup {
+                        name: g.name.clone(),
+                        uevr: g.uevr,
+                        pose,
+                        started: Instant::now(),
+                        deadline: Instant::now() + std::time::Duration::from_secs(timeout),
+                        hero: games::ArtState::Idle,
+                        hero_rx,
+                    });
+                    visible = false;
                     launched = true;
                 }
             }
@@ -1251,34 +1352,6 @@ fn run() -> Result<()> {
         if st.recenter_playspace_request {
             st.recenter_playspace_request = false;
             monado.recenter();
-        }
-        if let Some(id) = st.freeze_toggle_request.take() {
-            let frozen = st.monado_clients.iter().find(|c| c.id == id).map(|c| c.frozen).unwrap_or(false);
-            let counting_down = matches!(pending_freeze, Some((p, _)) if p == id);
-            if frozen {
-                // Unfreeze is immediate.
-                monado.set_freeze(id, false);
-                pending_freeze = None;
-            } else if counting_down {
-                // Tapping again during the countdown cancels it.
-                pending_freeze = None;
-            } else if st.freeze_delay_secs > 0.0 {
-                // Count down first so the user can settle into position.
-                pending_freeze = Some((id, now + std::time::Duration::from_secs_f32(st.freeze_delay_secs)));
-            } else {
-                monado.set_freeze(id, true);
-            }
-        }
-        // Fire a pending freeze when its countdown elapses; expose the remaining
-        // seconds for the button label meanwhile.
-        match pending_freeze {
-            Some((id, deadline)) if now >= deadline => {
-                monado.set_freeze(id, true);
-                pending_freeze = None;
-                st.freeze_pending = None;
-            }
-            Some((id, deadline)) => st.freeze_pending = Some((id, (deadline - now).as_secs_f32())),
-            None => st.freeze_pending = None,
         }
         if let Some(id) = st.set_active_request.take() {
             monado.set_primary(id);

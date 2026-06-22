@@ -121,6 +121,8 @@ pub fn run() {
             commands::import_openxr_status,
             commands::write_import_openxr,
             commands::preflight_check,
+            commands::floor_cal_status,
+            commands::run_floor_calibration,
             commands::install_builtin_monado,
             commands::install_builtin_xrizer,
             commands::uevr_status,

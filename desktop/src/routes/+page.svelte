@@ -5,6 +5,8 @@
   import CapToast from "$lib/components/CapToast.svelte";
   import CrashToast from "$lib/components/CrashToast.svelte";
   import PreflightBanner from "$lib/components/PreflightBanner.svelte";
+  import FloorCalToast from "$lib/components/FloorCalToast.svelte";
+  import ProtonBanner from "$lib/components/ProtonBanner.svelte";
   import NoRuntimeBanner from "$lib/components/NoRuntimeBanner.svelte";
   import DeviceStrip from "$lib/components/DeviceStrip.svelte";
   import AppsBar from "$lib/components/AppsBar.svelte";
@@ -14,6 +16,8 @@
     refreshStatus,
     refreshSnapshot,
     refreshConfig,
+    refreshFloorCal,
+    refreshImportOpenxr,
     start,
     stop,
   } from "$lib/state.svelte";
@@ -24,6 +28,8 @@
   let eyeRunning = $state(false);
   let preflightDismissed = $state(false);
   let noRuntimeDismissed = $state(false);
+  let floorCalDismissed = $state(false);
+  let protonDismissed = $state(false);
   const showToast = $derived(app.caps === "needs_setcap" && !dismissed);
   const showCrash = $derived(app.crash !== null);
   const showPreflight = $derived(
@@ -31,6 +37,16 @@
   );
   // No valid Monado prefix (service binary missing) → offer setup.
   const showNoRuntime = $derived(app.caps === "no_binary" && !noRuntimeDismissed);
+  // steamvr_lh driver selected, vrcmd present, but no chaperone set → nudge to
+  // calibrate the floor (only when we can actually offer the fix).
+  const showFloorCal = $derived(
+    app.config?.lighthouse_driver === "steamvr" &&
+      !!app.floorCal?.available &&
+      app.floorCal?.calibrated === false &&
+      !floorCalDismissed,
+  );
+  // Proton 11 / SLR4 OpenXR import var not set yet → prepare-ahead nudge.
+  const showProton = $derived(!app.importOpenxr && !protonDismissed);
 
   // The HMD only appears in the device snapshot (its icon turns green) once Monado
   // actually has the headset ready — a truer "ready" signal than the raw IPC
@@ -71,7 +87,14 @@
   let contentH = $state(0); // measured deck (+ error) height
   let toastSlotH = $state(0); // measured notice card height
   const toastH = $derived(
-    showToast || showCrash || showPreflight || showNoRuntime ? toastSlotH : 0,
+    showToast ||
+      showCrash ||
+      showPreflight ||
+      showNoRuntime ||
+      showFloorCal ||
+      showProton
+      ? toastSlotH
+      : 0,
   );
 
   let desiredH: number | null = null;
@@ -116,6 +139,8 @@
       await refreshStatus();
       await refreshSnapshot();
       await refreshConfig();
+      await refreshFloorCal();
+      await refreshImportOpenxr();
       try {
         eyeRunning = (await eyetrackingStatus()).running;
       } catch {
@@ -166,11 +191,13 @@
     {/if}
   </div>
 
-  {#if showToast || showCrash || showPreflight || showNoRuntime}
+  {#if showToast || showCrash || showPreflight || showNoRuntime || showFloorCal || showProton}
     <div class="toast-slot" bind:clientHeight={toastSlotH}>
       {#if showCrash}<CrashToast />{/if}
       {#if showNoRuntime}<NoRuntimeBanner bind:dismissed={noRuntimeDismissed} />{/if}
       {#if showPreflight}<PreflightBanner bind:dismissed={preflightDismissed} />{/if}
+      {#if showProton}<ProtonBanner bind:dismissed={protonDismissed} />{/if}
+      {#if showFloorCal}<FloorCalToast bind:dismissed={floorCalDismissed} />{/if}
       {#if showToast}<CapToast bind:dismissed />{/if}
     </div>
   {/if}
