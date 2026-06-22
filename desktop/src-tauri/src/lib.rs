@@ -123,6 +123,8 @@ pub fn run() {
             commands::preflight_check,
             commands::floor_cal_status,
             commands::run_floor_calibration,
+            commands::survive_cal_status,
+            commands::run_survive_calibration,
             commands::install_builtin_monado,
             commands::install_builtin_xrizer,
             commands::uevr_status,

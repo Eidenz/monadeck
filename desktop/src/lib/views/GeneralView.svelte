@@ -8,6 +8,7 @@
     installXrizer,
     installChihuahua,
     runFloorCalibration,
+    runSurviveCalibration,
   } from "$lib/state.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
 
@@ -203,7 +204,7 @@
       <span class="note">
         monado's SteamVR wrapper reads the floor height + forward direction from
         SteamVR's room setup. Place the headset on the floor in the middle of your
-        play area (controllers off) and calibrate — its facing sets “forward”.
+        play area (controllers off), facing your "forward", then calibrate.
         Re-run after moving your base stations.{app.service.running
           ? " Stop the service first."
           : ""}
@@ -211,6 +212,47 @@
       {#if app.floorCalResult}
         <span class="install-ok" class:bad={!app.floorCalResult.ok}
           >{app.floorCalResult.msg}</span
+        >
+      {/if}
+    </div>
+  {/if}
+
+  {#if app.config?.lighthouse_driver === "survive"}
+    <div class="field">
+      <span class="lbl">Libsurvive calibration</span>
+      <div class="row">
+        <span
+          class="pill"
+          class:good={app.surviveCal?.available && app.surviveCal.source_present}
+          class:warn={app.surviveCal && !app.surviveCal.available}
+        >
+          {!app.surviveCal
+            ? "…"
+            : !app.surviveCal.available
+              ? "survive-cli not found"
+              : !app.surviveCal.source_present
+                ? "No SteamVR data to import"
+                : "Ready to import"}
+        </span>
+        <button
+          onclick={runSurviveCalibration}
+          disabled={app.calibratingSurvive ||
+            !app.surviveCal?.available ||
+            !app.surviveCal?.source_present ||
+            app.service.running}
+        >
+          {app.calibratingSurvive ? "Importing… (~1 min)" : "Import SteamVR calibration"}
+        </button>
+      </div>
+      <span class="note">
+        Seeds libsurvive from SteamVR's base-station solve, then runs it for ~1
+        minute to converge — keep the headset still, on the floor, in view of your
+        base stations. Needs <code>survive-cli</code> (ships with libsurvive) and a
+        prior SteamVR room setup.{app.service.running ? " Stop the service first." : ""}
+      </span>
+      {#if app.surviveCalResult}
+        <span class="install-ok" class:bad={!app.surviveCalResult.ok}
+          >{app.surviveCalResult.msg}</span
         >
       {/if}
     </div>

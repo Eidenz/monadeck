@@ -10,6 +10,7 @@ import type {
   PreflightReport,
   RuntimeStatus,
   ServiceStatus,
+  SurviveCalStatus,
   UevrStatus,
 } from "./types";
 
@@ -27,6 +28,10 @@ export const app = $state({
   floorCal: null as FloorCalStatus | null,
   calibratingFloor: false,
   floorCalResult: null as null | { ok: boolean; msg: string },
+  // Libsurvive calibration (for the `survive` driver). Null until first checked.
+  surviveCal: null as SurviveCalStatus | null,
+  calibratingSurvive: false,
+  surviveCalResult: null as null | { ok: boolean; msg: string },
   // Proton 11 / SLR4 OpenXR import. True until first checked (so the nudge doesn't
   // flash). Drives the "import not set" popup + the Environment settings card.
   importOpenxr: true,
@@ -82,8 +87,35 @@ export async function loadInitial() {
   await refreshStatus();
   await refreshPreflight();
   await refreshFloorCal();
+  await refreshSurviveCal();
   await refreshImportOpenxr();
   await refreshUevr();
+}
+
+// Re-check libsurvive calibration availability (survive-cli + a SteamVR DB to
+// import). Cheap; called on load and after running a calibration.
+export async function refreshSurviveCal() {
+  try {
+    app.surviveCal = await api.surviveCalStatus();
+  } catch (e) {
+    app.error = String(e);
+  }
+}
+
+// Import SteamVR's lighthouse calibration into libsurvive (~1 min). The backend
+// refuses while the service is running; callers also disable the button then.
+export async function runSurviveCalibration() {
+  app.calibratingSurvive = true;
+  app.surviveCalResult = null;
+  try {
+    await api.runSurviveCalibration();
+    app.surviveCalResult = { ok: true, msg: "Calibration imported into libsurvive" };
+  } catch (e) {
+    app.surviveCalResult = { ok: false, msg: String(e) };
+  } finally {
+    app.calibratingSurvive = false;
+    await refreshSurviveCal();
+  }
 }
 
 // Re-check the Proton 11 / SLR4 OpenXR-import var (session env or our

@@ -755,6 +755,16 @@ pub fn library_folders() -> Vec<PathBuf> {
     find_library_folders(&find_steam_roots())
 }
 
+/// Steam install dirs that hold the `config/` SteamVR writes its calibration into
+/// — `~/.steam/root` (the symlink monado's drivers read) first, then the resolved
+/// roots. Callers append e.g. `config/chaperone_info.vrchap` or
+/// `config/lighthouse/lighthousedb.json`.
+pub fn steam_config_roots() -> Vec<PathBuf> {
+    let mut roots = vec![home().join(".steam/root")];
+    roots.extend(find_steam_roots());
+    roots
+}
+
 fn find_steam_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let h = home();

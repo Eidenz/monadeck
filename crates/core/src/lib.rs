@@ -10,6 +10,7 @@
 //! - [`setcap`] — set/verify `CAP_SYS_NICE=eip` on the service binary.
 //! - [`preflight`] — runtime prerequisite checks (udev rules, pkexec) for other boxes.
 //! - [`floor_calibration`] — detect/run SteamVR floor calibration for steamvr_lh.
+//! - [`survive_calibration`] — import SteamVR calibration into libsurvive (survive driver).
 //! - [`devices`] — live device list via libmonado (`auto_connect`).
 //! - [`plugins`] — launch arbitrary apps by explicit path alongside the service.
 //! - [`config`] / [`paths`] — persisted settings and well-known file locations.
@@ -36,6 +37,7 @@ pub mod preflight;
 pub mod proton;
 pub mod setcap;
 pub mod steam;
+pub mod survive_calibration;
 pub mod uevr;
 
 pub use config::MonadeckConfig;

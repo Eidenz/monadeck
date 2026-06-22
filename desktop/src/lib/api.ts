@@ -8,6 +8,7 @@ import type {
   RuntimeStatus,
   ServiceStatus,
   Snapshot,
+  SurviveCalStatus,
 } from "./types";
 
 export const appVersion = () => invoke<string>("app_version");
@@ -43,6 +44,11 @@ export const preflightCheck = () => invoke<PreflightReport>("preflight_check");
 export const floorCalStatus = () => invoke<FloorCalStatus>("floor_cal_status");
 export const runFloorCalibration = () =>
   invoke<void>("run_floor_calibration");
+
+export const surviveCalStatus = () =>
+  invoke<SurviveCalStatus>("survive_cal_status");
+export const runSurviveCalibration = () =>
+  invoke<void>("run_survive_calibration");
 
 import type { Installed, UevrStatus } from "./types";
 export const installBuiltinMonado = () =>

@@ -17,6 +17,7 @@ use monadeck_core::openvr_paths::{self, OvrPathsKind};
 use monadeck_core::plugins::ExecWhen;
 use monadeck_core::preflight::{self, PreflightReport};
 use monadeck_core::setcap::{self, CapStatus};
+use monadeck_core::survive_calibration::{self, SurviveCalStatus};
 use monadeck_core::uevr;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -222,6 +223,10 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
         }
 
         let mut env = env_map(&cfg);
+        // Emit structured (JSON) logs so the Logs view can show levels + filter.
+        // A user who sets XRT_JSON_LOG explicitly (e.g. =0 for raw) wins.
+        env.entry("XRT_JSON_LOG".to_string())
+            .or_insert_with(|| "1".to_string());
         // Pick the lighthouse driver exactly like Envision: the SteamVR wrapper
         // (for the Beyond / SteamVR-tracked HMDs) is enabled via STEAMVR_LH_ENABLE
         // and must NOT set LH_DRIVER (LH_DRIVER=steamvr actively errors); vive and
@@ -413,6 +418,35 @@ pub async fn run_floor_calibration() -> CmdResult<()> {
             );
         }
         floor_calibration::run()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Libsurvive calibration status (for the `survive` driver): whether `survive-cli`
+/// is available and whether a SteamVR lighthouse DB exists to import from.
+#[tauri::command]
+pub async fn survive_cal_status(state: State<'_, AppState>) -> CmdResult<SurviveCalStatus> {
+    let prefix = state.config.lock().unwrap().monado_prefix.clone();
+    tauri::async_runtime::spawn_blocking(move || survive_calibration::status(&prefix))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Import SteamVR's lighthouse calibration into libsurvive. Refuses while monado
+/// is running (survive-cli needs the headset). Blocking (~1 minute).
+#[tauri::command]
+pub async fn run_survive_calibration(state: State<'_, AppState>) -> CmdResult<()> {
+    let prefix = state.config.lock().unwrap().monado_prefix.clone();
+    tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
+        if devices::service_connected() {
+            return Err(
+                "Stop the Monado service first — libsurvive calibration needs exclusive \
+                 access to the headset."
+                    .into(),
+            );
+        }
+        survive_calibration::run(&prefix)
     })
     .await
     .map_err(|e| e.to_string())?

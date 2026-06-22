@@ -23,22 +23,12 @@
 //! The HMD must be on the floor, in the middle of the play area, with controllers
 //! off; the HMD's facing sets the play-space forward direction.
 
-use crate::paths::home;
 use crate::steam;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
-
-/// Where steamvr_lh reads the chaperone from (`$HOME/.steam/root` is the symlink
-/// it uses) plus the other known Steam roots as a fallback. We look for
-/// `config/chaperone_info.vrchap` under each.
-fn steam_config_roots() -> Vec<PathBuf> {
-    let mut roots = vec![home().join(".steam/root")];
-    roots.extend(steam::steam_roots());
-    roots
-}
 
 /// `<lib>/steamapps/common/SteamVR/bin/linux64` — the dir holding `vrcmd` — found
 /// by scanning the Steam libraries, the same place Envision looks. `None` if
@@ -61,7 +51,7 @@ pub struct FloorCalStatus {
 
 /// Cheap filesystem probe of the floor-calibration status. Safe to poll.
 pub fn status() -> FloorCalStatus {
-    let calibrated = steam_config_roots()
+    let calibrated = steam::steam_config_roots()
         .iter()
         .any(|r| r.join("config/chaperone_info.vrchap").is_file());
     FloorCalStatus {

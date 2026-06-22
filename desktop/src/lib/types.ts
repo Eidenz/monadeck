@@ -120,6 +120,11 @@ export interface FloorCalStatus {
   calibrated: boolean; // a chaperone_info.vrchap exists (room setup has been run)
 }
 
+export interface SurviveCalStatus {
+  available: boolean; // survive-cli was found (libsurvive calibration is possible)
+  source_present: boolean; // a SteamVR lighthousedb.json exists to import from
+}
+
 export interface Installed {
   tag: string; // release tag installed, e.g. "v25.1.0-eidenz1"
   path: string; // monado prefix, or xrizer runtime dir
