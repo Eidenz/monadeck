@@ -17,6 +17,7 @@ use monadeck_core::openvr_paths::{self, OvrPathsKind};
 use monadeck_core::plugins::ExecWhen;
 use monadeck_core::preflight::{self, PreflightReport};
 use monadeck_core::setcap::{self, CapStatus};
+use monadeck_core::steamvr;
 use monadeck_core::survive_calibration::{self, SurviveCalStatus};
 use monadeck_core::uevr;
 use serde::Serialize;
@@ -213,6 +214,23 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
             return Err("monado is already running — stop it before starting again.".into());
         }
         devices::reclaim_stale_socket();
+
+        // SteamVR fights monado for the HMD's display + tracking; with it up,
+        // monado usually fails to grab the headset or crashes. Now that we know
+        // we're actually going to start, run a one-shot check (not a continuous
+        // scan) and stop SteamVR first — killing vrserver brings the rest of it
+        // down too. On by default; the user can disable it. Powering on
+        // controllers/trackers can silently auto-launch SteamVR, so this often
+        // fires without the user realising it was up. See core::steamvr.
+        if cfg.kill_steamvr_on_start {
+            let n = steamvr::kill_steamvr();
+            if n > 0 {
+                log::info!("stopped SteamVR ({n} vrserver process(es)) before starting monado");
+                // Let the SteamVR compositor release the HMD display / DRM master
+                // before monado tries to claim it.
+                std::thread::sleep(Duration::from_millis(400));
+            }
+        }
 
         // Wire up runtimes (each backs up what it replaces).
         active_runtime::set_to_monado(&cfg).map_err(|e| e.to_string())?;

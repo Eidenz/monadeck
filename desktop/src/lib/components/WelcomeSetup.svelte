@@ -15,6 +15,9 @@
   } from "$lib/state.svelte";
   import { openSettings } from "$lib/windows";
   import TitleBar from "./TitleBar.svelte";
+  import Toggle from "./Toggle.svelte";
+
+  const killSteamvrOn = $derived(app.config?.kill_steamvr_on_start ?? true);
 
   const runtimeDone = $derived(app.caps !== "no_binary");
   const capsDone = $derived(app.caps === "set");
@@ -174,6 +177,31 @@
           </div>
         </div>
       {/if}
+
+      <!-- Stop SteamVR on start (a preference, not a one-time task) -->
+      <div class="item" class:done={killSteamvrOn}>
+        <div class="mark">{killSteamvrOn ? "✓" : ""}</div>
+        <div class="text">
+          <div class="t">Stop SteamVR on start</div>
+          <div class="d">
+            SteamVR conflicts with monado over the headset, so Monadeck closes it
+            automatically when you start. Recommended — turn it off only if you
+            know you need SteamVR running.
+          </div>
+        </div>
+        <div class="act">
+          <Toggle
+            label="Stop SteamVR before starting monado"
+            checked={killSteamvrOn}
+            onchange={(v) => {
+              if (app.config) {
+                app.config.kill_steamvr_on_start = v;
+                saveConfig();
+              }
+            }}
+          />
+        </div>
+      </div>
     </div>
 
     <div class="foot">

@@ -151,6 +151,19 @@
       />
       <span>Start the service when Monadeck launches</span>
     </div>
+    <div class="toggle-row">
+      <Toggle
+        label="Stop SteamVR before starting"
+        checked={app.config?.kill_steamvr_on_start ?? true}
+        onchange={(v) => {
+          if (app.config) {
+            app.config.kill_steamvr_on_start = v;
+            saveConfig();
+          }
+        }}
+      />
+      <span>Stop SteamVR before starting <em>(it conflicts with monado over the headset)</em></span>
+    </div>
   </div>
 
   <div class="field">

@@ -37,6 +37,7 @@ pub mod preflight;
 pub mod proton;
 pub mod setcap;
 pub mod steam;
+pub mod steamvr;
 pub mod survive_calibration;
 pub mod uevr;
 

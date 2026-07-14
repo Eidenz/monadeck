@@ -74,6 +74,14 @@ pub struct MonadeckConfig {
     #[serde(default)]
     pub auto_start: bool,
 
+    /// Stop a running SteamVR before starting monado. They fight over the HMD's
+    /// display + tracking, so with SteamVR up monado usually fails to grab the
+    /// headset or crashes — and turning on controllers/trackers can silently
+    /// auto-launch SteamVR. On by default; the one case SteamVR is needed (floor
+    /// calibration) doesn't run monado. See `steamvr::kill_steamvr`.
+    #[serde(default = "default_true")]
+    pub kill_steamvr_on_start: bool,
+
     /// Whether the first-run welcome / setup checklist has been dismissed (skipped
     /// or completed). False only on a fresh install (no config file) → the deck
     /// shows the welcome screen once instead of stacking individual notices.
@@ -151,6 +159,7 @@ impl Default for MonadeckConfig {
             ovr_runtime: OvrRuntime::default(),
             minimize_to_tray: true,
             auto_start: false,
+            kill_steamvr_on_start: true,
             setup_seen: false,
             render_scale: default_render_scale(),
             min_frame_period: true,
