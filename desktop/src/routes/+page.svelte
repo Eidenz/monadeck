@@ -4,6 +4,7 @@
   import TitleBar from "$lib/components/TitleBar.svelte";
   import CapToast from "$lib/components/CapToast.svelte";
   import CrashToast from "$lib/components/CrashToast.svelte";
+  import FreezeToast from "$lib/components/FreezeToast.svelte";
   import PreflightBanner from "$lib/components/PreflightBanner.svelte";
   import FloorCalToast from "$lib/components/FloorCalToast.svelte";
   import ProtonBanner from "$lib/components/ProtonBanner.svelte";
@@ -33,6 +34,7 @@
   let protonDismissed = $state(false);
   const showToast = $derived(app.caps === "needs_setcap" && !dismissed);
   const showCrash = $derived(app.crash !== null);
+  const showFreeze = $derived(app.freeze !== null);
   const showPreflight = $derived(
     app.preflight !== null && !app.preflight.all_ok && !preflightDismissed,
   );
@@ -94,6 +96,7 @@
     !showWelcome &&
       (showToast ||
         showCrash ||
+        showFreeze ||
         showPreflight ||
         showNoRuntime ||
         showFloorCal ||
@@ -201,9 +204,10 @@
     {/if}
   </div>
 
-  {#if showToast || showCrash || showPreflight || showNoRuntime || showFloorCal || showProton}
+  {#if showToast || showCrash || showFreeze || showPreflight || showNoRuntime || showFloorCal || showProton}
     <div class="toast-slot" bind:clientHeight={toastSlotH}>
       {#if showCrash}<CrashToast />{/if}
+      {#if showFreeze}<FreezeToast />{/if}
       {#if showNoRuntime}<NoRuntimeBanner bind:dismissed={noRuntimeDismissed} />{/if}
       {#if showPreflight}<PreflightBanner bind:dismissed={preflightDismissed} />{/if}
       {#if showProton}<ProtonBanner bind:dismissed={protonDismissed} />{/if}

@@ -4,6 +4,7 @@
 //! holding the Tauri `State` borrow across an await.
 
 use monadeck_core::cmd_runner::CmdRunner;
+use monadeck_core::kwin_freeze::KwinFreezeWatch;
 use monadeck_core::monado_conn::MonadoConn;
 use monadeck_core::MonadeckConfig;
 use std::process::Child;
@@ -22,6 +23,9 @@ pub struct AppState {
     pub plugin_children: Arc<Mutex<Vec<Child>>>,
     /// Persistent libmonado connection (one long-lived client, not per-poll).
     pub monado: Arc<MonadoConn>,
+    /// Short-lived watch for the kwin cold-start HMD-adoption freeze, armed
+    /// around each service launch. See core::kwin_freeze.
+    pub freeze_watch: Arc<Mutex<KwinFreezeWatch>>,
 }
 
 impl AppState {
@@ -32,6 +36,7 @@ impl AppState {
             eye_runner: Arc::new(Mutex::new(CmdRunner::new())),
             plugin_children: Arc::new(Mutex::new(Vec::new())),
             monado: Arc::new(MonadoConn::new()),
+            freeze_watch: Arc::new(Mutex::new(KwinFreezeWatch::default())),
         }
     }
 }

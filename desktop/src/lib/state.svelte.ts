@@ -6,6 +6,7 @@ import type {
   ClientInfo,
   DeviceInfo,
   FloorCalStatus,
+  FreezeRecovery,
   MonadeckConfig,
   PreflightReport,
   RuntimeStatus,
@@ -17,7 +18,12 @@ import type {
 export const app = $state({
   version: "",
   config: null as MonadeckConfig | null,
-  service: { running: false, connected: false, exit_code: null } as ServiceStatus,
+  service: {
+    running: false,
+    connected: false,
+    exit_code: null,
+    freeze_recovery: null,
+  } as ServiceStatus,
   runtime: { openxr: "none", openvr: "none" } as RuntimeStatus,
   caps: "no_binary" as CapStatus,
   // Runtime prerequisite report (udev rules, pkexec). Null until first checked;
@@ -52,6 +58,9 @@ export const app = $state({
   error: "" as string,
   // Set when the service stops without us asking (crash) — drives the toast.
   crash: null as { code: number | null } | null,
+  // Set when the kwin freeze watch recovered the desktop from a cold-start HMD
+  // adoption — drives the toast. Sticky until dismissed or the next start.
+  freeze: null as FreezeRecovery | null,
   // UEVR ("VR Mod") tooling status + the chihuahua install action's progress.
   uevr: { protontricks: false, chihuahua: null } as UevrStatus,
   installingChihuahua: false,
@@ -218,6 +227,9 @@ export async function refreshStatus() {
     app.service = await api.serviceStatus();
     app.runtime = await api.runtimeStatus();
     app.caps = await api.capabilitiesStatus();
+    // The backend reports a freeze recovery exactly once; latch it here so the
+    // toast survives subsequent polls until dismissed.
+    if (app.service.freeze_recovery) app.freeze = app.service.freeze_recovery;
     // The service went from running to stopped — if we didn't ask for it, it
     // crashed (or failed to bring up a system); surface a toast.
     if (wasRunning && !app.service.running) {
@@ -271,6 +283,7 @@ export async function start() {
   app.busy = true;
   app.error = "";
   app.crash = null;
+  app.freeze = null;
   try {
     await api.startService();
   } catch (e) {

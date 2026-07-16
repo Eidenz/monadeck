@@ -87,6 +87,15 @@ export interface ServiceStatus {
   running: boolean;
   connected: boolean;
   exit_code: number | null;
+  // One-shot: set on the poll right after the kwin freeze watch recovered the
+  // desktop from a cold-start HMD adoption (see core::kwin_freeze).
+  freeze_recovery: FreezeRecovery | null;
+}
+
+export interface FreezeRecovery {
+  // Outputs the watch told kwin to drop (the wrongly adopted HMD connector).
+  // Empty means the freeze was detected but the output couldn't be identified.
+  disabled_outputs: string[];
 }
 
 export interface RuntimeStatus {

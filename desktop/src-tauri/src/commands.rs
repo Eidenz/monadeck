@@ -35,6 +35,9 @@ pub struct ServiceStatus {
     /// libmonado can reach the service (it's actually serving IPC).
     connected: bool,
     exit_code: Option<i32>,
+    /// Set (once) when the kwin freeze watch recovered the desktop from a
+    /// cold-start HMD adoption; the UI turns it into a toast.
+    freeze_recovery: Option<monadeck_core::kwin_freeze::FreezeRecovery>,
 }
 
 #[derive(Serialize)]
@@ -117,6 +120,7 @@ pub async fn service_status(state: State<'_, AppState>) -> CmdResult<ServiceStat
             running,
             connected: devices::service_connected(),
             exit_code,
+            freeze_recovery: st.freeze_watch.lock().unwrap().take_result(),
         }
     })
     .await
@@ -296,6 +300,13 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
             env.entry("XRT_COMPOSITOR_USE_PRESENT_WAIT".to_string())
                 .or_insert_with(|| "1".to_string());
         }
+        // Arm the kwin freeze watch before the service can power the headset
+        // display: a cold-started HMD can serve corrupt EDID, which makes kwin
+        // adopt it as a desktop monitor and freeze every output retrying a
+        // failing modeset. The watch spots the spam and drops the output so
+        // the desktop survives without unplugging. See core::kwin_freeze.
+        st.freeze_watch.lock().unwrap().spawn();
+
         let bin = cfg.monado_service_bin();
         st.runner
             .lock()
@@ -342,6 +353,7 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
 pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
+        st.freeze_watch.lock().unwrap().stop_watch();
         st.runner.lock().unwrap().terminate();
         // Stop the plugins/overlay we launched on start (WayVR, etc.) so they don't
         // outlive the service and collide with the next start.

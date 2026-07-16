@@ -25,6 +25,7 @@ pub mod favorites;
 pub mod floor_calibration;
 pub mod gpu;
 pub mod installer;
+pub mod kwin_freeze;
 pub mod launch_options;
 pub mod monado_conn;
 pub mod openvr_paths;

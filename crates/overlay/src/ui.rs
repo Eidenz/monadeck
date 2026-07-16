@@ -669,7 +669,7 @@ fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
         empty_note(ui, st);
         return;
     }
-    game_grid(ui, st, &shown, "grid");
+    game_grid(ui, st, &shown, "grid", false);
 }
 
 /// A view header: the title on the left, the sort selector on the right.
@@ -751,12 +751,14 @@ fn favorites_view(ui: &mut egui::Ui, st: &mut LibState) {
         });
         return;
     }
-    game_grid(ui, st, &shown, "favs");
+    game_grid(ui, st, &shown, "favs", true);
 }
 
 /// A vertical wrapped grid of the given game indices, with hover/select/launch
-/// tracking. Shared by Library + Favorites.
-fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str) {
+/// tracking. Shared by Library + Favorites. With `home_on_select`, picking a
+/// game also jumps to Home so the hero's Play button is one tap away (wanted
+/// for Favorites/Tags; Library stays put as the browsing view).
+fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str, home_on_select: bool) {
     let (mut visible, mut newly, mut launch, mut hovered) = (Vec::new(), None, None, None);
     egui::ScrollArea::vertical().id_salt(salt).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -782,6 +784,9 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str) 
     if newly.is_some() {
         st.selected = newly;
         st.sound_select = true;
+        if home_on_select {
+            st.nav = Nav::Home;
+        }
     }
     if launch.is_some() {
         st.launch_request = launch;
@@ -887,6 +892,9 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
     if newly.is_some() {
         st.selected = newly;
         st.sound_select = true;
+        // Picking a game from a category means "play this": land on the Home
+        // hero where the Play button is, instead of leaving the user here.
+        st.nav = Nav::Home;
     }
     if let Some(ci) = delete {
         st.collection_delete = Some(ci);
