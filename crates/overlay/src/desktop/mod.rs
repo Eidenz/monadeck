@@ -430,6 +430,19 @@ impl DesktopViewer {
         }
     }
 
+    /// Apply capture limits; a changed fps cap restarts live captures.
+    pub fn set_capture_limits(&mut self, max_fps: u32, max_height: u32) {
+        let fps_changed = self.caps.max_fps != max_fps;
+        self.caps.max_fps = max_fps;
+        self.caps.max_height = max_height;
+        if fps_changed {
+            let caps = self.caps.clone();
+            for s in &mut self.screens {
+                s.restart_capture(&caps);
+            }
+        }
+    }
+
     /// Per-screen opacity, by Desktop-page row.
     pub fn set_screen_opacity(&mut self, row: usize, opacity: f32) {
         if let Some(&si) = self.ordered_screens().get(row) {

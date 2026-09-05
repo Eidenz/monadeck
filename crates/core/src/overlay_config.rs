@@ -56,6 +56,11 @@ pub struct OverlayConfig {
     pub recenter_on_toggle: bool,
     /// VR keyboard size multiplier.
     pub keyboard_scale: f32,
+    /// Cap the compositor's screencast frame rate (0 = unlimited). Frames above
+    /// the headset rate are never seen, so this only saves compositor work.
+    pub capture_max_fps: u32,
+    /// Downscale mirrored screens to this height in VR (0 = native).
+    pub capture_max_height: u32,
 }
 
 impl Default for OverlayConfig {
@@ -85,6 +90,8 @@ impl Default for OverlayConfig {
             gaze_pause: true,
             recenter_on_toggle: true,
             keyboard_scale: 1.0,
+            capture_max_fps: 90,
+            capture_max_height: 0,
         }
     }
 }

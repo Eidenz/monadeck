@@ -76,6 +76,10 @@ pub struct Caps {
     pub curved: bool,
     /// Runtime supports XR_KHR_composition_layer_color_scale_bias (opacity).
     pub color_scale: bool,
+    /// Screencast frame-rate cap negotiated with PipeWire (0 = none).
+    pub max_fps: u32,
+    /// Mirrored screens are downscaled to this height (0 = native).
+    pub max_height: u32,
 }
 
 impl Caps {
@@ -99,7 +103,15 @@ impl Caps {
                 log::debug!("  {} 0x{:016x}", f.fourcc, f.modifier);
             }
         }
-        Self { dmabuf: dmabuf && !formats.is_empty(), formats, swap_format, curved: false, color_scale: false }
+        Self {
+            dmabuf: dmabuf && !formats.is_empty(),
+            formats,
+            swap_format,
+            curved: false,
+            color_scale: false,
+            max_fps: 0,
+            max_height: 0,
+        }
     }
 }
 

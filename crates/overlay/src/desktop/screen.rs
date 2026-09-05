@@ -142,8 +142,21 @@ impl ScreenPanel {
         match &self.capture {
             Some(c) => c.set_active(true),
             None => {
-                self.capture = Some(Capture::start(format!("monadeck:{}", self.name), self.node_id, caps.formats.clone()));
+                self.capture = Some(Capture::start(
+                    format!("monadeck:{}", self.name),
+                    self.node_id,
+                    caps.formats.clone(),
+                    caps.max_fps,
+                ));
             }
+        }
+    }
+
+    /// Restart the capture (after a frame-rate cap change).
+    pub fn restart_capture(&mut self, caps: &Caps) {
+        if self.capture.take().is_some() && self.shown {
+            self.shown = false;
+            self.show(caps);
         }
     }
 
@@ -226,24 +239,32 @@ impl ScreenPanel {
         if fmt.width == 0 || fmt.height == 0 {
             return Ok(());
         }
-        if self.swap.as_ref().map_or(true, |s| s.px != (fmt.width, fmt.height)) {
+        // Optional downscale in VR (the blit scales; SHM copies can't, so they
+        // stay native).
+        let mut target = (fmt.width, fmt.height);
+        if caps.max_height > 0 && fmt.height > caps.max_height && matches!(frame, Frame::Dmabuf(_)) {
+            let h = caps.max_height;
+            let w = ((fmt.width as u64 * h as u64) / fmt.height as u64) as u32;
+            target = (w.max(1), h);
+        }
+        if self.swap.as_ref().map_or(true, |s| s.px != target) {
             self.swap = None; // drop the old one first (frees its images)
             let swapchain = session.create_swapchain(&xr::SwapchainCreateInfo {
                 create_flags: xr::SwapchainCreateFlags::EMPTY,
                 usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::TRANSFER_DST,
                 format: caps.swap_format.as_raw() as _,
                 sample_count: 1,
-                width: fmt.width,
-                height: fmt.height,
+                width: target.0,
+                height: target.1,
                 face_count: 1,
                 array_size: 1,
                 mip_count: 1,
             })?;
             let images = swapchain.enumerate_images()?.into_iter().map(vk::Image::from_raw).collect();
-            self.swap = Some(Swap { swapchain, images, px: (fmt.width, fmt.height) });
+            self.swap = Some(Swap { swapchain, images, px: target });
             self.frame_px = (fmt.width, fmt.height);
             self.has_content = false;
-            log::info!("desktop: {} swapchain {}x{}", self.name, fmt.width, fmt.height);
+            log::info!("desktop: {} swapchain {}x{} (source {}x{})", self.name, target.0, target.1, fmt.width, fmt.height);
         }
         let swap = self.swap.as_mut().ok_or_else(|| anyhow!("no swapchain"))?;
         let extent = vk::Extent2D { width: swap.px.0, height: swap.px.1 };

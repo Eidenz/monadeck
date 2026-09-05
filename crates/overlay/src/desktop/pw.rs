@@ -84,14 +84,14 @@ static PW_INIT: Once = Once::new();
 impl Capture {
     /// Connect to `node_id` and start receiving. `formats` are the DMA-BUF
     /// (fourcc, modifier) pairs we can import; SHM is always offered too.
-    pub fn start(name: String, node_id: u32, formats: Vec<DrmFormat>) -> Self {
+    pub fn start(name: String, node_id: u32, formats: Vec<DrmFormat>, max_fps: u32) -> Self {
         PW_INIT.call_once(pw::init);
         let (tx_frame, rx_frame) = mpsc::sync_channel(2);
         let (tx_ctrl, rx_ctrl) = pw::channel::channel();
         let handle = std::thread::Builder::new()
             .name(format!("pw-capture-{node_id}"))
             .spawn(move || {
-                if let Err(e) = main_loop(name.clone(), node_id, formats, tx_frame, rx_ctrl) {
+                if let Err(e) = main_loop(name.clone(), node_id, formats, max_fps, tx_frame, rx_ctrl) {
                     log::error!("{name}: pipewire capture loop failed: {e}");
                 }
             })
@@ -122,6 +122,7 @@ fn main_loop(
     name: String,
     node_id: u32,
     formats: Vec<DrmFormat>,
+    max_fps: u32,
     sender: mpsc::SyncSender<Frame>,
     receiver: pw::channel::Receiver<Ctrl>,
 ) -> Result<(), pw::Error> {
@@ -295,8 +296,8 @@ fn main_loop(
         }
     }
     let mut param_bytes: Vec<Vec<u8>> =
-        by_fourcc.iter().filter_map(|(c, m)| obj_to_bytes(format_params(Some((*c, m)))).ok()).collect();
-    param_bytes.push(obj_to_bytes(format_params(None)).expect("static SHM format params"));
+        by_fourcc.iter().filter_map(|(c, m)| obj_to_bytes(format_params(Some((*c, m)), max_fps)).ok()).collect();
+    param_bytes.push(obj_to_bytes(format_params(None, max_fps)).expect("static SHM format params"));
     let mut params: Vec<&Pod> = param_bytes.iter().filter_map(|b| Pod::from_bytes(b)).collect();
 
     stream.connect(
@@ -360,7 +361,7 @@ fn meta_object(key: u32, size: usize) -> Object {
     spa::pod::object!(spa::utils::SpaTypes::ObjectParamMeta, ParamType::Meta, ty, sz)
 }
 
-fn format_params(fmt: Option<(DrmFourcc, &Vec<u64>)>) -> Object {
+fn format_params(fmt: Option<(DrmFourcc, &Vec<u64>)>, max_fps: u32) -> Object {
     let mut obj = spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
         ParamType::EnumFormat,
@@ -394,6 +395,19 @@ fn format_params(fmt: Option<(DrmFourcc, &Vec<u64>)>) -> Object {
         ),
     );
 
+    if max_fps > 0 {
+        // Ask the compositor not to export more than this many frames per second
+        // (KWin honours maxFramerate; others ignore it harmlessly).
+        obj.properties.push(spa::pod::property!(
+            spa::param::format::FormatProperties::VideoMaxFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction { num: max_fps, denom: 1 },
+            spa::utils::Fraction { num: 1, denom: 1 },
+            spa::utils::Fraction { num: max_fps, denom: 1 }
+        ));
+    }
     match fmt {
         Some((fourcc, mods)) => {
             let spa_fmt = fourcc_to_spa(fourcc);

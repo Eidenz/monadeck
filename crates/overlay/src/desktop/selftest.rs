@@ -122,7 +122,7 @@ pub fn run() -> Result<()> {
     let Some(first) = cast.streams.first() else { bail!("no streams") };
 
     println!("== pipewire ==");
-    let capture = Capture::start("selftest".into(), first.node_id, caps.formats.clone());
+    let capture = Capture::start("selftest".into(), first.node_id, caps.formats.clone(), 90);
     let start = Instant::now();
     let mut got: Option<Frame> = None;
     let mut count = 0u32;

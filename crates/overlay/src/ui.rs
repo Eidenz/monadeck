@@ -71,6 +71,8 @@ pub struct LibState {
     pub gaze_pause: bool,
     pub recenter_on_toggle: bool,
     pub keyboard_scale: f32,
+    pub capture_max_fps: u32,
+    pub capture_max_height: u32,
     pub desktop_opacity_request: Option<(usize, f32)>,
     // Wrist watch.
     pub watch_enabled: bool,
@@ -223,6 +225,8 @@ impl LibState {
             gaze_pause: true,
             recenter_on_toggle: true,
             keyboard_scale: 1.0,
+            capture_max_fps: 90,
+            capture_max_height: 0,
             desktop_opacity_request: None,
             watch_enabled: true,
             watch_24h: false,
@@ -2328,6 +2332,18 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                     t |= seg_toggle(ui, &mut st.recenter_on_toggle);
                 },
             );
+            divider(ui);
+            let mut fps = st.capture_max_fps as f32;
+            setting_row(ui, "Capture frame-rate cap", Some("Frames above the headset rate are never seen; capping saves compositor GPU work (0 = unlimited)"), |ui| {
+                stepper_inline(ui, &mut fps, 0.0, 240.0, 30.0, |v| if v < 1.0 { "unlimited".into() } else { format!("{v:.0} fps") });
+            });
+            st.capture_max_fps = fps.round() as u32;
+            divider(ui);
+            let mut mh = st.capture_max_height as f32;
+            setting_row(ui, "Screen resolution cap", Some("Downscale mirrored screens in VR (0 = native)"), |ui| {
+                stepper_inline(ui, &mut mh, 0.0, 2160.0, 360.0, |v| if v < 1.0 { "native".into() } else { format!("{v:.0} px tall") });
+            });
+            st.capture_max_height = mh.round() as u32;
             divider(ui);
             setting_row(ui, "Keyboard size", Some("Also saved in layouts"), |ui| {
                 stepper_inline(ui, &mut st.keyboard_scale, 0.6, 1.6, 0.1, |v| format!("{:.0}%", v * 100.0));
