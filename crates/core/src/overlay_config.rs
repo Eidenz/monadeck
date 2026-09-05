@@ -42,6 +42,13 @@ pub struct OverlayConfig {
     pub watch_enabled: bool,
     /// Extra time zones on the watch (IANA names, e.g. "Asia/Tokyo").
     pub watch_timezones: Vec<String>,
+    /// 24-hour clock on the watch and bottom bar.
+    pub watch_24h: bool,
+    /// Watch position locked (unlock from the watch to grip-move it).
+    pub watch_locked: bool,
+    /// Watch pose relative to the left controller's aim pose `[x,y,z,qx,qy,qz,qw]`
+    /// (None = built-in default).
+    pub watch_offset: Option<[f32; 7]>,
     /// Pause a screen's capture after a couple of seconds out of view.
     pub gaze_pause: bool,
     /// VR keyboard size multiplier.
@@ -69,6 +76,9 @@ impl Default for OverlayConfig {
             restore_layout: true,
             watch_enabled: true,
             watch_timezones: vec!["America/New_York".into(), "Asia/Tokyo".into()],
+            watch_24h: false,
+            watch_locked: true,
+            watch_offset: None,
             gaze_pause: true,
             keyboard_scale: 1.0,
         }

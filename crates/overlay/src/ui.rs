@@ -73,6 +73,9 @@ pub struct LibState {
     pub desktop_opacity_request: Option<(usize, f32)>,
     // Wrist watch.
     pub watch_enabled: bool,
+    pub watch_24h: bool,
+    pub watch_locked: bool,
+    pub watch_reset_request: bool,
     pub watch_date: String,
     pub watch_times: Vec<(String, String)>, // (label, HH:MM)
     pub watch_menu_request: bool,
@@ -218,6 +221,9 @@ impl LibState {
             keyboard_scale: 1.0,
             desktop_opacity_request: None,
             watch_enabled: true,
+            watch_24h: false,
+            watch_locked: true,
+            watch_reset_request: false,
             watch_date: String::new(),
             watch_times: Vec::new(),
             watch_menu_request: false,
@@ -423,7 +429,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         .inner_margin(egui::Margin::same(10));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        // Batteries.
+        // Batteries + position lock (top right).
         ui.horizontal(|ui| {
             if st.batteries.is_empty() {
                 ui.label(egui::RichText::new("no batteries").size(12.0).color(theme::ON_SURFACE_VAR));
@@ -432,6 +438,24 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 battery_widget(ui, b);
                 ui.add_space(4.0);
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (glyph, tip) = if st.watch_locked {
+                    (icon::LOCK, "Position locked · tap to unlock, then grip the watch to move it")
+                } else {
+                    (icon::LOCK_OPEN, "Grip the watch with the right hand to move it · tap to lock")
+                };
+                let fg = if st.watch_locked { theme::ON_SURFACE_VAR } else { egui::Color32::BLACK };
+                let btn = egui::Button::new(egui::RichText::new(glyph).size(15.0).color(fg))
+                    .fill(if st.watch_locked { egui::Color32::TRANSPARENT } else { theme::PRIMARY })
+                    .min_size(egui::vec2(28.0, 24.0));
+                if ui.add(btn).on_hover_text(tip).clicked() {
+                    st.watch_locked = !st.watch_locked;
+                    st.sound_tab = true;
+                }
+                if !st.watch_locked {
+                    ui.label(egui::RichText::new("grip to move").size(11.0).color(theme::ON_SURFACE_VAR));
+                }
+            });
         });
         // Clock + zones | quick buttons.
         ui.horizontal(|ui| {
@@ -2225,10 +2249,6 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
         ui.add_space(6.0);
         section(ui, "Behaviour", |ui| {
             let mut t = false;
-            setting_row(ui, "Wrist watch", Some("Clock, time zones, batteries and quick buttons on your left controller"), |ui| {
-                t |= seg_toggle(ui, &mut st.watch_enabled);
-            });
-            divider(ui);
             setting_row(ui, "Pause capture when not looking", Some("Frees GPU/CPU after ~2 s out of view; resumes instantly"), |ui| {
                 t |= seg_toggle(ui, &mut st.gaze_pause);
             });
@@ -2282,6 +2302,34 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
 fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     page_header(ui, icon::GEAR, "Settings");
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        section(ui, "Wrist watch", |ui| {
+            let mut t = false;
+            setting_row(ui, "Show the watch", Some("Clock, time zones, batteries and quick buttons on your left controller"), |ui| {
+                t |= seg_toggle(ui, &mut st.watch_enabled);
+            });
+            divider(ui);
+            setting_row(ui, "24-hour clock", Some("Also the bottom bar clock"), |ui| {
+                t |= seg_toggle(ui, &mut st.watch_24h);
+            });
+            divider(ui);
+            setting_row(ui, "Position locked", Some("Unlock, then grip the watch with the right hand to move it; the spot is remembered"), |ui| {
+                t |= seg_toggle(ui, &mut st.watch_locked);
+            });
+            divider(ui);
+            setting_row(ui, "Reset position", Some("Back to the default wrist spot"), |ui| {
+                if action_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Reset").clicked() {
+                    st.watch_reset_request = true;
+                    st.sound_tab = true;
+                }
+            });
+            divider(ui);
+            let zones: Vec<String> = st.watch_times.iter().map(|(l, _)| l.clone()).collect();
+            let zl = if zones.is_empty() { "none".to_string() } else { zones.join(" · ") };
+            setting_row(ui, "Extra time zones", Some(&format!("{zl} — edit `watch_timezones` in overlay.json (IANA names)")), |_| {});
+            if t {
+                st.sound_tab = true;
+            }
+        });
         section(ui, "Panel", |ui| {
             setting_row(ui, "Recenter panel", Some("Bring it back in front of you · grip to grab & move"), |ui| {
                 if action_button(ui, icon::CROSSHAIR_SIMPLE, "Recenter").clicked() {
