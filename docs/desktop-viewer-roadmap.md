@@ -53,6 +53,17 @@ marked **done** are on the branch; everything else is a proposal.
   toggles. Pointed at with the right hand; it wins over anything behind it.
   Toggle in Desktop → Behaviour.
 
+- 360° background (equirect2 layer, CC0 Table Mountain 2, `skybox_path` for
+  your own) while no game runs. Settings → Background.
+- Capture limits: PipeWire maxFramerate cap (default 90, KWin honours it) and
+  optional VR downscale. Desktop → Behaviour.
+- **monado-frame folded in**: new screenshots land as a card in the watch's
+  clock area (preview/date, ‹ › queue, open/dismiss, haptic tick); floating photo
+  windows (3, grip to move: copy · delete · translate · share); Photos page in
+  the rail with the paged gallery, finger-frame gesture settings (gestures.json)
+  and photo settings (QR, crop, cleanup, skip-wrist). Translate/Share come from
+  `crates/overlay/{translate,picsur}.env` at build time (gitignored).
+
 ## Proposed next
 
 (empty — add what you'd like here)
