@@ -8,6 +8,7 @@
 // The OpenXR/Vulkan/egui/laser plumbing is adapted from monado-frame.
 
 mod audio;
+mod desktop;
 mod games;
 mod gfx;
 mod mathx;
@@ -156,6 +157,16 @@ unsafe extern "system" fn get_instance_proc_addr(
 }
 
 fn main() {
+    // `monadeck-overlay --desktop-selftest`: exercise the desktop-viewer capture
+    // path (portal → PipeWire → Vulkan import → PNG) with no headset/runtime.
+    if std::env::args().any(|a| a == "--desktop-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Err(e) = desktop::selftest::run() {
+            eprintln!("desktop selftest FAILED: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     if let Err(e) = run() {
         log::error!("overlay exited with error: {e:?}");
@@ -234,7 +245,10 @@ fn run() -> Result<()> {
     let priorities = [1.0f32];
     let queue_infos =
         [vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family_index).queue_priorities(&priorities)];
-    let device_create_info = vk::DeviceCreateInfo::default().queue_create_infos(&queue_infos);
+    // Desktop viewer: DMA-BUF import extensions (all-or-nothing; SHM fallback otherwise).
+    let (dmabuf_exts, dmabuf_ok) = desktop::dmabuf::available_extensions(&vk_instance, physical_device);
+    let device_create_info =
+        vk::DeviceCreateInfo::default().queue_create_infos(&queue_infos).enabled_extension_names(&dmabuf_exts);
     let vk_device_raw = unsafe {
         xr_instance
             .create_vulkan_device(
@@ -384,6 +398,8 @@ fn run() -> Result<()> {
     let grab_action = action_set.create_action::<f32>("grab", "Grab", &[left_path, right_path])?;
     let scroll_action = action_set.create_action::<xr::Vector2f>("scroll", "Scroll", &[left_path, right_path])?;
     let system_action = action_set.create_action::<bool>("recenter", "Recenter panel", &[left_path, right_path])?;
+    // Desktop viewer: A = right-click on a mirrored screen.
+    let secondary_action = action_set.create_action::<bool>("secondary", "Secondary click", &[left_path, right_path])?;
     let haptic_action = action_set.create_action::<xr::Haptic>("haptic", "Haptic tick", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
     xr_instance.suggest_interaction_profile_bindings(
@@ -399,6 +415,8 @@ fn run() -> Result<()> {
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
             // Summon/dismiss is the LEFT system (menu) click only.
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
+            xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
+            xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
         ],
@@ -413,6 +431,14 @@ fn run() -> Result<()> {
     // libmonado link: running-game detection, recenter, input arbitration.
     let monado = monado::MonadoLink::new();
     let ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
+    // Desktop viewer (WayVR-style screen mirror): GPU caps + portal token.
+    let desktop_caps = desktop::dmabuf::Caps::query(&vk_instance, physical_device, dmabuf_ok, format);
+    let desktop_importer = desktop_caps
+        .dmabuf
+        .then(|| desktop::dmabuf::Importer::new(&vk_instance, &device, queue_family_index, format));
+    let mut desktop = desktop::DesktopViewer::new(desktop_caps, desktop_importer, ov_cfg.screencast_token.clone());
+    desktop.set_width(ov_cfg.screen_width_m);
+    let mut screencast_token = ov_cfg.screencast_token.clone();
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
     let mut settings_prev = (
         ov_cfg.audio_enabled,
@@ -426,6 +452,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
+        ov_cfg.screen_width_m,
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -468,6 +495,7 @@ fn run() -> Result<()> {
     st.playspace_yaw = ov_cfg.playspace_yaw;
     st.uevr_delay = ov_cfg.uevr_delay;
     st.freeze_delay_secs = ov_cfg.freeze_delay_secs;
+    st.screen_width_m = ov_cfg.screen_width_m;
     // Hide the UEVR feature entirely if protontricks-launch isn't installed.
     st.uevr_available = monadeck_core::uevr::protontricks_available();
     // If protontricks is present, make sure the chihuahua injector is too —
@@ -854,6 +882,30 @@ fn run() -> Result<()> {
             None => st.freeze_pending = None,
         }
 
+        // --- Desktop viewer (runs hidden or not): controller state, portal,
+        // frame uploads, first placement. Screens persist while dismissed.
+        let mut hands: Vec<desktop::HandInput> = Vec::new();
+        if focused {
+            for (aim, path) in [(&aim_left, left_path), (&aim_right, right_path)] {
+                let located = locate_pose(aim, &space, time);
+                let s = scroll_action.state(&session, path)?.current_state;
+                hands.push(desktop::HandInput {
+                    active: located.is_some(),
+                    aim: located.unwrap_or(xr::Posef::IDENTITY),
+                    path,
+                    select: select_action.state(&session, path)?.current_state > 0.5,
+                    secondary: secondary_action.state(&session, path)?.current_state,
+                    grip: grab_action.state(&session, path)?.current_state,
+                    scroll: deadzone(s.x, s.y),
+                });
+            }
+        }
+        desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
+        if let Some(tok) = desktop.take_token_change() {
+            screencast_token = tok;
+            overlay_config_from(&st, &screencast_token).save();
+        }
+
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
         // order is fresh on the next summon), drop input block, render only toasts.
         if !visible {
@@ -866,12 +918,26 @@ fn run() -> Result<()> {
                     refresh_rx = None;
                 }
             }
-            if blocked_prev {
-                monado.set_block(false);
-                blocked_prev = false;
+            // Mirrored screens stay interactive while the dashboard is away.
+            let d_ray = desktop.update_input(&hands, None);
+            let want_block = desktop.pointing();
+            if want_block != blocked_prev {
+                monado.set_block(want_block);
+                blocked_prev = want_block;
             }
+            if d_ray.is_some() {
+                fill_laser(&mut laser, &device, cmd, queue, fence)?;
+            }
+            let laser_q = match (d_ray, hmd) {
+                (Some((aim, t)), Some(h)) => Some(laser_quad(&laser, &space, &aim, t, &h)),
+                _ => None,
+            };
+            let screen_quads = desktop.quad_layers(&space);
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+            for q in &screen_quads {
+                layers.push(q);
+            }
             if popup_active {
                 popup_q = quad_layer(&launch_panel, &space, true);
                 layers.push(&popup_q);
@@ -879,6 +945,9 @@ fn run() -> Result<()> {
             if toast_active {
                 toast_q = quad_layer(&toast_panel, &space, true);
                 layers.push(&toast_q);
+            }
+            if let Some(q) = &laser_q {
+                layers.push(q);
             }
             frame_stream.end(time, blend_mode, &layers)?;
             continue;
@@ -993,13 +1062,31 @@ fn run() -> Result<()> {
             }
         }
 
+        // Mirrored screens: one closer than the dashboard takes the pointer. Not
+        // while a dashboard grab is in progress (the grip would grab both).
+        let d_ray = if grab.is_some() {
+            desktop.update_input(&[], None)
+        } else {
+            desktop.update_input(&hands, best.map(|b| b.t))
+        };
+        if d_ray.is_some() {
+            best = None;
+            scroll = (0.0, 0.0);
+        }
+        // Feed the Desktop page.
+        st.desktop_rows = desktop.rows();
+        st.desktop_status = desktop.status();
+        st.desktop_hid_error = desktop.hid_error.clone();
+        st.desktop_dmabuf = desktop.caps.dmabuf;
+        st.desktop_shown = desktop.shown_count();
+
         let main_ptr = best.filter(|h| h.panel == PanelId::Main).map(|h| (h.u, h.v, h.down));
         let rail_ptr = best.filter(|h| h.panel == PanelId::Rail).map(|h| (h.u, h.v, h.down));
         let bottom_ptr = best.filter(|h| h.panel == PanelId::Bottom).map(|h| (h.u, h.v, h.down));
-        let laser_ray = best.map(|h| (h.aim, h.t));
+        let laser_ray = best.map(|h| (h.aim, h.t)).or(d_ray);
 
         // Block the game's controller input while pointing at the dashboard.
-        let want_block = best.is_some();
+        let want_block = best.is_some() || desktop.pointing();
         if want_block != blocked_prev {
             monado.set_block(want_block);
             blocked_prev = want_block;
@@ -1106,7 +1193,12 @@ fn run() -> Result<()> {
             (Some((aim, t)), Some(h)) => Some(laser_quad(&laser, &space, &aim, t, &h)),
             _ => None,
         };
+        let screen_quads = desktop.quad_layers(&space);
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+        // Screens first: they sit behind the dashboard in the composite.
+        for q in &screen_quads {
+            layers.push(q);
+        }
         if curved {
             main_cyl = cylinder_layer(&main_panel, &space, &main_l, false);
             rail_cyl = cylinder_layer(&rail_panel, &space, &rail_l, true);
@@ -1236,26 +1328,14 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
+            st.screen_width_m,
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
             audio.set_volume(st.audio_volume);
+            desktop.set_width(st.screen_width_m);
             settings_prev = settings_now;
-            monadeck_core::overlay_config::OverlayConfig {
-                audio_enabled: st.audio_enabled,
-                audio_volume: st.audio_volume,
-                summon_tilt: st.summon_tilt,
-                panel_dist: st.panel_dist,
-                panel_scale: st.panel_scale,
-                panel_curve: st.panel_curve,
-                playspace_x: st.playspace_x,
-                playspace_y: st.playspace_y,
-                playspace_z: st.playspace_z,
-                playspace_yaw: st.playspace_yaw,
-                uevr_delay: st.uevr_delay,
-                freeze_delay_secs: st.freeze_delay_secs,
-            }
-            .save();
+            overlay_config_from(&st, &screencast_token).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
         // effective offset is pushed to libmonado at the top of the loop (which
@@ -1349,6 +1429,14 @@ fn run() -> Result<()> {
             st.recenter_request = false;
             recenter = true;
         }
+        // Desktop page actions.
+        if let Some(i) = st.desktop_toggle_request.take() {
+            desktop.toggle(i);
+        }
+        if st.desktop_reselect_request {
+            st.desktop_reselect_request = false;
+            desktop.reselect();
+        }
         if st.recenter_playspace_request {
             st.recenter_playspace_request = false;
             monado.recenter();
@@ -1359,6 +1447,26 @@ fn run() -> Result<()> {
         if let Some(name) = st.kill_request.take() {
             stop_game(&name);
         }
+    }
+}
+
+/// The persisted overlay preferences, from live UI state.
+fn overlay_config_from(st: &ui::LibState, screencast_token: &Option<String>) -> monadeck_core::overlay_config::OverlayConfig {
+    monadeck_core::overlay_config::OverlayConfig {
+        audio_enabled: st.audio_enabled,
+        audio_volume: st.audio_volume,
+        summon_tilt: st.summon_tilt,
+        panel_dist: st.panel_dist,
+        panel_scale: st.panel_scale,
+        panel_curve: st.panel_curve,
+        playspace_x: st.playspace_x,
+        playspace_y: st.playspace_y,
+        playspace_z: st.playspace_z,
+        playspace_yaw: st.playspace_yaw,
+        uevr_delay: st.uevr_delay,
+        freeze_delay_secs: st.freeze_delay_secs,
+        screencast_token: screencast_token.clone(),
+        screen_width_m: st.screen_width_m,
     }
 }
 

@@ -29,6 +29,11 @@ pub struct OverlayConfig {
     /// Seconds to count down before a "Freeze controllers" actually applies, so
     /// you can settle into position first.
     pub freeze_delay_secs: f32,
+    /// xdg-desktop-portal ScreenCast restore token (desktop viewer): lets the
+    /// next launch re-use the approved monitors without the share dialog.
+    pub screencast_token: Option<String>,
+    /// Physical width of mirrored screens, metres.
+    pub screen_width_m: f32,
 }
 
 impl Default for OverlayConfig {
@@ -46,6 +51,8 @@ impl Default for OverlayConfig {
             playspace_yaw: 0.0,
             uevr_delay: 30,
             freeze_delay_secs: 3.0,
+            screencast_token: None,
+            screen_width_m: 1.35,
         }
     }
 }

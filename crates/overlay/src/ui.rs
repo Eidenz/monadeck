@@ -15,6 +15,7 @@ pub enum Nav {
     Tools,
     Playspace,
     Monado,
+    Desktop,
     Settings,
 }
 
@@ -130,6 +131,16 @@ pub struct LibState {
     pub freeze_pending: Option<(u32, f32)>,
     /// Minutes the currently-running game has been up this session (for the splash).
     pub session_minutes: Option<u32>,
+    // Desktop viewer (WayVR-style screen mirror).
+    pub desktop_rows: Vec<crate::desktop::ScreenRow>,
+    pub desktop_status: String,
+    pub desktop_hid_error: Option<String>,
+    pub desktop_dmabuf: bool,
+    pub desktop_shown: usize,
+    pub desktop_toggle_request: Option<usize>,
+    pub desktop_reselect_request: bool,
+    /// Physical width of mirrored screens, metres.
+    pub screen_width_m: f32,
     /// Central-view fade-in animation (resets when the tab / splash changes).
     last_nav: Nav,
     last_splash: bool,
@@ -206,6 +217,14 @@ impl LibState {
             kill_request: None,
             freeze_delay_secs: 3.0,
             freeze_pending: None,
+            desktop_rows: Vec::new(),
+            desktop_status: String::new(),
+            desktop_hid_error: None,
+            desktop_dmabuf: false,
+            desktop_shown: 0,
+            desktop_toggle_request: None,
+            desktop_reselect_request: false,
+            screen_width_m: 1.35,
             session_minutes: None,
             last_nav: Nav::Home,
             last_splash: false,
@@ -272,11 +291,12 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
             // margin, or the last icon overruns the panel's rounded bottom (clipped).
             // ~64 px per icon (48 button + 8 add_space + spacing) — bump when adding.
             let avail = ui.available_height();
-            ui.add_space((avail - 272.0).max(0.0));
+            ui.add_space((avail - 336.0).max(0.0));
             let bottom = [
                 (icon::TIMER, Nav::Tools),
                 (icon::ARROWS_OUT_CARDINAL, Nav::Playspace),
                 (icon::STACK, Nav::Monado),
+                (icon::MONITOR, Nav::Desktop),
                 (icon::GEAR, Nav::Settings),
             ];
             for (k, &(glyph, nav)) in bottom.iter().enumerate() {
@@ -568,6 +588,11 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
                 st.visible_now.clear();
                 st.hovered_index = None;
                 monado_view(ui, st);
+            }
+            Nav::Desktop => {
+                st.visible_now.clear();
+                st.hovered_index = None;
+                desktop_view(ui, st);
             }
             Nav::Settings => {
                 st.visible_now.clear();
@@ -1795,6 +1820,80 @@ fn monado_view(ui: &mut egui::Ui, st: &mut LibState) {
                     divider(ui);
                 }
             }
+        });
+    });
+}
+
+/// The Desktop page: mirror monitors into VR (WayVR-style) and tune them.
+fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
+    page_header(ui, icon::MONITOR, "Desktop");
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        section(ui, "Screens", |ui| {
+            ui.label(egui::RichText::new(&st.desktop_status).color(theme::ON_SURFACE_VAR));
+            ui.add_space(6.0);
+            if st.desktop_rows.is_empty() {
+                ui.label(egui::RichText::new("No screens detected.").color(theme::ON_SURFACE_VAR));
+            }
+            let mut toggle = None;
+            for (i, row) in st.desktop_rows.iter().enumerate() {
+                if i > 0 {
+                    divider(ui);
+                }
+                let sub = if row.pending {
+                    "Waiting for approval…".to_string()
+                } else if row.available {
+                    row.detail.clone()
+                } else {
+                    format!("{} · not approved yet", row.detail)
+                };
+                setting_row(ui, &row.name, Some(&sub), |ui| {
+                    let (glyph, label) = if row.shown {
+                        (icon::EYE_SLASH, "Hide")
+                    } else if row.pending {
+                        (icon::HOURGLASS, "Pending")
+                    } else {
+                        (icon::EYE, "Show")
+                    };
+                    if action_button(ui, glyph, label).clicked() {
+                        toggle = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = toggle {
+                st.desktop_toggle_request = Some(i);
+                st.sound_tab = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if reset_button(ui, "Re-pick screens").clicked() {
+                    st.desktop_reselect_request = true;
+                    st.sound_tab = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
+        section(ui, "Placement", |ui| {
+            setting_row(ui, "Screen width", Some("Grip a screen to move it · trigger clicks · A right-clicks · stick scrolls"), |ui| {
+                stepper_inline(ui, &mut st.screen_width_m, 0.6, 3.0, 0.1, |v| format!("{v:.1} m"));
+            });
+        });
+        ui.add_space(6.0);
+        section(ui, "Status", |ui| {
+            let cap = if st.desktop_dmabuf { "GPU zero-copy (DMA-BUF)" } else { "CPU copy (SHM) — slower" };
+            setting_row(ui, "Capture path", Some(cap), |_| {});
+            divider(ui);
+            match &st.desktop_hid_error {
+                None => setting_row(ui, "Mouse & keyboard", Some("Virtual input device ready (uinput)"), |_| {}),
+                Some(e) => setting_row(
+                    ui,
+                    "Mouse & keyboard unavailable",
+                    Some(&format!("{e} — add yourself to the `input` group and re-login")),
+                    |_| {},
+                ),
+            }
+            divider(ui);
+            setting_row(ui, "Shown", Some(&format!("{} screen(s) in VR", st.desktop_shown)), |_| {});
         });
     });
 }
