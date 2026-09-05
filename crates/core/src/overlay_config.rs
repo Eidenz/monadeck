@@ -51,9 +51,12 @@ pub struct OverlayConfig {
     pub watch_offset: Option<[f32; 7]>,
     /// Pause a screen's capture after a couple of seconds out of view.
     pub gaze_pause: bool,
-    /// Double-B restore: bring screens back where they were *relative to your
-    /// head* (turn 90°, they follow), unless it's an untouched loaded layout.
+    /// Double-B restore: bring screens back centred in view (one screen / one
+    /// docked group) or head-relative (several undocked), unless it's an
+    /// untouched loaded layout.
     pub recenter_on_toggle: bool,
+    /// Restored screens tilt to match the headset's pitch (else upright).
+    pub screen_restore_tilt: bool,
     /// VR keyboard size multiplier.
     pub keyboard_scale: f32,
     /// Cap the compositor's screencast frame rate (0 = unlimited). Frames above
@@ -109,6 +112,7 @@ impl Default for OverlayConfig {
             watch_offset: None,
             gaze_pause: true,
             recenter_on_toggle: true,
+            screen_restore_tilt: false,
             keyboard_scale: 1.0,
             capture_max_fps: 90,
             capture_max_height: 0,

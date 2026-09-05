@@ -142,6 +142,9 @@ pub struct KeyboardState {
     pub scale: f32,
     /// Shift double-tapped: stays latched across keys until tapped again.
     pub shift_locked: bool,
+    /// Approved screens (name, shown) for the top-bar pills; toggle request.
+    pub screens: Vec<(String, bool)>,
+    pub screen_toggle_request: Option<usize>,
     /// Key held under the pointer: (key index, pressed at, repeats sent).
     hold: Option<(usize, Instant, u32)>,
 }
@@ -168,6 +171,8 @@ impl KeyboardState {
             layout_switch_request: None,
             scale: 1.0,
             shift_locked: false,
+            screens: Vec::new(),
+            screen_toggle_request: None,
             hold: None,
         }
     }
@@ -326,6 +331,24 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             }
             if st.shift_locked {
                 chip(ui, "Shift lock", egui::Color32::from_rgb(232, 188, 84));
+            }
+            // Screen pills (same numbering as the watch/bar): one-handed spawning.
+            if !st.screens.is_empty() {
+                ui.add_space(8.0);
+                let mut toggle = None;
+                for (i, (name, shown)) in st.screens.iter().enumerate() {
+                    let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                    let b = egui::Button::new(egui::RichText::new(format!("{} {}", icon::MONITOR, i + 1)).size(12.0).color(fg))
+                        .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                        .min_size(egui::vec2(44.0, 24.0));
+                    if ui.add(b).on_hover_text(name).clicked() {
+                        toggle = Some(i);
+                    }
+                }
+                if let Some(i) = toggle {
+                    st.screen_toggle_request = Some(i);
+                    st.clicked = true;
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if small_button(ui, icon::X, "Close").clicked() {

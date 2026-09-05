@@ -27,7 +27,7 @@ use std::sync::Mutex;
 use ash::vk;
 use openxr as xr;
 
-use crate::mathx::{front_pose, pose_compose, pose_invert, raycast};
+use crate::mathx::{front_pose, offset_pose, pose_compose, pose_invert, qf, quat_rotate, raycast};
 use monadeck_core::desktop_layouts::{DesktopLayout, KeyboardPlacement, ScreenPlacement};
 use dmabuf::{Caps, Importer};
 use hid::UInput;
@@ -40,6 +40,10 @@ const GRAB_RELEASE: f32 = 0.15;
 const SCROLL_SPEED: f32 = 0.12;
 /// Default distance a newly shown screen is placed at, metres.
 const PLACE_DIST: f32 = 1.6;
+/// Release a screen within this distance of another screen's side spot to dock.
+const SCREEN_DOCK_SNAP: f32 = 0.15;
+/// Gap between docked screens, metres.
+const SCREEN_DOCK_GAP: f32 = 0.02;
 /// Trigger-held cursor motion below this (desktop px) is ignored, so a click
 /// on a draggable thing doesn't turn into a drag; beyond it, dragging is live.
 const DRAG_THRESHOLD_PX: f64 = 14.0;
@@ -156,9 +160,20 @@ pub struct DesktopViewer {
     /// Screens hidden by "toggle all" (double-A), to bring back the same set.
     stash: Vec<usize>,
     stash_keyboard: bool,
-    /// Head-relative poses captured at hide time (screen index / keyboard).
+    /// Head-relative poses captured at hide time (screen index / keyboard),
+    /// used when several undocked screens were up.
     stash_rel: Vec<(usize, xr::Posef)>,
     stash_kb_rel: Option<xr::Posef>,
+    /// One screen / one docked group: (root, group centre offset along the
+    /// root's right axis, distance from the head) — restored centred in view.
+    stash_center: Option<(usize, f32, f32)>,
+    stash_kb_attached: Option<usize>,
+    /// Restore screens tilted to the headset's pitch (else upright).
+    pub restore_tilt: bool,
+    /// While a docked group is gripped: the other members' poses relative to
+    /// the gripped screen.
+    grab_group: Vec<(usize, xr::Posef)>,
+    grab_screen: Option<usize>,
     /// A layout was applied and nothing has been touched since: a double-B
     /// restore puts things back exactly instead of re-centring on the head.
     layout_untouched: bool,
@@ -225,38 +240,207 @@ impl DesktopViewer {
             stash_keyboard: false,
             stash_rel: Vec::new(),
             stash_kb_rel: None,
+            stash_center: None,
+            stash_kb_attached: None,
+            restore_tilt: false,
+            grab_group: Vec::new(),
+            grab_screen: None,
             layout_untouched: false,
         }
     }
 
-    /// The head pose the double-B restore is relative to: position + full
-    /// orientation, so screens come back exactly where they sat in your view
-    /// (turn 90° and look up: still dead centre).
-    fn head_flat(h: &xr::Posef) -> xr::Posef {
-        *h
-    }
-
     /// Double-A: hide every shown screen (remembering the set), or bring that
     /// set back. Returns what happened for feedback.
+    // --- Screen docking ----------------------------------------------------------
+
+    /// Every screen connected to `i` through dock links (including `i`).
+    fn group_of(&self, i: usize) -> Vec<usize> {
+        let n = self.screens.len();
+        let mut members = vec![i];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for j in 0..n {
+                if members.contains(&j) {
+                    continue;
+                }
+                let linked = self.screens[j].dock_parent.is_some_and(|(p, _)| members.contains(&p))
+                    || members.iter().any(|&m| self.screens[m].dock_parent.is_some_and(|(p, _)| p == j));
+                if linked {
+                    members.push(j);
+                    changed = true;
+                }
+            }
+        }
+        members
+    }
+
+    /// Where a screen of width `w` sits when docked on `side` of `parent`.
+    fn dock_pose_for(parent: &ScreenPanel, side: i8, w: f32) -> xr::Posef {
+        let (pw, _) = parent.size_m();
+        offset_pose(&parent.pose, side as f32 * (pw / 2.0 + SCREEN_DOCK_GAP + w / 2.0), 0.0, 0.0)
+    }
+
+    /// Re-derive docked children's poses from their parents (a few passes so
+    /// chains converge). `skip`: screens being driven by a grab right now.
+    fn derive_docked_poses(&mut self, skip: &[usize]) {
+        for _ in 0..self.screens.len().max(1) {
+            for i in 0..self.screens.len() {
+                if skip.contains(&i) {
+                    continue;
+                }
+                if let Some((p, side)) = self.screens[i].dock_parent {
+                    if p == i || p >= self.screens.len() {
+                        self.screens[i].dock_parent = None;
+                        continue;
+                    }
+                    let w = self.screens[i].size_m().0;
+                    let pose = Self::dock_pose_for(&self.screens[p], side, w);
+                    self.screens[i].pose = pose;
+                    self.screens[i].placed = true;
+                }
+            }
+        }
+    }
+
+    /// Offset of a screen's centre along `root`'s right axis.
+    fn x_along(&self, root: usize, i: usize) -> f32 {
+        let r = &self.screens[root].pose;
+        let right = quat_rotate(qf(&r.orientation), [1.0, 0.0, 0.0]);
+        let p = self.screens[i].pose.position;
+        (p.x - r.position.x) * right[0] + (p.y - r.position.y) * right[1] + (p.z - r.position.z) * right[2]
+    }
+
+    /// Rebuild a group's dock chain with `root` in the middle: members are
+    /// sorted along the root's right axis and chained outwards on each side.
+    fn rebuild_chain(&mut self, root: usize, members: &[usize]) {
+        let mut xs: Vec<(usize, f32)> = members.iter().filter(|&&m| m != root).map(|&m| (m, self.x_along(root, m))).collect();
+        xs.sort_by(|a, b| a.1.total_cmp(&b.1));
+        self.screens[root].dock_parent = None;
+        let mut prev_right = root;
+        for &(m, x) in xs.iter().filter(|(_, x)| *x >= 0.0) {
+            let _ = x;
+            self.screens[m].dock_parent = Some((prev_right, 1));
+            prev_right = m;
+        }
+        let mut prev_left = root;
+        for &(m, x) in xs.iter().rev().filter(|(_, x)| *x < 0.0) {
+            let _ = x;
+            self.screens[m].dock_parent = Some((prev_left, -1));
+            prev_left = m;
+        }
+        self.derive_docked_poses(&[]);
+    }
+
+    /// The group's centre offset along the root's right axis (edges included).
+    fn group_center_x(&self, root: usize, members: &[usize]) -> f32 {
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for &m in members {
+            let x = self.x_along(root, m);
+            let w = self.screens[m].size_m().0;
+            lo = lo.min(x - w / 2.0);
+            hi = hi.max(x + w / 2.0);
+        }
+        if lo > hi {
+            0.0
+        } else {
+            (lo + hi) / 2.0
+        }
+    }
+
+    /// Try to dock free screen `s` next to any other shown screen it was
+    /// released close to (outermost on that side).
+    fn try_snap_screen(&mut self, s: usize) {
+        let own_group = self.group_of(s);
+        let w = self.screens[s].size_m().0;
+        let sp = self.screens[s].pose.position;
+        let mut best: Option<(usize, i8, f32, xr::Posef)> = None;
+        for t in 0..self.screens.len() {
+            if own_group.contains(&t) || !self.screens[t].shown || !self.screens[t].placed {
+                continue;
+            }
+            for side in [-1i8, 1] {
+                // Walk to the outermost screen on that side.
+                let mut outer = t;
+                loop {
+                    match (0..self.screens.len()).find(|&c| self.screens[c].dock_parent == Some((outer, side))) {
+                        Some(c) if c != s => outer = c,
+                        _ => break,
+                    }
+                }
+                let pose = Self::dock_pose_for(&self.screens[outer], side, w);
+                let d = dist2(&sp, &pose.position).sqrt();
+                if d < SCREEN_DOCK_SNAP && best.map_or(true, |b| d < b.2) {
+                    best = Some((outer, side, d, pose));
+                }
+            }
+        }
+        if let Some((outer, side, _, pose)) = best {
+            self.screens[s].dock_parent = Some((outer, side));
+            self.screens[s].pose = pose;
+            log::info!("desktop: {} docked {} of {}", self.screens[s].name, if side < 0 { "left" } else { "right" }, self.screens[outer].name);
+            self.derive_docked_poses(&[]);
+        }
+    }
+
+    /// Detach `s` from its group (its own docked children come along).
+    fn undock_screen(&mut self, s: usize) {
+        let members = self.group_of(s);
+        // s (and its subtree) leave; the rest re-chain around their old root.
+        let mut subtree = vec![s];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for j in 0..self.screens.len() {
+                if !subtree.contains(&j) && self.screens[j].dock_parent.is_some_and(|(p, _)| subtree.contains(&p)) {
+                    subtree.push(j);
+                    changed = true;
+                }
+            }
+        }
+        self.screens[s].dock_parent = None;
+        let rest: Vec<usize> = members.into_iter().filter(|m| !subtree.contains(m)).collect();
+        if let Some(&root) = rest.iter().find(|&&m| self.screens[m].dock_parent.is_none()).or(rest.first()) {
+            self.rebuild_chain(root, &rest);
+        }
+        log::info!("desktop: {} undocked", self.screens[s].name);
+    }
+
+    /// Double-B: hide every shown screen (remembering the arrangement), or
+    /// bring it back. One screen / one docked group comes back centred in view
+    /// like the menu; several undocked screens come back where they sat
+    /// relative to your head.
     pub fn toggle_all(&mut self, hmd: Option<&xr::Posef>, recenter: bool) -> ToggleAll {
         let shown: Vec<usize> = self.screens.iter().enumerate().filter(|(_, s)| s.shown).map(|(i, _)| i).collect();
         if !shown.is_empty() || self.keyboard.visible {
-            // Remember where things were relative to the head, for the way back.
             self.stash_rel.clear();
             self.stash_kb_rel = None;
+            self.stash_center = None;
+            self.stash_kb_attached = self.keyboard.attached.filter(|_| self.keyboard.visible);
             if let (Some(h), true) = (hmd, recenter) {
-                let inv = pose_invert(&Self::head_flat(h));
-                for &i in &shown {
-                    self.stash_rel.push((i, pose_compose(&inv, &self.screens[i].pose)));
+                // One group (or one screen)?
+                let first_group = shown.first().map(|&i| self.group_of(i)).unwrap_or_default();
+                let one_group = !shown.is_empty() && shown.iter().all(|i| first_group.contains(i));
+                if one_group {
+                    let root = shown.iter().copied().find(|&i| self.screens[i].dock_parent.is_none()).unwrap_or(shown[0]);
+                    let cx = self.group_center_x(root, &shown);
+                    let center = offset_pose(&self.screens[root].pose, cx, 0.0, 0.0);
+                    let dist = dist2(&center.position, &h.position).sqrt().max(0.3);
+                    self.stash_center = Some((root, cx, dist));
+                } else {
+                    let inv = pose_invert(h);
+                    for &i in &shown {
+                        self.stash_rel.push((i, pose_compose(&inv, &self.screens[i].pose)));
+                    }
                 }
                 if self.keyboard.visible && self.keyboard.attached.is_none() {
-                    self.stash_kb_rel = Some(pose_compose(&inv, &self.keyboard.pose));
+                    self.stash_kb_rel = Some(pose_compose(&pose_invert(h), &self.keyboard.pose));
                 }
             }
             for &i in &shown {
-                self.screens[i].hide(); // keeps `placed`: they come back where they were
+                self.screens[i].hide(); // keeps `placed` + docking
             }
-            // The keyboard goes with them (its dock is remembered for the way back).
             self.stash_keyboard = self.keyboard.visible;
             self.keyboard.visible = false;
             self.keyboard.grab = None;
@@ -270,30 +454,40 @@ impl DesktopViewer {
         if valid.is_empty() && !kb {
             return ToggleAll::Nothing;
         }
-        // Re-centre on the head unless this is an untouched loaded layout.
         let rel = std::mem::take(&mut self.stash_rel);
+        let center = self.stash_center.take();
         let kb_rel = self.stash_kb_rel.take();
+        let kb_attached = self.stash_kb_attached.take();
         let recentre_now = recenter && !self.layout_untouched;
         if let (Some(h), true) = (hmd, recentre_now) {
-            let head = Self::head_flat(h);
-            for (i, r) in &rel {
-                if let Some(s) = self.screens.get_mut(*i) {
-                    s.pose = pose_compose(&head, r);
+            if let Some((root, cx, dist)) = center {
+                // Menu logic: the group's centre lands in front of you.
+                let c = front_pose(h, dist, 0.0, 0.0, self.restore_tilt);
+                if root < self.screens.len() {
+                    self.screens[root].pose = offset_pose(&c, -cx, 0.0, 0.0);
+                    self.screens[root].placed = true;
+                }
+            } else {
+                for (i, r) in &rel {
+                    if let Some(s) = self.screens.get_mut(*i) {
+                        s.pose = pose_compose(h, r);
+                    }
                 }
             }
             if let Some(r) = kb_rel {
-                self.keyboard.pose = pose_compose(&head, &r);
+                self.keyboard.pose = pose_compose(h, &r);
             }
         }
         for &i in &valid {
             self.screens[i].show(&self.caps);
         }
+        self.derive_docked_poses(&[]);
         if kb {
             self.keyboard.visible = true;
             self.clipboard.set_active(true);
-            // Re-dock under the same screen (it kept `attached`), else stay put.
-            if let Some(i) = self.keyboard.attached {
-                self.dock_keyboard(Some(i));
+            match kb_attached {
+                Some(i) if self.screens.get(i).is_some_and(|s| s.shown) => self.dock_keyboard(Some(i)),
+                _ => self.keyboard.attached = None,
             }
         }
         ToggleAll::Shown(valid.len() + kb as usize)
@@ -343,6 +537,7 @@ impl DesktopViewer {
                 width_m: s.width_m,
                 curve: s.curve,
                 opacity: s.opacity,
+                docked_to: s.dock_parent.and_then(|(p, side)| self.screens.get(p).map(|ps| (ps.name.clone(), side))),
             })
             .collect();
         let kb = &self.keyboard;
@@ -391,6 +586,22 @@ impl DesktopViewer {
                 }
             }
         }
+        // Docking links (by name), then derive the children from their parents.
+        for s in &mut self.screens {
+            s.dock_parent = None;
+        }
+        for p in &layout.screens {
+            if let Some((pname, side)) = &p.docked_to {
+                let child = self.screens.iter().position(|s| s.name == p.name);
+                let parent = self.screens.iter().position(|s| &s.name == pname);
+                if let (Some(c), Some(pa)) = (child, parent) {
+                    if c != pa {
+                        self.screens[c].dock_parent = Some((pa, *side));
+                    }
+                }
+            }
+        }
+        self.derive_docked_poses(&[]);
         match &layout.keyboard {
             Some(k) => {
                 self.keyboard.visible = k.visible;
@@ -685,6 +896,9 @@ impl DesktopViewer {
             self.keyboard.grab = None;
             self.clipboard.set_active(false);
         }
+        if let Some(i) = self.keyboard.screen_toggle_request.take() {
+            self.toggle_bar(i);
+        }
         if let Some(i) = self.keyboard.layout_switch_request.take() {
             if i < self.keyboard.labels.layout_names.len() {
                 // Relabel regardless; KDE follows when it's the desktop.
@@ -770,6 +984,10 @@ impl DesktopViewer {
                 log::error!("desktop: {} upload: {e}", s.name);
             }
         }
+        // Docked screens follow their parents (unless a grab is driving the group).
+        let driven: Vec<usize> = self.grab_screen.into_iter().chain(self.grab_group.iter().map(|(m, _)| *m)).collect();
+        self.derive_docked_poses(&driven);
+        self.keyboard.screens = self.bar_items();
         // Keyboard: first placement, then follow its dock.
         if self.keyboard.visible && self.keyboard_place {
             self.keyboard_place = false;
@@ -856,39 +1074,61 @@ impl DesktopViewer {
         // Continue grabs first (the grabbed thing follows the hand). While
         // gripping: trigger + push/pull the hand resizes, trigger + stick ◀▶
         // curves, stick ▲▼ pushes the screen away/closer (WayVR's gestures).
-        for s in &mut self.screens {
-            if let Some((hand, mut offset)) = s.grab {
-                match hands.get(hand) {
-                    Some(h) if h.active && h.grip >= GRAB_RELEASE => {
-                        let (sx, sy) = h.scroll;
-                        if h.select {
-                            let d = hmd.map_or(0.0, |m| dist2(&h.aim.position, &m.position).sqrt());
-                            match s.resize_ref {
-                                None => s.resize_ref = Some((d, s.width_m)),
-                                Some((d0, w0)) => {
-                                    s.width_m = (w0 * (1.0 + (d - d0) * RESIZE_PER_M)).clamp(0.3, 4.0);
-                                    s.custom_size = true;
-                                }
-                            }
-                            if curved_ok && sx != 0.0 {
-                                s.curve = (s.curve + sx * CURVE_SPEED).clamp(0.0, 1.0);
-                            }
-                            // Position stays put while resizing; re-anchor for when
-                            // the trigger lets go.
-                            offset = pose_compose(&pose_invert(&h.aim), &s.pose);
-                        } else {
-                            s.resize_ref = None;
-                            if sy != 0.0 {
-                                // Hand-local -Z is forward along the aim.
-                                offset.position.z -= sy * PUSH_SPEED;
-                            }
-                            s.pose = pose_compose(&h.aim, &offset);
-                        }
-                        s.grab = Some((hand, offset));
+        if let Some(si) = self.grab_screen {
+            let grab = self.screens[si].grab;
+            match (grab, grab.and_then(|(hand, _)| hands.get(hand))) {
+                (Some((hand, mut offset)), Some(h)) if h.active && h.grip >= GRAB_RELEASE => {
+                    // B while gripping: detach this screen from its docked group.
+                    if h.precise && !self.precise_prev[hand] && !self.grab_group.is_empty() {
+                        self.undock_screen(si);
+                        self.grab_group.clear();
                     }
-                    _ => {
-                        s.grab = None;
+                    let (sx, sy) = h.scroll;
+                    let s = &mut self.screens[si];
+                    if h.select {
+                        let d = hmd.map_or(0.0, |m| dist2(&h.aim.position, &m.position).sqrt());
+                        match s.resize_ref {
+                            None => s.resize_ref = Some((d, s.width_m)),
+                            Some((d0, w0)) => {
+                                s.width_m = (w0 * (1.0 + (d - d0) * RESIZE_PER_M)).clamp(0.3, 4.0);
+                                s.custom_size = true;
+                            }
+                        }
+                        if curved_ok && sx != 0.0 {
+                            s.curve = (s.curve + sx * CURVE_SPEED).clamp(0.0, 1.0);
+                        }
+                        // Position stays put while resizing; re-anchor for when
+                        // the trigger lets go.
+                        offset = pose_compose(&pose_invert(&h.aim), &s.pose);
+                    } else {
                         s.resize_ref = None;
+                        if sy != 0.0 {
+                            // Hand-local -Z is forward along the aim.
+                            offset.position.z -= sy * PUSH_SPEED;
+                        }
+                        s.pose = pose_compose(&h.aim, &offset);
+                    }
+                    s.grab = Some((hand, offset));
+                    // The rest of a docked group rides along rigidly.
+                    let root_pose = self.screens[si].pose;
+                    for (m, rel) in self.grab_group.clone() {
+                        if let Some(ms) = self.screens.get_mut(m) {
+                            ms.pose = pose_compose(&root_pose, &rel);
+                        }
+                    }
+                }
+                _ => {
+                    // Released: a group re-chains around this screen; a lone
+                    // screen may snap onto a neighbour's side.
+                    self.screens[si].grab = None;
+                    self.screens[si].resize_ref = None;
+                    let group: Vec<usize> = std::iter::once(si).chain(self.grab_group.iter().map(|(m, _)| *m)).collect();
+                    self.grab_group.clear();
+                    self.grab_screen = None;
+                    if group.len() > 1 {
+                        self.rebuild_chain(si, &group);
+                    } else {
+                        self.try_snap_screen(si);
                     }
                 }
             }
@@ -970,7 +1210,17 @@ impl DesktopViewer {
                 self.layout_untouched = false;
                 let aim = hands[hi].aim;
                 match target {
-                    Target::Screen(si) => self.screens[si].start_grab(hi, &aim),
+                    Target::Screen(si) => {
+                        self.screens[si].start_grab(hi, &aim);
+                        self.grab_screen = Some(si);
+                        let root = self.screens[si].pose;
+                        self.grab_group = self
+                            .group_of(si)
+                            .into_iter()
+                            .filter(|&m| m != si)
+                            .map(|m| (m, pose_compose(&pose_invert(&root), &self.screens[m].pose)))
+                            .collect();
+                    }
                     Target::Keyboard => {
                         self.keyboard.grab = Some((hi, pose_compose(&pose_invert(&aim), &self.keyboard.pose)));
                         self.keyboard.attached = None;

@@ -22,6 +22,9 @@ pub struct ScreenPlacement {
     pub curve: f32,
     #[serde(default = "one")]
     pub opacity: f32,
+    /// Docked to another screen: (its output name, side -1 left / +1 right).
+    #[serde(default)]
+    pub docked_to: Option<(String, i8)>,
 }
 
 fn one() -> f32 {

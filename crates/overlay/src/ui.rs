@@ -92,6 +92,7 @@ pub struct LibState {
     pub restore_layout: bool,
     pub gaze_pause: bool,
     pub recenter_on_toggle: bool,
+    pub screen_restore_tilt: bool,
     pub keyboard_scale: f32,
     pub capture_max_fps: u32,
     pub capture_max_height: u32,
@@ -281,6 +282,7 @@ impl LibState {
             restore_layout: true,
             gaze_pause: true,
             recenter_on_toggle: true,
+            screen_restore_tilt: false,
             keyboard_scale: 1.0,
             capture_max_fps: 90,
             capture_max_height: 0,
@@ -2642,11 +2644,17 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
             setting_row(
                 ui,
                 "Double-B restore follows your head",
-                Some("Screens come back where they were relative to you (turn 90°, they turn too) — except an untouched loaded layout"),
+                Some("One screen or a docked group comes back centred in view; several loose screens keep their place around you — except an untouched loaded layout"),
                 |ui| {
                     t |= seg_toggle(ui, &mut st.recenter_on_toggle);
                 },
             );
+            divider(ui);
+            setting_row(ui, "Tilt restored screens to match headset angle", Some("Off = upright, like the menu's own toggle"), |ui| {
+                t |= seg_toggle(ui, &mut st.screen_restore_tilt);
+            });
+            divider(ui);
+            setting_row(ui, "Docking", Some("Drop a screen next to another to dock them edge-to-edge (they then move as one) · B while gripping detaches it"), |_| {});
             divider(ui);
             let mut fps = st.capture_max_fps as f32;
             setting_row(ui, "Capture frame-rate cap", Some("Frames above the headset rate are never seen; capping saves compositor GPU work (0 = unlimited)"), |ui| {

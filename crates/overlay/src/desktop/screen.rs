@@ -57,6 +57,9 @@ pub struct ScreenPanel {
     staging: Option<Staging>,
     /// (hand index, controller→panel offset) while gripped.
     pub grab: Option<(usize, xr::Posef)>,
+    /// Docked edge-to-edge to another screen: (parent index, side: -1 left / +1 right).
+    /// The pose is then derived from the parent every frame.
+    pub dock_parent: Option<(usize, i8)>,
     pub frames: u64,
     pub last_error: Option<String>,
 }
@@ -90,6 +93,7 @@ impl ScreenPanel {
             frame_px: (0, 0),
             staging: None,
             grab: None,
+            dock_parent: None,
             frames: 0,
             last_error: None,
         }
