@@ -526,9 +526,20 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
             if st.batteries.is_empty() {
                 ui.label(egui::RichText::new("no batteries").size(12.0).color(theme::ON_SURFACE_VAR));
             }
-            for b in &st.batteries {
+            // Controllers individually; every other kind collapsed to one chip
+            // showing its lowest charge (gloves, trackers…) so a full-body rig
+            // doesn't run off the wrist.
+            use crate::monado::BatteryKind;
+            for b in st.batteries.iter().filter(|b| b.kind == BatteryKind::Controller) {
                 battery_widget(ui, b);
                 ui.add_space(4.0);
+            }
+            for kind in [BatteryKind::Glove, BatteryKind::Tracker, BatteryKind::Other] {
+                let group: Vec<&crate::monado::BatteryInfo> = st.batteries.iter().filter(|b| b.kind == kind).collect();
+                if !group.is_empty() {
+                    battery_group_widget(ui, kind, &group);
+                    ui.add_space(4.0);
+                }
             }
             // A running/paused timer: small chip with the time left; tap to open it.
             if st.timer_running || st.timer_paused {
@@ -825,6 +836,49 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
             });
         });
     });
+}
+
+/// One chip for a whole kind of device: the lowest charge in the group (tinted
+/// by it), "×N" when several, and every member's charge on hover.
+fn battery_group_widget(ui: &mut egui::Ui, kind: crate::monado::BatteryKind, group: &[&crate::monado::BatteryInfo]) {
+    use crate::monado::BatteryKind;
+    let Some(lowest) = group.iter().filter(|b| !b.charging).min_by(|a, b| a.charge.total_cmp(&b.charge)).or(group.first()) else {
+        return;
+    };
+    let pct = (lowest.charge * 100.0).round() as i32;
+    let bat = if lowest.charging {
+        icon::BATTERY_CHARGING
+    } else if lowest.charge > 0.66 {
+        icon::BATTERY_FULL
+    } else if lowest.charge > 0.33 {
+        icon::BATTERY_MEDIUM
+    } else if lowest.charge > 0.1 {
+        icon::BATTERY_LOW
+    } else {
+        icon::BATTERY_WARNING
+    };
+    let color = if lowest.charge > 0.33 {
+        RUNNING_GREEN
+    } else if lowest.charge > 0.15 {
+        FAV_GOLD
+    } else {
+        STOP_RED
+    };
+    let (dev, name) = match kind {
+        BatteryKind::Glove => (icon::HAND, "Gloves"),
+        BatteryKind::Tracker => (icon::CIRCLE, "Trackers"),
+        BatteryKind::Controller => (icon::GAME_CONTROLLER, "Controllers"),
+        BatteryKind::Other => (icon::CIRCLE, "Devices"),
+    };
+    let count = if group.len() > 1 { format!(" ×{}", group.len()) } else { String::new() };
+    let tip = group
+        .iter()
+        .enumerate()
+        .map(|(i, b)| format!("{name} {}: {}%{}", i + 1, (b.charge * 100.0).round() as i32, if b.charging { " (charging)" } else { "" }))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ui.label(egui::RichText::new(format!("{dev} {bat} {pct}%{count}")).size(14.0).color(color))
+        .on_hover_text(format!("Lowest of {}:\n{tip}", name.to_lowercase()));
 }
 
 fn battery_widget(ui: &mut egui::Ui, b: &crate::monado::BatteryInfo) {
