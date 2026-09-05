@@ -64,6 +64,10 @@ marked **done** are on the branch; everything else is a proposal.
   and photo settings (QR, crop, cleanup, skip-wrist). Translate/Share come from
   `crates/overlay/{translate,picsur}.env` at build time (gitignored).
 
+- **Notifications** (WayVR's role): desktop notifications via a D-Bus monitor
+  and XSOverlay-protocol messages on udp/42069 (VRCX etc.), queued as toasts
+  with app icons. Settings → Notifications; `--notify-selftest` to check.
+
 ## Proposed next
 
 (empty — add what you'd like here)
