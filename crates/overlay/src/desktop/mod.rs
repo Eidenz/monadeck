@@ -134,6 +134,10 @@ pub struct DesktopViewer {
     keyboard_place: bool,
     /// A layout to apply once the portal has produced the screens.
     pending_layout: Option<DesktopLayout>,
+    /// LOCAL space's pose in STAGE space this frame. LOCAL is re-anchored at the
+    /// head on every session start, so layouts are stored in STAGE (floor +
+    /// tracking origin) and converted through this.
+    local_in_stage: Option<xr::Posef>,
 }
 
 impl DesktopViewer {
@@ -187,6 +191,26 @@ impl DesktopViewer {
             width_m: screen::DEFAULT_WIDTH_M,
             keyboard_place: false,
             pending_layout: None,
+            local_in_stage: None,
+        }
+    }
+
+    /// Per-frame: where LOCAL sits in STAGE (None if the runtime has no STAGE).
+    pub fn set_local_in_stage(&mut self, p: Option<xr::Posef>) {
+        self.local_in_stage = p;
+    }
+
+    fn to_stage(&self, p: &xr::Posef) -> xr::Posef {
+        match &self.local_in_stage {
+            Some(l) => pose_compose(l, p),
+            None => *p,
+        }
+    }
+
+    fn from_stage(&self, p: &xr::Posef) -> xr::Posef {
+        match &self.local_in_stage {
+            Some(l) => pose_compose(&pose_invert(l), p),
+            None => *p,
         }
     }
 
@@ -195,13 +219,18 @@ impl DesktopViewer {
     /// The current arrangement: every approved screen (shown or not), placed
     /// ones with their pose/size/curve, plus the keyboard.
     pub fn snapshot(&self, name: String) -> DesktopLayout {
+        if self.local_in_stage.is_none() {
+            log::warn!("desktop: no STAGE space; layout saved in LOCAL space (may drift between sessions)");
+        }
+        // Only screens that have a real pose; unplaced ones would save the origin.
         let screens = self
             .screens
             .iter()
+            .filter(|s| s.placed)
             .map(|s| ScreenPlacement {
                 name: s.name.clone(),
-                shown: s.shown && s.placed,
-                pose: pose_to_arr(&s.pose),
+                shown: s.shown,
+                pose: pose_to_arr(&self.to_stage(&s.pose)),
                 width_m: s.width_m,
                 curve: s.curve,
             })
@@ -210,7 +239,7 @@ impl DesktopViewer {
         let keyboard = kb.placed.then(|| KeyboardPlacement {
             visible: kb.visible,
             attached: kb.attached.and_then(|i| self.screens.get(i)).map(|s| s.name.clone()),
-            pose: pose_to_arr(&kb.pose),
+            pose: pose_to_arr(&self.to_stage(&kb.pose)),
         });
         DesktopLayout { name, screens, keyboard }
     }
@@ -218,17 +247,21 @@ impl DesktopViewer {
     /// Apply an arrangement. Screens the layout doesn't mention are hidden.
     /// Before the portal has answered, it's kept and applied when it does.
     pub fn apply(&mut self, layout: &DesktopLayout) {
-        if self.screens.is_empty() {
+        if self.screens.is_empty() || self.local_in_stage.is_none() {
+            // Wait for the streams and for the STAGE relation (poll applies it).
             self.pending_layout = Some(layout.clone());
             if matches!(self.portal, PortalState::Idle | PortalState::Failed(_)) {
                 self.start_portal();
             }
             return;
         }
+        let from_stage = |a: &[f32; 7], me: &Self| me.from_stage(&arr_to_pose(a));
+        let placements: Vec<(String, xr::Posef)> =
+            layout.screens.iter().map(|p| (p.name.clone(), from_stage(&p.pose, self))).collect();
         for s in &mut self.screens {
             match layout.screens.iter().find(|p| p.name == s.name) {
                 Some(p) => {
-                    s.pose = arr_to_pose(&p.pose);
+                    s.pose = placements.iter().find(|(n, _)| n == &s.name).map(|(_, q)| *q).unwrap_or(s.pose);
                     s.width_m = p.width_m.clamp(0.3, 4.0);
                     s.curve = p.curve.clamp(0.0, 1.0);
                     s.placed = true;
@@ -249,7 +282,7 @@ impl DesktopViewer {
             Some(k) => {
                 self.keyboard.visible = k.visible;
                 self.keyboard.grab = None;
-                self.keyboard.pose = arr_to_pose(&k.pose);
+                self.keyboard.pose = self.from_stage(&arr_to_pose(&k.pose));
                 self.keyboard.placed = true;
                 self.keyboard_place = false;
                 let target = k.attached.as_ref().and_then(|n| self.screens.iter().position(|s| &s.name == n));
@@ -555,9 +588,6 @@ impl DesktopViewer {
                     }
                     self.build_screens(&cast);
                     self.portal = PortalState::Ready(cast);
-                    if let Some(l) = self.pending_layout.take() {
-                        self.apply(&l);
-                    }
                 }
                 Ok(Err(e)) => {
                     log::error!("desktop: {e}");
@@ -567,6 +597,13 @@ impl DesktopViewer {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.portal = PortalState::Failed("portal thread died".into());
                 }
+            }
+        }
+        // A queued layout applies once the screens exist and STAGE is known.
+        if self.pending_layout.is_some() && !self.screens.is_empty() && self.local_in_stage.is_some() {
+            if let Some(l) = self.pending_layout.take() {
+                log::info!("desktop: applying layout '{}'", l.name);
+                self.apply(&l);
             }
         }
         for s in &mut self.screens {

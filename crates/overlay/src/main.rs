@@ -305,6 +305,12 @@ fn run() -> Result<()> {
         xr::Session::<xr::Vulkan>::from_raw(xr_instance.clone(), raw, Box::new(()))
     };
     let space = session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
+    // STAGE (floor, tracking origin) is stable across sessions; LOCAL is
+    // re-anchored at the head each start. Desktop layouts are stored in STAGE.
+    let stage_space = session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY).ok();
+    if stage_space.is_none() {
+        log::warn!("no STAGE reference space; desktop layouts will use LOCAL");
+    }
     let view_space = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
 
     // --- Format + render pass + allocator -----------------------------------
@@ -466,6 +472,11 @@ fn run() -> Result<()> {
     // Named screen arrangements; the last used one is re-applied when the
     // screens come up (if enabled) so nothing has to be re-placed by hand.
     let mut layouts = monadeck_core::desktop_layouts::load();
+    // With a saved approval the portal answers silently — ask right away so the
+    // bar fills in without a click (and layouts can restore).
+    if screencast_token.is_some() {
+        desktop.setup_screens();
+    }
     if ov_cfg.restore_layout {
         if let Some(l) = layouts.last_used.clone().and_then(|n| layouts.find(&n).cloned()) {
             log::info!("desktop: will restore layout '{}'", l.name);
@@ -939,6 +950,7 @@ fn run() -> Result<()> {
                 });
             }
         }
+        desktop.set_local_in_stage(stage_space.as_ref().and_then(|st| locate_pose(&space, st, time)));
         desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
         if let Some(tok) = desktop.take_token_change() {
             screencast_token = tok;
