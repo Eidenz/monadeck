@@ -413,9 +413,10 @@ fn run() -> Result<()> {
         &session, &device, allocator.clone(), render_pass, format, srgb,
         WATCH_PX, (WATCH_W, WATCH_W * WATCH_PX.1 as f32 / WATCH_PX.0 as f32), anchor,
     )?;
+    // Default wrist spot = the user's tuned position (relative to the left aim pose).
     let watch_default = xr::Posef {
-        position: xr::Vector3f { x: -0.03, y: -0.01, z: 0.125 },
-        orientation: xr::Quaternionf { x: -0.707_106_6, y: 0.000_796_361_8, z: 0.707_106_6, w: 0.0 },
+        position: xr::Vector3f { x: -0.041_881_38, y: -0.054_545_76, z: 0.110_306_92 },
+        orientation: xr::Quaternionf { x: -0.703_661_44, y: -0.053_388_834, z: 0.691_710_65, w: -0.153_453_71 },
     };
     // (right-hand grab offset, last gripped pose) while the watch is being repositioned.
     let mut watch_grab: Option<(xr::Posef, xr::Posef)> = None;
@@ -616,6 +617,9 @@ fn run() -> Result<()> {
     let mut click_prev = false; // haptic click edge
     // Laser fade over mirrored screens: (screen index, when the ray entered it).
     let mut screen_laser_since: Option<(usize, Instant)> = None;
+    // Double-tap A on the LEFT controller toggles all screens.
+    let mut left_a_prev = false;
+    let mut left_a_last: Option<Instant> = None;
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     // Re-scan to refresh last-played ordering when a game starts/stops.
     let mut running_app_prev: Option<String> = None;
@@ -1069,6 +1073,36 @@ fn run() -> Result<()> {
                 summon_at = Some(Instant::now());
             }
         }
+        // Double-A (left): hide every shown screen / bring the same set back.
+        // Ignored while that hand is pointing at a screen (A = right-click there).
+        let left_a = hands.first().is_some_and(|h| h.active && h.secondary);
+        if left_a && !left_a_prev && desktop.pointing_hand() != Some(0) {
+            let double = left_a_last.is_some_and(|t| t.elapsed().as_millis() < 450);
+            if double {
+                left_a_last = None;
+                match desktop.toggle_all() {
+                    desktop::ToggleAll::Hidden(n) => {
+                        log::info!("desktop: double-A hid {n} screen(s)");
+                        audio.tab();
+                    }
+                    desktop::ToggleAll::Shown(n) => {
+                        log::info!("desktop: double-A restored {n} screen(s)");
+                        audio.tab();
+                    }
+                    desktop::ToggleAll::Nothing => {
+                        if let Some(h) = hmd {
+                            let mut t = make_toast("No screen selected", "Show screens from the watch or the bottom bar", ui::ToastKind::Info, &h);
+                            t.until = Instant::now() + std::time::Duration::from_millis(1500);
+                            toast = Some(t);
+                        }
+                    }
+                }
+            } else {
+                left_a_last = Some(Instant::now());
+            }
+        }
+        left_a_prev = left_a;
+
         // Watch buttons must work with the dashboard dismissed, so these
         // requests drain here rather than in the visible-only path below.
         if st.keyboard_toggle_request {
@@ -1089,6 +1123,38 @@ fn run() -> Result<()> {
         if st.sound_select {
             st.sound_select = false;
             audio.select();
+        }
+        // Desktop layouts: create / overwrite / apply / delete.
+        let mut layouts_dirty = false;
+        if let Some(name) = st.layout_create.take() {
+            layouts.upsert(desktop.snapshot(name.clone()));
+            layouts.last_used = Some(name);
+            layouts_dirty = true;
+        }
+        if let Some(i) = st.layout_overwrite.take() {
+            if let Some(name) = layouts.layouts.get(i).map(|l| l.name.clone()) {
+                layouts.upsert(desktop.snapshot(name.clone()));
+                layouts.last_used = Some(name);
+                layouts_dirty = true;
+            }
+        }
+        if let Some(i) = st.layout_apply.take() {
+            if let Some(l) = layouts.layouts.get(i).cloned() {
+                desktop.apply(&l);
+                layouts.last_used = Some(l.name);
+                layouts_dirty = true;
+            }
+        }
+        if let Some(i) = st.layout_delete.take() {
+            layouts.remove(i);
+            layouts_dirty = true;
+        }
+        if let Some((i, name)) = st.layout_renamed.take() {
+            layouts.rename(i, name);
+            layouts_dirty = true;
+        }
+        if let Some((i, d)) = st.layout_move.take() {
+            layouts_dirty |= layouts.move_by(i, d);
         }
         if st.layout_cycle_request {
             st.layout_cycle_request = false;
@@ -1706,38 +1772,6 @@ fn run() -> Result<()> {
             if desktop.move_order(i, d) {
                 overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset))).save();
             }
-        }
-        // Desktop layouts: create / overwrite / apply / delete.
-        let mut layouts_dirty = false;
-        if let Some(name) = st.layout_create.take() {
-            layouts.upsert(desktop.snapshot(name.clone()));
-            layouts.last_used = Some(name);
-            layouts_dirty = true;
-        }
-        if let Some(i) = st.layout_overwrite.take() {
-            if let Some(name) = layouts.layouts.get(i).map(|l| l.name.clone()) {
-                layouts.upsert(desktop.snapshot(name.clone()));
-                layouts.last_used = Some(name);
-                layouts_dirty = true;
-            }
-        }
-        if let Some(i) = st.layout_apply.take() {
-            if let Some(l) = layouts.layouts.get(i).cloned() {
-                desktop.apply(&l);
-                layouts.last_used = Some(l.name);
-                layouts_dirty = true;
-            }
-        }
-        if let Some(i) = st.layout_delete.take() {
-            layouts.remove(i);
-            layouts_dirty = true;
-        }
-        if let Some((i, name)) = st.layout_renamed.take() {
-            layouts.rename(i, name);
-            layouts_dirty = true;
-        }
-        if let Some((i, d)) = st.layout_move.take() {
-            layouts_dirty |= layouts.move_by(i, d);
         }
         if let Some((i, o)) = st.desktop_opacity_request.take() {
             desktop.set_screen_opacity(i, o);

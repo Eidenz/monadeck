@@ -80,6 +80,8 @@ pub struct LibState {
     pub watch_times: Vec<(String, String)>, // (label, HH:MM)
     pub watch_menu_request: bool,
     pub layout_cycle_request: bool,
+    /// The watch's layout picker is open (replaces the clock area).
+    pub watch_layout_menu: bool,
     /// Running game's client (id, frozen) for the watch's freeze button.
     pub watch_freeze_client: Option<(u32, bool)>,
     pub recenter_request: bool,
@@ -228,6 +230,7 @@ impl LibState {
             watch_times: Vec::new(),
             watch_menu_request: false,
             layout_cycle_request: false,
+            watch_layout_menu: false,
             watch_freeze_client: None,
             recenter_request: false,
             recenter_playspace_request: false,
@@ -457,26 +460,58 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 }
             });
         });
-        // Clock + zones | quick buttons.
+        // Clock + zones (or the layout picker) | quick buttons — each in its own card.
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(220.0);
-                ui.label(egui::RichText::new(&st.clock).size(40.0).strong().color(egui::Color32::WHITE));
-                ui.label(egui::RichText::new(&st.watch_date).size(14.0).color(theme::ON_SURFACE_VAR));
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    for (label, time) in &st.watch_times {
-                        ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(label).size(11.0).color(theme::ON_SURFACE_VAR));
-                            ui.label(egui::RichText::new(time).size(20.0).strong().color(theme::PRIMARY));
+            watch_card(ui, |ui| {
+                ui.set_width(214.0);
+                ui.set_min_height(122.0);
+                if st.watch_layout_menu {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{}  Layouts", icon::SQUARES_FOUR)).size(14.0).strong().color(egui::Color32::WHITE));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(egui::RichText::new(icon::X).size(13.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
+                                st.watch_layout_menu = false;
+                            }
                         });
-                        ui.add_space(10.0);
+                    });
+                    let mut apply = None;
+                    egui::ScrollArea::vertical().max_height(92.0).auto_shrink([false, true]).show(ui, |ui| {
+                        for (i, (name, _)) in st.layouts.iter().enumerate() {
+                            let active = st.layout_active.as_deref() == Some(name.as_str());
+                            let fg = if active { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                            let b = egui::Button::new(egui::RichText::new(name).size(14.0).color(fg))
+                                .fill(if active { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                                .min_size(egui::vec2(ui.available_width(), 28.0));
+                            if ui.add(b).clicked() {
+                                apply = Some(i);
+                            }
+                        }
+                        if st.layouts.is_empty() {
+                            ui.label(egui::RichText::new("No layouts saved yet").size(12.0).color(theme::ON_SURFACE_VAR));
+                        }
+                    });
+                    if let Some(i) = apply {
+                        st.layout_apply = Some(i);
+                        st.watch_layout_menu = false;
+                        st.sound_tab = true;
                     }
-                });
+                } else {
+                    ui.label(egui::RichText::new(&st.clock).size(40.0).strong().color(egui::Color32::WHITE));
+                    ui.label(egui::RichText::new(&st.watch_date).size(14.0).color(theme::ON_SURFACE_VAR));
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        for (label, time) in &st.watch_times {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(label).size(11.0).color(theme::ON_SURFACE_VAR));
+                                ui.label(egui::RichText::new(time).size(20.0).strong().color(theme::PRIMARY));
+                            });
+                            ui.add_space(10.0);
+                        }
+                    });
+                }
             });
-            ui.add_space(6.0);
-            ui.vertical(|ui| {
-                let b = 58.0;
+            watch_card(ui, |ui| {
+                let b = 56.0;
                 let quick = |ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str| -> bool {
                     let fg = if on { egui::Color32::BLACK } else { theme::ON_SURFACE };
                     let btn = egui::Button::new(egui::RichText::new(glyph).size(24.0).color(fg))
@@ -495,9 +530,8 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     }
                 });
                 ui.horizontal(|ui| {
-                    let has_layouts = !st.layouts.is_empty();
-                    if quick(ui, icon::SQUARES_FOUR, false, "Next screen layout") && has_layouts {
-                        st.layout_cycle_request = true;
+                    if quick(ui, icon::SQUARES_FOUR, st.watch_layout_menu, "Screen layouts") {
+                        st.watch_layout_menu = !st.watch_layout_menu;
                         st.sound_tab = true;
                     }
                     let (frozen, enabled) = match st.watch_freeze_client {
@@ -515,33 +549,52 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 });
             });
         });
-        ui.add_space(2.0);
-        // Menu + screens (fixed numbering, same as the bottom bar).
-        ui.horizontal(|ui| {
-            let menu = egui::Button::new(egui::RichText::new(icon::LIST).size(22.0).color(theme::ON_SURFACE))
-                .fill(theme::SURFACE_CONTAINER_HIGH)
-                .min_size(egui::vec2(58.0, 44.0));
-            if ui.add(menu).on_hover_text("Monadeck menu").clicked() {
-                st.watch_menu_request = true;
-                st.sound_tab = true;
-            }
-            ui.add_space(4.0);
-            let mut toggle = None;
-            for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
-                let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
-                let btn = egui::Button::new(egui::RichText::new(format!("{} {}", icon::MONITOR, i + 1)).size(14.0).color(fg))
-                    .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                    .min_size(egui::vec2(58.0, 44.0));
-                if ui.add(btn).on_hover_text(name).clicked() {
-                    toggle = Some(i);
+        // Menu + screens (fixed numbering, same as the bottom bar), in a card.
+        watch_card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let menu = egui::Button::new(egui::RichText::new(icon::LIST).size(22.0).color(theme::ON_SURFACE))
+                    .fill(theme::SURFACE_CONTAINER_HIGH)
+                    .min_size(egui::vec2(56.0, 42.0));
+                if ui.add(menu).on_hover_text("Monadeck menu").clicked() {
+                    st.watch_menu_request = true;
+                    st.sound_tab = true;
                 }
-            }
-            if let Some(i) = toggle {
-                st.desktop_bar_toggle = Some(i);
-                st.sound_tab = true;
-            }
+                ui.add_space(6.0);
+                // A thin separator between the menu and the screens.
+                let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 30.0), egui::Sense::hover());
+                ui.painter().rect_filled(r, 0.0, egui::Color32::from_white_alpha(28));
+                ui.add_space(6.0);
+                let mut toggle = None;
+                for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
+                    let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                    let btn = egui::Button::new(egui::RichText::new(format!("{} {}", icon::MONITOR, i + 1)).size(14.0).color(fg))
+                        .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                        .min_size(egui::vec2(56.0, 42.0));
+                    if ui.add(btn).on_hover_text(name).clicked() {
+                        toggle = Some(i);
+                    }
+                }
+                if st.desktop_bar.is_empty() {
+                    ui.label(egui::RichText::new("no screens approved").size(12.0).color(theme::ON_SURFACE_VAR));
+                }
+                if let Some(i) = toggle {
+                    st.desktop_bar_toggle = Some(i);
+                    st.sound_tab = true;
+                }
+            });
         });
     });
+}
+
+/// A subtle inset card used to group the watch's areas.
+fn watch_card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::default()
+        .fill(egui::Color32::from_rgb(22, 28, 36))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(16)))
+        .corner_radius(12)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, contents);
 }
 
 /// The bottom floating bar (its own layer): recenter · active-game splash toggle ·

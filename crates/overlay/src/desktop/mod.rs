@@ -78,6 +78,12 @@ pub struct ScreenRow {
     pub opacity: f32,
 }
 
+pub enum ToggleAll {
+    Hidden(usize),
+    Shown(usize),
+    Nothing,
+}
+
 /// Live readout while a screen is gripped (size · distance · curve).
 pub struct GestureInfo {
     pub title: String,
@@ -147,6 +153,8 @@ pub struct DesktopViewer {
     keyboard_place: bool,
     /// A layout to apply once the portal has produced the screens.
     pending_layout: Option<DesktopLayout>,
+    /// Screens hidden by "toggle all" (double-A), to bring back the same set.
+    stash: Vec<usize>,
     /// LOCAL space's pose in STAGE space this frame. LOCAL is re-anchored at the
     /// head on every session start, so layouts are stored in STAGE (floor +
     /// tracking origin) and converted through this.
@@ -206,7 +214,38 @@ impl DesktopViewer {
             keyboard_place: false,
             pending_layout: None,
             local_in_stage: None,
+            stash: Vec::new(),
         }
+    }
+
+    /// Double-A: hide every shown screen (remembering the set), or bring that
+    /// set back. Returns what happened for feedback.
+    pub fn toggle_all(&mut self) -> ToggleAll {
+        let shown: Vec<usize> = self.screens.iter().enumerate().filter(|(_, s)| s.shown).map(|(i, _)| i).collect();
+        if !shown.is_empty() {
+            for &i in &shown {
+                self.screens[i].hide(); // keeps `placed`: they come back where they were
+                if self.keyboard.attached == Some(i) {
+                    self.keyboard.attached = None;
+                }
+            }
+            self.stash = shown;
+            return ToggleAll::Hidden(self.stash.len());
+        }
+        let stash = std::mem::take(&mut self.stash);
+        let valid: Vec<usize> = stash.into_iter().filter(|&i| i < self.screens.len()).collect();
+        if valid.is_empty() {
+            return ToggleAll::Nothing;
+        }
+        for &i in &valid {
+            self.screens[i].show(&self.caps);
+        }
+        ToggleAll::Shown(valid.len())
+    }
+
+    /// Which hand the laser is on a screen/keyboard with this frame.
+    pub fn pointing_hand(&self) -> Option<usize> {
+        self.pointing.map(|(_, h)| h)
     }
 
     /// Per-frame: where LOCAL sits in STAGE (None if the runtime has no STAGE).
