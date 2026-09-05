@@ -1150,6 +1150,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "xkbcommon",
+ "zbus",
 ]
 
 [[package]]

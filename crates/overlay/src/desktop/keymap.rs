@@ -12,15 +12,26 @@ use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use xkbcommon::xkb;
 
-/// Labels per evdev keycode: `[base, shift, altgr]`.
+/// Labels per evdev keycode `[base, shift, altgr]`, for every configured
+/// layout (xkb group), plus which one is active.
 pub struct KeyLabels {
-    pub layout_name: String,
-    pub labels: HashMap<u16, [String; 3]>,
+    pub layout_names: Vec<String>,
+    pub per_layout: Vec<HashMap<u16, [String; 3]>>,
+    pub current: usize,
+}
+
+impl KeyLabels {
+    pub fn current(&self) -> &HashMap<u16, [String; 3]> {
+        static EMPTY: std::sync::OnceLock<HashMap<u16, [String; 3]>> = std::sync::OnceLock::new();
+        self.per_layout.get(self.current).unwrap_or_else(|| EMPTY.get_or_init(HashMap::new))
+    }
+
+    pub fn layout_name(&self) -> String {
+        self.layout_names.get(self.current).cloned().unwrap_or_default()
+    }
 }
 
 const EVDEV_OFFSET: u32 = 8;
-const KEY_LEFTSHIFT: u32 = 42;
-const KEY_RIGHTALT: u32 = 100;
 
 /// Evdev codes we want labels for (printable/main-block keys).
 const LABELLED: &[u16] = &[
@@ -39,22 +50,53 @@ pub fn load() -> KeyLabels {
             xkb::Keymap::new_from_names(&ctx, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
         });
     let Some(keymap) = keymap else {
-        return KeyLabels { layout_name: "?".into(), labels: HashMap::new() };
+        return KeyLabels { layout_names: vec!["?".into()], per_layout: vec![HashMap::new()], current: 0 };
     };
-    let layout_name = keymap.layout_get_name(0).to_string();
-    let base = xkb::State::new(&keymap);
-    let mut shift = xkb::State::new(&keymap);
-    shift.update_key(xkb::Keycode::new(KEY_LEFTSHIFT + EVDEV_OFFSET), xkb::KeyDirection::Down);
-    let mut altgr = xkb::State::new(&keymap);
-    altgr.update_key(xkb::Keycode::new(KEY_RIGHTALT + EVDEV_OFFSET), xkb::KeyDirection::Down);
-    let mut labels = HashMap::new();
-    for &code in LABELLED {
-        let kc = xkb::Keycode::new(code as u32 + EVDEV_OFFSET);
-        let l = [base.key_get_utf8(kc), shift.key_get_utf8(kc), altgr.key_get_utf8(kc)];
-        labels.insert(code, l.map(|s| s.chars().filter(|c| !c.is_control()).collect()));
+    let shift_mask = 1u32 << keymap.mod_get_index(xkb::MOD_NAME_SHIFT);
+    let altgr_mask = 1u32 << keymap.mod_get_index("Mod5");
+    let mut layout_names = Vec::new();
+    let mut per_layout = Vec::new();
+    for layout in 0..keymap.num_layouts().max(1) {
+        layout_names.push(keymap.layout_get_name(layout).to_string());
+        let mut labels = HashMap::new();
+        let mut states = [xkb::State::new(&keymap), xkb::State::new(&keymap), xkb::State::new(&keymap)];
+        states[0].update_mask(0, 0, 0, 0, 0, layout);
+        states[1].update_mask(shift_mask, 0, 0, 0, 0, layout);
+        states[2].update_mask(altgr_mask, 0, 0, 0, 0, layout);
+        for &code in LABELLED {
+            let kc = xkb::Keycode::new(code as u32 + EVDEV_OFFSET);
+            let l = [states[0].key_get_utf8(kc), states[1].key_get_utf8(kc), states[2].key_get_utf8(kc)];
+            labels.insert(code, l.map(|s| s.chars().filter(|c| !c.is_control()).collect()));
+        }
+        per_layout.push(labels);
     }
-    log::info!("desktop: keyboard layout '{layout_name}' ({} labelled keys)", labels.len());
-    KeyLabels { layout_name, labels }
+    let current = kde_current_layout().unwrap_or(0).min(per_layout.len().saturating_sub(1));
+    log::info!("desktop: keyboard layouts {layout_names:?}, active #{current}");
+    KeyLabels { layout_names, per_layout, current }
+}
+
+const KDE_DEST: &str = "org.kde.keyboard";
+const KDE_PATH: &str = "/Layouts";
+const KDE_IFACE: &str = "org.kde.KeyboardLayouts";
+
+/// Active layout index from KDE (org.kde.keyboard), if that's the desktop.
+pub fn kde_current_layout() -> Option<usize> {
+    let conn = zbus::blocking::Connection::session().ok()?;
+    let reply = conn.call_method(Some(KDE_DEST), KDE_PATH, Some(KDE_IFACE), "getLayout", &()).ok()?;
+    let idx: u32 = reply.body().deserialize().ok()?;
+    Some(idx as usize)
+}
+
+/// Ask KDE to switch the system keyboard layout.
+pub fn kde_set_layout(index: usize) -> bool {
+    let Ok(conn) = zbus::blocking::Connection::session() else { return false };
+    match conn.call_method(Some(KDE_DEST), KDE_PATH, Some(KDE_IFACE), "setLayout", &(index as u32)) {
+        Ok(reply) => reply.body().deserialize::<bool>().unwrap_or(true),
+        Err(e) => {
+            log::warn!("desktop: KDE setLayout failed: {e}");
+            false
+        }
+    }
 }
 
 #[derive(Default)]

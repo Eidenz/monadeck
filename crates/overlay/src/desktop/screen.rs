@@ -9,7 +9,11 @@ use openxr as xr;
 
 use super::dmabuf::{self, Caps, Importer, Staging};
 use super::pw::{Capture, Frame};
-use crate::mathx::{pose_compose, pose_invert, raycast};
+use crate::gfx::{cyl_layout, CylLayout};
+use crate::mathx::{pose_compose, pose_invert, raycast, raycast_cylinder};
+
+/// Arc of a fully curved screen (curve = 1), radians.
+pub const MAX_CURVE_ANGLE: f32 = 1.5;
 
 /// Default physical width of a mirrored screen, metres.
 pub const DEFAULT_WIDTH_M: f32 = 1.35;
@@ -31,6 +35,10 @@ pub struct ScreenPanel {
     pub placed: bool,
     pub pose: xr::Posef,
     pub width_m: f32,
+    /// 0 = flat quad; up to 1 = wraps `MAX_CURVE_ANGLE` around you (cylinder layer).
+    pub curve: f32,
+    /// Resize gesture in progress: (hand→head distance at start, width at start).
+    pub resize_ref: Option<(f32, f32)>,
     pub capture: Option<Capture>,
     pub swap: Option<Swap>,
     /// At least one frame has been uploaded (the layer may be submitted).
@@ -54,6 +62,8 @@ impl ScreenPanel {
             placed: false,
             pose: xr::Posef::IDENTITY,
             width_m: DEFAULT_WIDTH_M,
+            curve: 0.0,
+            resize_ref: None,
             capture: None,
             swap: None,
             has_content: false,
@@ -76,12 +86,26 @@ impl ScreenPanel {
         (self.width_m, self.width_m * aspect)
     }
 
+    /// Curved placement (None when flat or the runtime can't do cylinders).
+    pub fn cyl(&self, curved_ok: bool) -> Option<CylLayout> {
+        if !curved_ok || self.curve <= 0.01 {
+            return None;
+        }
+        let (w, h) = self.size_m();
+        let angle = self.curve.clamp(0.0, 1.0) * MAX_CURVE_ANGLE;
+        let r = w / angle;
+        Some(cyl_layout(&self.pose, r, r, 0.0, 0.0, w, h))
+    }
+
     /// Hit-test the laser; (u, v, t) with (0,0) top-left of the screen image.
-    pub fn hit(&self, aim: &xr::Posef) -> Option<(f32, f32, f32)> {
+    pub fn hit(&self, aim: &xr::Posef, curved_ok: bool) -> Option<(f32, f32, f32)> {
         if !self.shown || !self.has_content {
             return None;
         }
-        raycast(aim, &self.pose, self.size_m())
+        match self.cyl(curved_ok) {
+            Some(l) => raycast_cylinder(aim, &l.pose, l.radius, l.central_angle, l.height),
+            None => raycast(aim, &self.pose, self.size_m()),
+        }
     }
 
     /// Desktop-logical cursor position for a (u, v) hit.
@@ -233,8 +257,39 @@ impl ScreenPanel {
         Ok(())
     }
 
-    pub fn quad<'a>(&'a self, space: &'a xr::Space) -> Option<xr::CompositionLayerQuad<'a, xr::Vulkan>> {
+    fn sub_image(swap: &Swap) -> xr::SwapchainSubImage<'_, xr::Vulkan> {
+        xr::SwapchainSubImage::new().swapchain(&swap.swapchain).image_array_index(0).image_rect(xr::Rect2Di {
+            offset: xr::Offset2Di { x: 0, y: 0 },
+            extent: xr::Extent2Di { width: swap.px.0 as i32, height: swap.px.1 as i32 },
+        })
+    }
+
+    /// Curved layer (when `curve` > 0 and supported).
+    pub fn cylinder<'a>(
+        &'a self,
+        space: &'a xr::Space,
+        curved_ok: bool,
+    ) -> Option<xr::CompositionLayerCylinderKHR<'a, xr::Vulkan>> {
         if !self.shown || !self.has_content {
+            return None;
+        }
+        let l = self.cyl(curved_ok)?;
+        let swap = self.swap.as_ref()?;
+        Some(
+            xr::CompositionLayerCylinderKHR::new()
+                .space(space)
+                .eye_visibility(xr::EyeVisibility::BOTH)
+                .sub_image(Self::sub_image(swap))
+                .pose(l.pose)
+                .radius(l.radius)
+                .central_angle(l.central_angle)
+                .aspect_ratio(swap.px.0 as f32 / swap.px.1 as f32),
+        )
+    }
+
+    /// Flat layer (when not curved).
+    pub fn quad<'a>(&'a self, space: &'a xr::Space, curved_ok: bool) -> Option<xr::CompositionLayerQuad<'a, xr::Vulkan>> {
+        if !self.shown || !self.has_content || self.cyl(curved_ok).is_some() {
             return None;
         }
         let swap = self.swap.as_ref()?;

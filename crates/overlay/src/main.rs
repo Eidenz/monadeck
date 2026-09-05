@@ -408,6 +408,8 @@ fn run() -> Result<()> {
     let system_action = action_set.create_action::<bool>("recenter", "Recenter panel", &[left_path, right_path])?;
     // Desktop viewer: A = right-click on a mirrored screen.
     let secondary_action = action_set.create_action::<bool>("secondary", "Secondary click", &[left_path, right_path])?;
+    // B = a click that never drags (the cursor is frozen while held).
+    let precise_action = action_set.create_action::<bool>("precise", "Precise click", &[left_path, right_path])?;
     let haptic_action = action_set.create_action::<xr::Haptic>("haptic", "Haptic tick", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
     xr_instance.suggest_interaction_profile_bindings(
@@ -425,6 +427,8 @@ fn run() -> Result<()> {
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
             xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
             xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
+            xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/left/input/b/click")?),
+            xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/right/input/b/click")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
         ],
@@ -457,6 +461,7 @@ fn run() -> Result<()> {
         kb_px, desktop::keyboard::size_m(), anchor,
     )?;
     desktop.set_width(ov_cfg.screen_width_m);
+    desktop.caps.curved = curved;
     let mut screencast_token = ov_cfg.screencast_token.clone();
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
     let mut settings_prev = (
@@ -916,6 +921,7 @@ fn run() -> Result<()> {
                     path,
                     select: select_action.state(&session, path)?.current_state > 0.5,
                     secondary: secondary_action.state(&session, path)?.current_state,
+                    precise: precise_action.state(&session, path)?.current_state,
                     grip: grab_action.state(&session, path)?.current_state,
                     scroll: deadzone(s.x, s.y),
                 });
@@ -942,7 +948,7 @@ fn run() -> Result<()> {
                 }
             }
             // Mirrored screens stay interactive while the dashboard is away.
-            let d_in = desktop.update_input(&hands, None);
+            let d_in = desktop.update_input(&hands, None, hmd.as_ref());
             let d_ray = d_in.ray;
             let want_block = desktop.pointing();
             if want_block != blocked_prev {
@@ -962,10 +968,14 @@ fn run() -> Result<()> {
                 _ => None,
             };
             let screen_quads = desktop.quad_layers(&space);
+            let screen_cyls = desktop.cylinder_layers(&space);
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
             for q in &screen_quads {
                 layers.push(q);
+            }
+            for c in &screen_cyls {
+                layers.push(c);
             }
             if let Some(q) = &kb_q {
                 layers.push(q);
@@ -1097,9 +1107,9 @@ fn run() -> Result<()> {
         // Mirrored screens: one closer than the dashboard takes the pointer. Not
         // while a dashboard grab is in progress (the grip would grab both).
         let d_in = if grab.is_some() {
-            desktop.update_input(&[], None)
+            desktop.update_input(&[], None, hmd.as_ref())
         } else {
-            desktop.update_input(&hands, best.map(|b| b.t))
+            desktop.update_input(&hands, best.map(|b| b.t), hmd.as_ref())
         };
         let d_ray = d_in.ray;
         if d_ray.is_some() {
@@ -1118,7 +1128,7 @@ fn run() -> Result<()> {
         st.desktop_shown = desktop.shown_count();
         st.desktop_ready = desktop.portal_ready();
         st.desktop_pending = desktop.portal_pending();
-        st.keyboard_layout = desktop.keyboard.labels.layout_name.clone();
+        st.keyboard_layout = desktop.keyboard.labels.layout_name();
 
         let main_ptr = best.filter(|h| h.panel == PanelId::Main).map(|h| (h.u, h.v, h.down));
         let rail_ptr = best.filter(|h| h.panel == PanelId::Rail).map(|h| (h.u, h.v, h.down));
@@ -1241,10 +1251,14 @@ fn run() -> Result<()> {
             _ => None,
         };
         let screen_quads = desktop.quad_layers(&space);
+        let screen_cyls = desktop.cylinder_layers(&space);
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
         // Screens first: they sit behind the dashboard in the composite.
         for q in &screen_quads {
             layers.push(q);
+        }
+        for c in &screen_cyls {
+            layers.push(c);
         }
         if let Some(q) = &kb_q {
             layers.push(q);

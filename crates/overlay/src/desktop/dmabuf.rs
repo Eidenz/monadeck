@@ -72,6 +72,8 @@ pub struct Caps {
     pub formats: Vec<DrmFormat>,
     /// The swapchain format the screens render into (same as the UI panels).
     pub swap_format: vk::Format,
+    /// Runtime supports XR_KHR_composition_layer_cylinder (curved screens).
+    pub curved: bool,
 }
 
 impl Caps {
@@ -95,7 +97,7 @@ impl Caps {
                 log::debug!("  {} 0x{:016x}", f.fourcc, f.modifier);
             }
         }
-        Self { dmabuf: dmabuf && !formats.is_empty(), formats, swap_format }
+        Self { dmabuf: dmabuf && !formats.is_empty(), formats, swap_format, curved: false }
     }
 }
 

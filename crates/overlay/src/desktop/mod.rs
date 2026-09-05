@@ -10,6 +10,7 @@
 //!
 //! Screens are independent of the dashboard: once shown they persist while the
 //! dashboard is dismissed and while a game runs, exactly like WayVR.
+pub mod clipboard;
 pub mod dmabuf;
 pub mod hid;
 pub mod keyboard;
@@ -38,6 +39,15 @@ const GRAB_RELEASE: f32 = 0.15;
 const SCROLL_SPEED: f32 = 0.12;
 /// Default distance a newly shown screen is placed at, metres.
 const PLACE_DIST: f32 = 1.6;
+/// Trigger-held cursor motion below this (desktop px) is ignored, so a click
+/// on a draggable thing doesn't turn into a drag; beyond it, dragging is live.
+const DRAG_THRESHOLD_PX: f64 = 14.0;
+/// Resize gesture: width multiplier per metre of hand travel toward/away.
+const RESIZE_PER_M: f32 = 3.0;
+/// Push/pull speed while gripping (metres per frame at full stick).
+const PUSH_SPEED: f32 = 0.006;
+/// Curvature change per frame at full stick while gripping with trigger.
+const CURVE_SPEED: f32 = 0.012;
 
 /// Per-hand controller state for one frame (only while the overlay is focused).
 pub struct HandInput {
@@ -48,6 +58,8 @@ pub struct HandInput {
     pub path: xr::Path,
     pub select: bool,
     pub secondary: bool,
+    /// B: a click with the cursor frozen.
+    pub precise: bool,
     pub grip: f32,
     pub scroll: (f32, f32),
 }
@@ -106,9 +118,16 @@ pub struct DesktopViewer {
     /// A mouse button held down by (hand, button code) — released on trigger up
     /// even if the laser has left the screen, so nothing gets stuck.
     held: Option<(usize, u16)>,
+    /// Where the held button went down + whether motion is already a drag.
+    /// `frozen` (B click) never moves the cursor while held.
+    held_press: Option<(f64, f64)>,
+    dragging: bool,
+    frozen: bool,
     hover_prev: Option<(f64, f64)>,
     select_prev: [bool; 2],
     secondary_prev: [bool; 2],
+    precise_prev: [bool; 2],
+    clipboard: clipboard::ClipboardWatcher,
     pending_gpu_teardown: bool,
     width_m: f32,
     keyboard_place: bool,
@@ -153,9 +172,14 @@ impl DesktopViewer {
             pointing: None,
             last_screen: None,
             held: None,
+            held_press: None,
+            dragging: false,
+            frozen: false,
             hover_prev: None,
             select_prev: [false; 2],
             secondary_prev: [false; 2],
+            precise_prev: [false; 2],
+            clipboard: clipboard::ClipboardWatcher::new(),
             pending_gpu_teardown: false,
             width_m: screen::DEFAULT_WIDTH_M,
             keyboard_place: false,
@@ -328,6 +352,7 @@ impl DesktopViewer {
         } else {
             self.keyboard.grab = None;
         }
+        self.clipboard.set_active(self.keyboard.visible);
     }
 
     pub fn keyboard_visible(&self) -> bool {
@@ -395,7 +420,18 @@ impl DesktopViewer {
             self.keyboard.close_request = false;
             self.keyboard.visible = false;
             self.keyboard.grab = None;
+            self.clipboard.set_active(false);
         }
+        if let Some(i) = self.keyboard.layout_switch_request.take() {
+            if i < self.keyboard.labels.layout_names.len() {
+                // Relabel regardless; KDE follows when it's the desktop.
+                self.keyboard.labels.current = i;
+                if !keymap::kde_set_layout(i) {
+                    log::warn!("desktop: layout switch only relabelled the VR keyboard");
+                }
+            }
+        }
+        self.keyboard.clipboard = self.clipboard.latest();
         if self.keyboard.detach_request {
             self.keyboard.detach_request = false;
             self.keyboard.attached = None;
@@ -541,16 +577,47 @@ impl DesktopViewer {
 
     /// Laser interaction with the shown screens + keyboard. `max_t`: distance
     /// of a closer dashboard hit (things behind it are ignored).
-    pub fn update_input(&mut self, hands: &[HandInput], max_t: Option<f32>) -> InputOut {
+    pub fn update_input(&mut self, hands: &[HandInput], max_t: Option<f32>, hmd: Option<&xr::Posef>) -> InputOut {
         let mut out = InputOut::default();
         self.pointing = None;
+        let curved_ok = self.caps.curved;
 
-        // Continue grabs first (the grabbed thing follows the hand).
+        // Continue grabs first (the grabbed thing follows the hand). While
+        // gripping: trigger + push/pull the hand resizes, trigger + stick ◀▶
+        // curves, stick ▲▼ pushes the screen away/closer (WayVR's gestures).
         for s in &mut self.screens {
-            if let Some((hand, offset)) = s.grab {
+            if let Some((hand, mut offset)) = s.grab {
                 match hands.get(hand) {
-                    Some(h) if h.active && h.grip >= GRAB_RELEASE => s.pose = pose_compose(&h.aim, &offset),
-                    _ => s.grab = None,
+                    Some(h) if h.active && h.grip >= GRAB_RELEASE => {
+                        let (sx, sy) = h.scroll;
+                        if h.select {
+                            let d = hmd.map_or(0.0, |m| dist2(&h.aim.position, &m.position).sqrt());
+                            match s.resize_ref {
+                                None => s.resize_ref = Some((d, s.width_m)),
+                                Some((d0, w0)) => {
+                                    s.width_m = (w0 * (1.0 + (d - d0) * RESIZE_PER_M)).clamp(0.3, 4.0);
+                                }
+                            }
+                            if curved_ok && sx != 0.0 {
+                                s.curve = (s.curve + sx * CURVE_SPEED).clamp(0.0, 1.0);
+                            }
+                            // Position stays put while resizing; re-anchor for when
+                            // the trigger lets go.
+                            offset = pose_compose(&pose_invert(&h.aim), &s.pose);
+                        } else {
+                            s.resize_ref = None;
+                            if sy != 0.0 {
+                                // Hand-local -Z is forward along the aim.
+                                offset.position.z -= sy * PUSH_SPEED;
+                            }
+                            s.pose = pose_compose(&h.aim, &offset);
+                        }
+                        s.grab = Some((hand, offset));
+                    }
+                    _ => {
+                        s.grab = None;
+                        s.resize_ref = None;
+                    }
                 }
             }
         }
@@ -595,7 +662,7 @@ impl DesktopViewer {
                     }
                 };
                 for (si, s) in self.screens.iter().enumerate() {
-                    consider(Target::Screen(si), s.hit(&h.aim));
+                    consider(Target::Screen(si), s.hit(&h.aim, curved_ok));
                 }
                 if self.keyboard.visible && self.keyboard.placed {
                     consider(Target::Keyboard, raycast(&h.aim, &self.keyboard.pose, keyboard::size_m()));
@@ -630,23 +697,45 @@ impl DesktopViewer {
                     self.last_screen = Some(si);
                     let (x, y) = self.screens[si].desktop_pos(u, v);
                     if let Some(hid) = &mut self.hid {
-                        // Hover → move (skip sub-pixel jitter).
+                        // Hover → move (skip sub-pixel jitter). While a button is
+                        // held: frozen (B) never moves; trigger waits for a real drag.
                         let moved =
                             self.hover_prev.map_or(true, |(px, py)| (px - x).abs() >= 0.5 || (py - y).abs() >= 0.5);
-                        if moved {
+                        let mut allow_move = !self.frozen;
+                        if self.held.is_some() && !self.frozen && !self.dragging {
+                            if let Some((px, py)) = self.held_press {
+                                let d = ((px - x).powi(2) + (py - y).powi(2)).sqrt();
+                                if d >= DRAG_THRESHOLD_PX {
+                                    self.dragging = true;
+                                } else {
+                                    allow_move = false;
+                                }
+                            }
+                        }
+                        if moved && allow_move {
                             hid.mouse_move(x, y);
                             self.hover_prev = Some((x, y));
                         }
-                        // Clicks: rising edge of trigger / A on the pointing hand.
-                        if h.select && !self.select_prev[hi] && self.held.is_none() {
-                            hid.mouse_move(x, y);
-                            hid.button(hid::BTN_LEFT, true);
-                            self.held = Some((hi, hid::BTN_LEFT));
-                        }
-                        if h.secondary && !self.secondary_prev[hi] && self.held.is_none() {
-                            hid.mouse_move(x, y);
-                            hid.button(hid::BTN_RIGHT, true);
-                            self.held = Some((hi, hid::BTN_RIGHT));
+                        // Clicks: rising edge of trigger / A / B on the pointing hand.
+                        if self.held.is_none() {
+                            let (code, frozen) = if h.select && !self.select_prev[hi] {
+                                (Some(hid::BTN_LEFT), false)
+                            } else if h.precise && !self.precise_prev[hi] {
+                                (Some(hid::BTN_LEFT), true)
+                            } else if h.secondary && !self.secondary_prev[hi] {
+                                (Some(hid::BTN_RIGHT), false)
+                            } else {
+                                (None, false)
+                            };
+                            if let Some(code) = code {
+                                hid.mouse_move(x, y);
+                                self.hover_prev = Some((x, y));
+                                hid.button(code, true);
+                                self.held = Some((hi, code));
+                                self.held_press = Some((x, y));
+                                self.dragging = false;
+                                self.frozen = frozen;
+                            }
                         }
                         // Thumbstick scroll.
                         let (sx, sy) = h.scroll;
@@ -659,9 +748,10 @@ impl DesktopViewer {
         }
         // Release a held button when that hand lets go, wherever it points now.
         if let Some((hi, code)) = self.held {
-            let still = hands.get(hi).is_some_and(|h| match code {
-                hid::BTN_LEFT => h.select,
-                hid::BTN_RIGHT => h.secondary,
+            let still = hands.get(hi).is_some_and(|h| match (code, self.frozen) {
+                (hid::BTN_LEFT, true) => h.precise,
+                (hid::BTN_LEFT, false) => h.select,
+                (hid::BTN_RIGHT, _) => h.secondary,
                 _ => false,
             });
             if !still {
@@ -669,15 +759,20 @@ impl DesktopViewer {
                     hid.button(code, false);
                 }
                 self.held = None;
+                self.held_press = None;
+                self.dragging = false;
+                self.frozen = false;
             }
         }
         for (i, h) in hands.iter().enumerate().take(2) {
             self.select_prev[i] = h.select;
             self.secondary_prev[i] = h.secondary;
+            self.precise_prev[i] = h.precise;
         }
         if hands.is_empty() {
             self.select_prev = [false; 2];
             self.secondary_prev = [false; 2];
+            self.precise_prev = [false; 2];
         }
         out
     }
@@ -695,7 +790,11 @@ impl DesktopViewer {
     }
 
     pub fn quad_layers<'a>(&'a self, space: &'a xr::Space) -> Vec<xr::CompositionLayerQuad<'a, xr::Vulkan>> {
-        self.screens.iter().filter_map(|s| s.quad(space)).collect()
+        self.screens.iter().filter_map(|s| s.quad(space, self.caps.curved)).collect()
+    }
+
+    pub fn cylinder_layers<'a>(&'a self, space: &'a xr::Space) -> Vec<xr::CompositionLayerCylinderKHR<'a, xr::Vulkan>> {
+        self.screens.iter().filter_map(|s| s.cylinder(space, self.caps.curved)).collect()
     }
 
     /// Frames uploaded per screen (debug/status).

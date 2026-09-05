@@ -418,9 +418,10 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
             // Mirrored screens + keyboard, centred in the bar (fixed order so a
             // screen is always in the same spot — the WayVR wrist-bar problem).
             if !st.desktop_bar.is_empty() {
-                let count = st.desktop_bar.len() + 1;
-                let pill_w = 92.0;
-                let total = count as f32 * pill_w + (count as f32 - 1.0) * 8.0;
+                let count = st.desktop_bar.len();
+                let pill_w = 64.0;
+                let kb_w = 48.0;
+                let total = count as f32 * pill_w + kb_w + count as f32 * 8.0;
                 let bar = ui.max_rect();
                 let rect = egui::Rect::from_center_size(bar.center(), egui::vec2(total, 40.0));
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -428,19 +429,21 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                 let mut toggle = None;
                 for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
                     let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                    // Numbered, not named: the number is the position, which never moves.
                     let btn = egui::Button::new(
-                        egui::RichText::new(format!("{}  {}", icon::MONITOR, name)).size(14.0).color(fg),
+                        egui::RichText::new(format!("{}  {}", icon::MONITOR, i + 1)).size(15.0).color(fg),
                     )
                     .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
                     .min_size(egui::vec2(pill_w, 40.0));
-                    if child.add(btn).on_hover_text(if *shown { "Hide screen" } else { "Show screen" }).clicked() {
+                    let tip = format!("{} · {}", name, if *shown { "hide" } else { "show" });
+                    if child.add(btn).on_hover_text(tip).clicked() {
                         toggle = Some(i);
                     }
                 }
                 let kfg = if st.keyboard_shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
                 let kbtn = egui::Button::new(egui::RichText::new(icon::KEYBOARD).size(20.0).color(kfg))
                     .fill(if st.keyboard_shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                    .min_size(egui::vec2(pill_w, 40.0));
+                    .min_size(egui::vec2(kb_w, 40.0));
                 if child.add(kbtn).on_hover_text("VR keyboard").clicked() {
                     st.keyboard_toggle_request = true;
                     st.sound_tab = true;
@@ -1948,9 +1951,15 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
         }
         ui.add_space(6.0);
         section(ui, "Placement", |ui| {
-            setting_row(ui, "Screen width", Some("Grip a screen to move it · trigger clicks · A right-clicks · stick scrolls"), |ui| {
+            setting_row(
+                ui,
+                "Default screen width",
+                Some("Applies to all screens · while gripping: trigger + push/pull resizes, stick pushes it away/closer, trigger + stick ◀▶ curves it"),
+                |ui| {
                 stepper_inline(ui, &mut st.screen_width_m, 0.6, 3.0, 0.1, |v| format!("{v:.1} m"));
             });
+            divider(ui);
+            setting_row(ui, "Mouse", Some("Trigger clicks & drags · A right-clicks · B clicks without moving (for tricky targets) · stick scrolls"), |_| {});
         });
         ui.add_space(6.0);
         section(ui, "Status", |ui| {

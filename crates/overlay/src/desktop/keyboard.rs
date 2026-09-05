@@ -5,7 +5,7 @@
 //! Modifiers are one-shot latches (tap Shift, tap a key); Caps Lock is a real
 //! toggle. The keyboard floats freely, and docks under a mirrored screen when
 //! released near its bottom edge, following the screen from then on.
-use std::collections::HashMap;
+use std::time::Instant;
 
 use egui_phosphor::regular as icon;
 use openxr as xr;
@@ -85,7 +85,10 @@ const DOCK_TILT: f32 = -0.30;
 const DOCK_GAP: f32 = 0.03;
 const DOCK_FWD: f32 = 0.04;
 /// Release the keyboard within this distance of a screen's dock to attach.
-pub const DOCK_SNAP_M: f32 = 0.35;
+pub const DOCK_SNAP_M: f32 = 0.18;
+/// Tapping a latched modifier again within this window sends it on its own
+/// (e.g. a solo Super press opens the app launcher).
+const MOD_DOUBLE_TAP: f32 = 1.5;
 
 pub fn panel_points() -> (f32, f32) {
     (COLS * U + MARGIN * 2.0, TOP_BAR + ROWS * U + MARGIN * 2.0)
@@ -120,6 +123,12 @@ pub struct KeyboardState {
     pub attach_request: bool,
     /// Which key is pressed this frame (for the click sound / haptics).
     pub clicked: bool,
+    /// Last modifier latched + when (double-tap detection).
+    latch_at: Option<(u8, Instant)>,
+    /// Clipboard text preview for the top bar (set by the viewer).
+    pub clipboard: Option<String>,
+    /// Top bar asked to switch to this layout index.
+    pub layout_switch_request: Option<usize>,
 }
 
 impl KeyboardState {
@@ -139,6 +148,9 @@ impl KeyboardState {
             detach_request: false,
             attach_request: false,
             clicked: false,
+            latch_at: None,
+            clipboard: None,
+            layout_switch_request: None,
         }
     }
 
@@ -183,7 +195,7 @@ fn layout() -> Vec<KeyDef> {
     row(&mut keys, y1, 0.0, &[
         (41, Mapped, 1.0), (2, Mapped, 1.0), (3, Mapped, 1.0), (4, Mapped, 1.0), (5, Mapped, 1.0), (6, Mapped, 1.0),
         (7, Mapped, 1.0), (8, Mapped, 1.0), (9, Mapped, 1.0), (10, Mapped, 1.0), (11, Mapped, 1.0), (12, Mapped, 1.0),
-        (13, Mapped, 1.0), (14, Fixed("⌫"), 2.0),
+        (13, Mapped, 1.0), (14, Fixed(icon::BACKSPACE), 2.0),
     ]);
     row(&mut keys, y1 + 1.0, 0.0, &[
         (15, Fixed("Tab"), 1.5), (16, Mapped, 1.0), (17, Mapped, 1.0), (18, Mapped, 1.0), (19, Mapped, 1.0), (20, Mapped, 1.0),
@@ -209,8 +221,8 @@ fn layout() -> Vec<KeyDef> {
     row(&mut keys, 0.0, nx, &[(99, Fixed("PrtSc"), 1.0), (70, Fixed("ScrLk"), 1.0), (119, Fixed("Pause"), 1.0)]);
     row(&mut keys, y1, nx, &[(110, Fixed("Ins"), 1.0), (102, Fixed("Home"), 1.0), (104, Fixed("PgUp"), 1.0)]);
     row(&mut keys, y1 + 1.0, nx, &[(111, Fixed("Del"), 1.0), (107, Fixed("End"), 1.0), (109, Fixed("PgDn"), 1.0)]);
-    push(&mut keys, 103, Fixed("↑"), nx + 1.0, y1 + 3.0, 1.0, 1.0);
-    row(&mut keys, y1 + 4.0, nx, &[(105, Fixed("←"), 1.0), (108, Fixed("↓"), 1.0), (106, Fixed("→"), 1.0)]);
+    push(&mut keys, 103, Fixed(icon::ARROW_UP), nx + 1.0, y1 + 3.0, 1.0, 1.0);
+    row(&mut keys, y1 + 4.0, nx, &[(105, Fixed(icon::ARROW_LEFT), 1.0), (108, Fixed(icon::ARROW_DOWN), 1.0), (106, Fixed(icon::ARROW_RIGHT), 1.0)]);
     // --- Numpad + shortcuts ---
     let px = 19.0;
     row(&mut keys, 0.0, px, &[(0, Copy, 4.0 / 3.0), (0, Cut, 4.0 / 3.0), (0, Paste, 4.0 / 3.0)]);
@@ -237,8 +249,8 @@ fn mod_name(m: u8) -> &'static str {
 }
 
 /// Main + small secondary label for a mapped key under the current latch.
-fn mapped_labels(labels: &HashMap<u16, [String; 3]>, code: u16, latched: u8) -> (String, String) {
-    let Some(l) = labels.get(&code) else { return (String::new(), String::new()) };
+fn mapped_labels(labels: &KeyLabels, code: u16, latched: u8) -> (String, String) {
+    let Some(l) = labels.current().get(&code) else { return (String::new(), String::new()) };
     let level = if latched & MOD_ALTGR != 0 { 2 } else if latched & MOD_SHIFT != 0 { 1 } else { 0 };
     let mut main = l[level].clone();
     let is_letter = l[0].chars().count() == 1 && l[0].chars().all(char::is_alphabetic);
@@ -262,8 +274,30 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
         ui.horizontal(|ui| {
             ui.set_height(TOP_BAR - 8.0);
             ui.label(egui::RichText::new(icon::KEYBOARD).size(18.0).color(theme::PRIMARY));
-            ui.label(egui::RichText::new(&st.labels.layout_name).size(14.0).color(theme::ON_SURFACE_VAR));
+            // Layout: a click cycles through the configured layouts (KDE switches too).
+            let name = st.labels.layout_names.get(st.labels.current).cloned().unwrap_or_default();
+            let many = st.labels.layout_names.len() > 1;
+            let lb = egui::Button::new(
+                egui::RichText::new(if many { format!("{} {name}", icon::TRANSLATE) } else { name })
+                    .size(13.0)
+                    .color(theme::ON_SURFACE_VAR),
+            )
+            .fill(if many { theme::SURFACE_CONTAINER_HIGH } else { egui::Color32::TRANSPARENT })
+            .min_size(egui::vec2(0.0, 24.0));
+            if ui.add(lb).on_hover_text("Switch keyboard layout").clicked() && many {
+                st.layout_switch_request = Some((st.labels.current + 1) % st.labels.layout_names.len());
+            }
             ui.add_space(12.0);
+            // Clipboard preview: what Paste would insert.
+            if let Some(clip) = &st.clipboard {
+                let mut preview: String = clip.chars().take(48).collect();
+                if clip.chars().count() > 48 {
+                    preview.push('…');
+                }
+                ui.label(egui::RichText::new(icon::CLIPBOARD).size(14.0).color(theme::ON_SURFACE_VAR));
+                ui.label(egui::RichText::new(preview).size(12.0).color(theme::ON_SURFACE_VAR));
+                ui.add_space(12.0);
+            }
             for m in [MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_SUPER, MOD_ALTGR] {
                 if st.latched & m != 0 {
                     chip(ui, mod_name(m), theme::PRIMARY);
@@ -326,7 +360,7 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             );
             let (main, secondary, size) = match k.kind {
                 KeyKind::Mapped => {
-                    let (m, s) = mapped_labels(&st.labels.labels, k.code, st.latched);
+                    let (m, s) = mapped_labels(&st.labels, k.code, st.latched);
                     (m, s, 17.0)
                 }
                 KeyKind::Fixed(l) => (l.to_string(), String::new(), if l.chars().count() > 2 { 12.0 } else { 16.0 }),
@@ -369,7 +403,17 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             }
         }
         if let Some(m) = latch_toggle {
-            st.latched ^= m;
+            let double = st.latched & m != 0
+                && st.latch_at.is_some_and(|(pm, t)| pm == m && t.elapsed().as_secs_f32() < MOD_DOUBLE_TAP);
+            if double {
+                // Second tap: send the modifier by itself (solo Super = app launcher).
+                st.latched &= !m;
+                st.latch_at = None;
+                st.pending.push(KeyAction::Toggle(mod_code(m)));
+            } else {
+                st.latched ^= m;
+                st.latch_at = (st.latched & m != 0).then(|| (m, Instant::now()));
+            }
         }
         if caps_toggle {
             st.caps = !st.caps;
@@ -378,6 +422,7 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
         if let Some(a) = action {
             st.pending.push(a);
             st.latched = 0; // one-shot
+            st.latch_at = None;
         }
     });
 }

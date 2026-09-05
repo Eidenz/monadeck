@@ -14,13 +14,13 @@ use super::{hid, outputs, portal};
 /// and verifies no two keys overlap. `monadeck-overlay --keyboard-selftest`.
 pub fn keyboard() -> Result<()> {
     let st = super::keyboard::KeyboardState::new();
-    println!("layout: {}", st.labels.layout_name);
+    println!("layouts: {:?} (active #{})", st.labels.layout_names, st.labels.current);
     let (w, h) = super::keyboard::panel_points();
     let px = super::keyboard::panel_px();
     let m = super::keyboard::size_m();
     println!("panel: {w}x{h} pt, {}x{} px, {:.3}x{:.3} m, {} keys", px.0, px.1, m.0, m.1, st.keys.len());
     for code in [16u16, 17, 18, 30, 2, 3, 12, 13, 26, 27, 39, 40, 41, 43, 51, 52, 53, 86] {
-        if let Some(l) = st.labels.labels.get(&code) {
+        if let Some(l) = st.labels.current().get(&code) {
             println!("  key {code:>3}: base {:?} shift {:?} altgr {:?}", l[0], l[1], l[2]);
         }
     }
