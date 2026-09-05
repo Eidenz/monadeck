@@ -11,13 +11,18 @@ pub enum Nav {
     Home,
     Library,
     Favorites,
-    Tags,
-    Tools,
-    Playspace,
-    Monado,
+    /// Timer · Playspace · Monado, as tabs.
+    System,
     Desktop,
     Photos,
     Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SystemTab {
+    Timer,
+    Playspace,
+    Monado,
 }
 
 /// The wrist card's content (a queued screenshot / QR), mirrored from `photos`.
@@ -45,6 +50,11 @@ pub struct LibState {
     pub nav: Nav,
     /// Sort order for the Library / Favorites / Categories lists (not Home).
     pub sort: SortMode,
+    /// Library: flat grid (false) or grouped by collection / source (true).
+    pub library_grouped: bool,
+    pub system_tab: SystemTab,
+    /// Watch timer chip tapped: open the dashboard on System → Timer.
+    pub watch_timer_request: bool,
     pub selected: Option<usize>,
     /// Game indices whose tiles were on-screen this frame (drives lazy art).
     pub visible_now: Vec<usize>,
@@ -238,6 +248,9 @@ impl LibState {
             search: String::new(),
             nav: Nav::Home,
             sort: SortMode::Recent,
+            library_grouped: false,
+            system_tab: SystemTab::Timer,
+            watch_timer_request: false,
             selected: None,
             visible_now: Vec::new(),
             running_index: None,
@@ -388,7 +401,7 @@ const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
 /// The main (centre) panel: search bar, the active view (or active-game splash),
 /// the on-screen keyboard, and the launching/fade overlays.
 pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
-    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::Tools | Nav::Playspace);
+    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::System);
     if (searchable || st.naming) && st.keyboard_open {
         keyboard(ctx, st);
     }
@@ -425,7 +438,6 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
                 (icon::HOUSE, Nav::Home),
                 (icon::SQUARES_FOUR, Nav::Library),
                 (icon::STAR, Nav::Favorites),
-                (icon::TAG, Nav::Tags),
             ] {
                 let active = st.nav == nav && !st.show_splash;
                 if rail_button(ui, glyph, active).clicked() && !active {
@@ -440,11 +452,9 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
             // margin, or the last icon overruns the panel's rounded bottom (clipped).
             // ~64 px per icon (48 button + 8 add_space + spacing) — bump when adding.
             let avail = ui.available_height();
-            ui.add_space((avail - 400.0).max(0.0));
+            ui.add_space((avail - 272.0).max(0.0));
             let bottom = [
-                (icon::TIMER, Nav::Tools),
-                (icon::ARROWS_OUT_CARDINAL, Nav::Playspace),
-                (icon::STACK, Nav::Monado),
+                (icon::WRENCH, Nav::System),
                 (icon::MONITOR, Nav::Desktop),
                 (icon::IMAGES, Nav::Photos),
                 (icon::GEAR, Nav::Settings),
@@ -519,6 +529,23 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
             for b in &st.batteries {
                 battery_widget(ui, b);
                 ui.add_space(4.0);
+            }
+            // A running/paused timer: small chip with the time left; tap to open it.
+            if st.timer_running || st.timer_paused {
+                let rem = st.timer_remaining;
+                let txt = if rem >= 3600 {
+                    format!("{}:{:02}:{:02}", rem / 3600, (rem / 60) % 60, rem % 60)
+                } else {
+                    format!("{}:{:02}", rem / 60, rem % 60)
+                };
+                let accent = if st.timer_paused { FAV_GOLD } else { theme::PRIMARY };
+                let btn = egui::Button::new(egui::RichText::new(format!("{} {txt}", icon::TIMER)).size(13.0).color(accent))
+                    .fill(egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 30))
+                    .min_size(egui::vec2(0.0, 24.0));
+                if ui.add(btn).on_hover_text(if st.timer_paused { "Timer paused · tap to open" } else { "Timer running · tap to open" }).clicked() {
+                    st.watch_timer_request = true;
+                    st.sound_tab = true;
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (glyph, tip) = if st.watch_locked {
@@ -974,23 +1001,12 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
         }
         match st.nav {
             Nav::Home => home_view(ui, st),
-            Nav::Library => grid_view(ui, st, "Library"),
+            Nav::Library => library_view(ui, st),
             Nav::Favorites => favorites_view(ui, st),
-            Nav::Tags => tags_view(ui, st),
-            Nav::Tools => {
+            Nav::System => {
                 st.visible_now.clear();
                 st.hovered_index = None;
-                tools_view(ui, st);
-            }
-            Nav::Playspace => {
-                st.visible_now.clear();
-                st.hovered_index = None;
-                playspace_view(ui, st);
-            }
-            Nav::Monado => {
-                st.visible_now.clear();
-                st.hovered_index = None;
-                monado_view(ui, st);
+                system_view(ui, st);
             }
             Nav::Desktop => {
                 st.visible_now.clear();
@@ -1226,8 +1242,51 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str, 
     }
 }
 
+/// Library: a mode row (all games / grouped by collection) over the grid or
+/// the former Categories view.
+fn library_view(ui: &mut egui::Ui, st: &mut LibState) {
+    ui.horizontal(|ui| {
+        if chip(ui, &format!("{}  All games", icon::SQUARES_FOUR), !st.library_grouped).clicked() {
+            st.library_grouped = false;
+            st.sound_tab = true;
+        }
+        if chip(ui, &format!("{}  Collections", icon::TAG), st.library_grouped).clicked() {
+            st.library_grouped = true;
+            st.sound_tab = true;
+        }
+    });
+    ui.add_space(6.0);
+    if st.library_grouped {
+        tags_view(ui, st);
+    } else {
+        grid_view(ui, st, "Library");
+    }
+}
+
+/// System: Timer · Playspace · Monado as tabs on one page.
+fn system_view(ui: &mut egui::Ui, st: &mut LibState) {
+    ui.horizontal(|ui| {
+        for (glyph, label, tab) in [
+            (icon::TIMER, "Timer", SystemTab::Timer),
+            (icon::ARROWS_OUT_CARDINAL, "Playspace", SystemTab::Playspace),
+            (icon::STACK, "Monado", SystemTab::Monado),
+        ] {
+            if chip(ui, &format!("{glyph}  {label}"), st.system_tab == tab).clicked() && st.system_tab != tab {
+                st.system_tab = tab;
+                st.sound_tab = true;
+            }
+        }
+    });
+    ui.add_space(8.0);
+    match st.system_tab {
+        SystemTab::Timer => tools_view(ui, st),
+        SystemTab::Playspace => playspace_view(ui, st),
+        SystemTab::Monado => monado_view(ui, st),
+    }
+}
+
 fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
-    view_header(ui, st, "Categories");
+    view_header(ui, st, "Collections");
     ui.add_space(8.0);
 
     // Create a new collection (works even with no games yet).

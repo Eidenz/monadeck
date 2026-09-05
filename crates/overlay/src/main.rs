@@ -1271,6 +1271,17 @@ fn run() -> Result<()> {
                 summon_at = Some(Instant::now());
             }
         }
+        if st.watch_timer_request {
+            st.watch_timer_request = false;
+            st.nav = ui::Nav::System;
+            st.system_tab = ui::SystemTab::Timer;
+            st.show_splash = false;
+            if !visible {
+                visible = true;
+                recenter = true;
+                summon_at = Some(Instant::now());
+            }
+        }
         // Double-B (left): hide every shown screen / bring the same set back.
         // Ignored while that hand is pointing at a screen (B = frozen click there).
         let left_b = hands.first().is_some_and(|h| h.active && h.precise);
