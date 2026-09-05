@@ -34,6 +34,8 @@ pub struct OverlayConfig {
     pub screencast_token: Option<String>,
     /// Physical width of mirrored screens, metres.
     pub screen_width_m: f32,
+    /// Bottom-bar order of the mirrored screens (output names, first = leftmost).
+    pub screen_order: Vec<String>,
 }
 
 impl Default for OverlayConfig {
@@ -53,6 +55,7 @@ impl Default for OverlayConfig {
             freeze_delay_secs: 3.0,
             screencast_token: None,
             screen_width_m: 1.35,
+            screen_order: Vec::new(),
         }
     }
 }

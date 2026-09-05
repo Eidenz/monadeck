@@ -10,6 +10,41 @@ use super::dmabuf::{self, Caps, Importer};
 use super::pw::{Capture, Frame};
 use super::{hid, outputs, portal};
 
+/// Keyboard layout + keymap check: prints the detected layout, sample labels,
+/// and verifies no two keys overlap. `monadeck-overlay --keyboard-selftest`.
+pub fn keyboard() -> Result<()> {
+    let st = super::keyboard::KeyboardState::new();
+    println!("layout: {}", st.labels.layout_name);
+    let (w, h) = super::keyboard::panel_points();
+    let px = super::keyboard::panel_px();
+    let m = super::keyboard::size_m();
+    println!("panel: {w}x{h} pt, {}x{} px, {:.3}x{:.3} m, {} keys", px.0, px.1, m.0, m.1, st.keys.len());
+    for code in [16u16, 17, 18, 30, 2, 3, 12, 13, 26, 27, 39, 40, 41, 43, 51, 52, 53, 86] {
+        if let Some(l) = st.labels.labels.get(&code) {
+            println!("  key {code:>3}: base {:?} shift {:?} altgr {:?}", l[0], l[1], l[2]);
+        }
+    }
+    let mut overlaps = 0;
+    for (i, a) in st.keys.iter().enumerate() {
+        for b in st.keys.iter().skip(i + 1) {
+            let sep = a.x + a.w <= b.x + 1e-3 || b.x + b.w <= a.x + 1e-3 || a.y + a.h <= b.y + 1e-3 || b.y + b.h <= a.y + 1e-3;
+            if !sep {
+                overlaps += 1;
+                println!("  OVERLAP: code {} at ({},{}) and code {} at ({},{})", a.code, a.x, a.y, b.code, b.x, b.y);
+            }
+        }
+        if a.x + a.w > 23.0 + 1e-3 || a.y + a.h > 6.25 + 1e-3 {
+            overlaps += 1;
+            println!("  OUT OF BOUNDS: code {} at ({},{}) w{} h{}", a.code, a.x, a.y, a.w, a.h);
+        }
+    }
+    if overlaps > 0 {
+        bail!("{overlaps} layout problem(s)");
+    }
+    println!("layout OK");
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
     println!("== outputs (wayland) ==");
     let outs = outputs::list();

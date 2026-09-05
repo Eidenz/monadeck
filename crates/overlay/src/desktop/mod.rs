@@ -1,15 +1,19 @@
 //! WayVR-style desktop viewer for the overlay: mirror the user's monitors into
-//! VR as grabbable quad layers and drive a virtual mouse from the laser.
+//! VR as grabbable quad layers and drive a virtual mouse/keyboard from the laser.
 //!
 //! Pipeline: xdg-desktop-portal ScreenCast (`portal`) → PipeWire video node
 //! (`pw`) → DMA-BUF import + blit into an OpenXR swapchain (`dmabuf`, `screen`)
 //! → quad layer. Interaction: laser hit (u, v) → desktop-logical coordinates via
-//! the monitor layout (`outputs`) → absolute uinput mouse (`hid`).
+//! the monitor layout (`outputs`) → absolute uinput mouse (`hid`). The VR
+//! keyboard (`keyboard`) types through the same uinput device, labelled from the
+//! user's xkb keymap (`keymap`).
 //!
 //! Screens are independent of the dashboard: once shown they persist while the
 //! dashboard is dismissed and while a game runs, exactly like WayVR.
 pub mod dmabuf;
 pub mod hid;
+pub mod keyboard;
+pub mod keymap;
 pub mod outputs;
 pub mod portal;
 pub mod pw;
@@ -22,9 +26,10 @@ use std::sync::Mutex;
 use ash::vk;
 use openxr as xr;
 
-use crate::mathx::{front_pose, pose_compose};
+use crate::mathx::{front_pose, pose_compose, pose_invert, raycast};
 use dmabuf::{Caps, Importer};
 use hid::UInput;
+use keyboard::{KeyAction, KeyboardState};
 use screen::ScreenPanel;
 
 const GRAB_START: f32 = 0.40;
@@ -47,16 +52,25 @@ pub struct HandInput {
     pub scroll: (f32, f32),
 }
 
-/// One row of the in-headset "Desktop" page.
+/// One row of the in-headset Desktop settings page.
 #[derive(Clone, Debug)]
 pub struct ScreenRow {
     pub name: String,
     pub detail: String,
+    /// Extra note (e.g. "not approved — re-pick screens to add it").
+    pub hint: Option<String>,
     pub shown: bool,
     /// A stream exists for it (portal approved this monitor).
-    pub available: bool,
-    /// Asked to show, waiting on the portal.
-    pub pending: bool,
+    pub approved: bool,
+}
+
+/// What the laser did this frame.
+#[derive(Default)]
+pub struct InputOut {
+    /// Laser ray (aim pose, hit distance) when pointing at a screen or the keyboard.
+    pub ray: Option<(xr::Posef, f32)>,
+    /// Pointer on the keyboard panel: (u, v, trigger down).
+    pub keyboard_ptr: Option<(f32, f32, bool)>,
 }
 
 enum PortalState {
@@ -64,6 +78,12 @@ enum PortalState {
     Pending(Receiver<Result<portal::Cast, String>>),
     Ready(portal::Cast),
     Failed(String),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    Screen(usize),
+    Keyboard,
 }
 
 pub struct DesktopViewer {
@@ -76,10 +96,13 @@ pub struct DesktopViewer {
     token: Option<String>,
     token_changed: bool,
     screens: Vec<ScreenPanel>,
-    /// Output names asked for before the portal answered.
-    pending_show: Vec<String>,
-    /// Which screen the laser points at this frame (index, hand).
-    pointing: Option<(usize, usize)>,
+    /// Bottom-bar order (output names). Unknown names go last.
+    order: Vec<String>,
+    pub keyboard: KeyboardState,
+    /// What the laser is on this frame.
+    pointing: Option<(Target, usize)>,
+    /// Screen the laser was last on (keyboard docks there by default).
+    last_screen: Option<usize>,
     /// A mouse button held down by (hand, button code) — released on trigger up
     /// even if the laser has left the screen, so nothing gets stuck.
     held: Option<(usize, u16)>,
@@ -88,10 +111,11 @@ pub struct DesktopViewer {
     secondary_prev: [bool; 2],
     pending_gpu_teardown: bool,
     width_m: f32,
+    keyboard_place: bool,
 }
 
 impl DesktopViewer {
-    pub fn new(caps: Caps, importer: Option<Importer>, token: Option<String>) -> Self {
+    pub fn new(caps: Caps, importer: Option<Importer>, token: Option<String>, order: Vec<String>) -> Self {
         let outputs = outputs::list();
         for o in &outputs {
             log::info!(
@@ -124,14 +148,17 @@ impl DesktopViewer {
             token,
             token_changed: false,
             screens: Vec::new(),
-            pending_show: Vec::new(),
+            order,
+            keyboard: KeyboardState::new(),
             pointing: None,
+            last_screen: None,
             held: None,
             hover_prev: None,
             select_prev: [false; 2],
             secondary_prev: [false; 2],
             pending_gpu_teardown: false,
             width_m: screen::DEFAULT_WIDTH_M,
+            keyboard_place: false,
         }
     }
 
@@ -143,41 +170,79 @@ impl DesktopViewer {
         }
     }
 
-    // --- UI-facing state -------------------------------------------------
+    // --- Ordering ------------------------------------------------------------
+
+    fn order_key(&self, name: &str) -> usize {
+        self.order.iter().position(|n| n == name).unwrap_or(usize::MAX)
+    }
+
+    /// Indices of approved screens in bottom-bar order.
+    fn ordered_screens(&self) -> Vec<usize> {
+        let mut idx: Vec<usize> = (0..self.screens.len()).collect();
+        idx.sort_by_key(|&i| (self.order_key(&self.screens[i].name), i));
+        idx
+    }
+
+    pub fn order(&self) -> Vec<String> {
+        self.order.clone()
+    }
+
+    /// Move the approved screen at bar position `i` by `delta` (-1 left, +1
+    /// right). Returns true when the order changed (persist it).
+    pub fn move_order(&mut self, i: usize, delta: i32) -> bool {
+        let mut names: Vec<String> = self.ordered_screens().iter().map(|&s| self.screens[s].name.clone()).collect();
+        let j = i as i32 + delta;
+        if i >= names.len() || j < 0 || j as usize >= names.len() {
+            return false;
+        }
+        names.swap(i, j as usize);
+        self.order = names;
+        true
+    }
+
+    // --- UI-facing state -----------------------------------------------------
+
+    /// Approved screens for the bottom bar: (name, shown), in order.
+    pub fn bar_items(&self) -> Vec<(String, bool)> {
+        self.ordered_screens().iter().map(|&i| (self.screens[i].name.clone(), self.screens[i].shown)).collect()
+    }
+
+    /// Show/hide the screen at bar position `i`.
+    pub fn toggle_bar(&mut self, i: usize) {
+        let Some(&si) = self.ordered_screens().get(i) else { return };
+        if self.screens[si].shown {
+            self.screens[si].hide();
+            if self.keyboard.attached == Some(si) {
+                self.keyboard.attached = None;
+            }
+        } else {
+            self.screens[si].show(&self.caps);
+        }
+    }
 
     pub fn rows(&self) -> Vec<ScreenRow> {
-        let mut rows: Vec<ScreenRow> = Vec::new();
-        if self.screens.is_empty() {
-            for o in &self.outputs {
+        let ready = matches!(self.portal, PortalState::Ready(_));
+        let mut rows: Vec<ScreenRow> = self
+            .ordered_screens()
+            .iter()
+            .map(|&i| {
+                let s = &self.screens[i];
+                ScreenRow { name: s.name.clone(), detail: s.detail.clone(), hint: None, shown: s.shown, approved: true }
+            })
+            .collect();
+        for o in &self.outputs {
+            if !self.screens.iter().any(|s| s.name == o.name) {
                 rows.push(ScreenRow {
                     name: o.name.clone(),
                     detail: output_detail(o),
+                    hint: Some(if ready {
+                        "Not approved — re-pick screens to add it".into()
+                    } else {
+                        "Set up screens to approve it".into()
+                    }),
                     shown: false,
-                    available: false,
-                    pending: self.pending_show.contains(&o.name),
+                    approved: false,
                 });
-            }
-        } else {
-            for s in &self.screens {
-                rows.push(ScreenRow {
-                    name: s.name.clone(),
-                    detail: s.detail.clone(),
-                    shown: s.shown,
-                    available: true,
-                    pending: false,
-                });
-            }
-            // Outputs the portal didn't include (user didn't tick them).
-            for o in &self.outputs {
-                if !self.screens.iter().any(|s| s.name == o.name) {
-                    rows.push(ScreenRow {
-                        name: o.name.clone(),
-                        detail: output_detail(o),
-                        shown: false,
-                        available: false,
-                        pending: false,
-                    });
-                }
             }
         }
         rows
@@ -189,48 +254,34 @@ impl DesktopViewer {
                 if self.outputs.is_empty() {
                     "No Wayland outputs found — the screen-share dialog will list what's available.".into()
                 } else {
-                    "Pick a screen to mirror. The first time, approve the share dialog on your desktop.".into()
+                    "Set up screens once: approve the share dialog on your desktop (tick every monitor you want).".into()
                 }
             }
             PortalState::Pending(_) => "Waiting for the screen-share dialog on your desktop…".into(),
             PortalState::Ready(c) => {
                 let mode = if self.caps.dmabuf { "GPU (DMA-BUF)" } else { "CPU (SHM)" };
-                format!("{} screen(s) approved · capture: {mode}", c.streams.len())
+                format!("{} screen(s) approved · capture: {mode} · toggle them from the bottom bar", c.streams.len())
             }
             PortalState::Failed(e) => format!("Screen share failed: {e}"),
         }
+    }
+
+    pub fn portal_ready(&self) -> bool {
+        matches!(self.portal, PortalState::Ready(_))
+    }
+
+    pub fn portal_pending(&self) -> bool {
+        matches!(self.portal, PortalState::Pending(_))
     }
 
     pub fn shown_count(&self) -> usize {
         self.screens.iter().filter(|s| s.shown).count()
     }
 
-    /// Show/hide the screen behind row `i`. Before the portal has answered this
-    /// starts the request and remembers what to show.
-    pub fn toggle(&mut self, i: usize) {
-        let rows = self.rows();
-        let Some(row) = rows.get(i) else { return };
-        let name = row.name.clone();
-        if let Some(s) = self.screens.iter_mut().find(|s| s.name == name) {
-            if s.shown {
-                s.hide();
-            } else {
-                s.show(&self.caps);
-            }
-            return;
-        }
-        // Not available yet: (re)start the portal flow.
-        match self.pending_show.iter().position(|n| n == &name) {
-            Some(p) => {
-                self.pending_show.remove(p);
-            }
-            None => self.pending_show.push(name),
-        }
+    /// Ask the portal for screens (no-op while a request is in flight or done).
+    pub fn setup_screens(&mut self) {
         if matches!(self.portal, PortalState::Idle | PortalState::Failed(_)) {
             self.start_portal();
-        } else if matches!(self.portal, PortalState::Ready(_)) {
-            // Approved set doesn't include this monitor — ask again.
-            self.reselect();
         }
     }
 
@@ -253,6 +304,7 @@ impl DesktopViewer {
             s.hide();
             s.capture = None;
         }
+        self.keyboard.attached = None;
         self.pending_gpu_teardown = true;
         self.portal = PortalState::Idle;
     }
@@ -267,10 +319,97 @@ impl DesktopViewer {
         }
     }
 
-    // --- Per-frame ---------------------------------------------------------
+    // --- Keyboard --------------------------------------------------------------
+
+    pub fn toggle_keyboard(&mut self) {
+        self.keyboard.visible = !self.keyboard.visible;
+        if self.keyboard.visible {
+            self.keyboard_place = true;
+        } else {
+            self.keyboard.grab = None;
+        }
+    }
+
+    pub fn keyboard_visible(&self) -> bool {
+        self.keyboard.visible
+    }
+
+    /// Dock the keyboard under `si` (or the nearest shown screen when None).
+    fn dock_keyboard(&mut self, si: Option<usize>) {
+        let target = si.filter(|&i| self.screens.get(i).is_some_and(|s| s.shown)).or_else(|| {
+            let kp = self.keyboard.pose.position;
+            self.screens
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.shown)
+                .map(|(i, s)| {
+                    let d = KeyboardState::dock_pose(&s.pose, s.size_m()).position;
+                    (i, dist2(&kp, &d))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        });
+        if let Some(i) = target {
+            self.keyboard.attached = Some(i);
+            self.keyboard.pose = KeyboardState::dock_pose(&self.screens[i].pose, self.screens[i].size_m());
+            self.keyboard.placed = true;
+        }
+    }
+
+    /// Type queued keys and apply the keyboard's top-bar requests. Call after
+    /// the keyboard panel has been rendered for the frame.
+    pub fn flush_keyboard(&mut self) {
+        let pending = std::mem::take(&mut self.keyboard.pending);
+        if let Some(hid) = &mut self.hid {
+            for a in pending {
+                match a {
+                    KeyAction::Tap { code, mods } => {
+                        let held: Vec<u16> = [
+                            keyboard::MOD_SHIFT,
+                            keyboard::MOD_CTRL,
+                            keyboard::MOD_ALT,
+                            keyboard::MOD_SUPER,
+                            keyboard::MOD_ALTGR,
+                        ]
+                        .into_iter()
+                        .filter(|m| mods & m != 0)
+                        .map(keyboard::mod_code)
+                        .collect();
+                        for &m in &held {
+                            hid.key(m, true);
+                        }
+                        hid.key(code, true);
+                        hid.key(code, false);
+                        for &m in held.iter().rev() {
+                            hid.key(m, false);
+                        }
+                    }
+                    KeyAction::Toggle(code) => {
+                        hid.key(code, true);
+                        hid.key(code, false);
+                    }
+                }
+            }
+        }
+        if self.keyboard.close_request {
+            self.keyboard.close_request = false;
+            self.keyboard.visible = false;
+            self.keyboard.grab = None;
+        }
+        if self.keyboard.detach_request {
+            self.keyboard.detach_request = false;
+            self.keyboard.attached = None;
+        }
+        if self.keyboard.attach_request {
+            self.keyboard.attach_request = false;
+            self.dock_keyboard(self.last_screen);
+        }
+    }
+
+    // --- Per-frame -------------------------------------------------------------
 
     /// Drive the portal, build screens when streams arrive, place newly shown
-    /// screens, and upload the newest frames. Call every frame (hidden or not).
+    /// screens / the keyboard, and upload the newest frames. Call every frame.
     #[allow(clippy::too_many_arguments)]
     pub fn poll(
         &mut self,
@@ -288,6 +427,7 @@ impl DesktopViewer {
                 s.destroy_gpu(device, allocator);
             }
             self.screens.clear();
+            self.last_screen = None;
         }
         if let PortalState::Pending(rx) = &self.portal {
             match rx.try_recv() {
@@ -298,19 +438,9 @@ impl DesktopViewer {
                     }
                     self.build_screens(&cast);
                     self.portal = PortalState::Ready(cast);
-                    // Apply what was asked for while we waited.
-                    let wanted = std::mem::take(&mut self.pending_show);
-                    for name in wanted {
-                        if let Some(s) = self.screens.iter_mut().find(|s| s.name == name) {
-                            s.show(&self.caps);
-                        } else {
-                            log::warn!("desktop: '{name}' was not among the approved screens");
-                        }
-                    }
                 }
                 Ok(Err(e)) => {
                     log::error!("desktop: {e}");
-                    self.pending_show.clear();
                     self.portal = PortalState::Failed(e);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -333,6 +463,25 @@ impl DesktopViewer {
                 log::error!("desktop: {} upload: {e}", s.name);
             }
         }
+        // Keyboard: first placement, then follow its dock.
+        if self.keyboard.visible && self.keyboard_place {
+            self.keyboard_place = false;
+            if self.screens.iter().any(|s| s.shown) {
+                self.dock_keyboard(self.last_screen);
+            } else if let Some(h) = hmd {
+                self.keyboard.pose = front_pose(h, 1.1, 0.0, -0.35, false);
+                self.keyboard.attached = None;
+                self.keyboard.placed = true;
+            }
+        }
+        if let Some(i) = self.keyboard.attached {
+            match self.screens.get(i) {
+                Some(s) if s.shown && self.keyboard.grab.is_none() => {
+                    self.keyboard.pose = KeyboardState::dock_pose(&s.pose, s.size_m());
+                }
+                _ => self.keyboard.attached = None,
+            }
+        }
     }
 
     fn build_screens(&mut self, cast: &portal::Cast) {
@@ -344,12 +493,9 @@ impl DesktopViewer {
                 .iter()
                 .find(|o| st.mapping_id.as_deref() == Some(o.name.as_str()))
                 .or_else(|| {
-                    self.outputs.iter().find(|o| {
-                        st.position == Some(o.logical_pos) && st.size == Some(o.logical_size)
-                    })
+                    self.outputs.iter().find(|o| st.position == Some(o.logical_pos) && st.size == Some(o.logical_size))
                 })
                 .or_else(|| {
-                    // Single-output sessions: the only choice.
                     if self.outputs.len() == 1 && cast.streams.len() == 1 {
                         self.outputs.first()
                     } else {
@@ -377,6 +523,12 @@ impl DesktopViewer {
             panel.width_m = self.width_m;
             self.screens.push(panel);
         }
+        // Screens the order list doesn't know yet go to the end, in stream order.
+        for s in &self.screens {
+            if !self.order.contains(&s.name) {
+                self.order.push(s.name.clone());
+            }
+        }
         // With no Wayland output list, derive the pointer bounds from the streams.
         if self.outputs.is_empty() {
             if let Some(h) = &mut self.hid {
@@ -387,12 +539,13 @@ impl DesktopViewer {
         }
     }
 
-    /// Laser interaction with the shown screens. `max_t`: distance of a closer
-    /// dashboard hit (screens behind it are ignored). Returns the laser ray
-    /// `(aim, t)` when pointing at a screen.
-    pub fn update_input(&mut self, hands: &[HandInput], max_t: Option<f32>) -> Option<(xr::Posef, f32)> {
+    /// Laser interaction with the shown screens + keyboard. `max_t`: distance
+    /// of a closer dashboard hit (things behind it are ignored).
+    pub fn update_input(&mut self, hands: &[HandInput], max_t: Option<f32>) -> InputOut {
+        let mut out = InputOut::default();
         self.pointing = None;
-        // Continue grabs first (the grabbed screen follows the hand).
+
+        // Continue grabs first (the grabbed thing follows the hand).
         for s in &mut self.screens {
             if let Some((hand, offset)) = s.grab {
                 match hands.get(hand) {
@@ -401,62 +554,106 @@ impl DesktopViewer {
                 }
             }
         }
-        let grabbing = self.screens.iter().any(|s| s.grab.is_some());
-
-        // Closest screen hit across hands.
-        let mut best: Option<(usize, usize, f32, f32, f32)> = None; // (screen, hand, u, v, t)
-        if !grabbing {
-            for (hi, h) in hands.iter().enumerate().filter(|(_, h)| h.active) {
-                for (si, s) in self.screens.iter().enumerate() {
-                    if let Some((u, v, t)) = s.hit(&h.aim) {
-                        if max_t.is_some_and(|m| t >= m) {
-                            continue;
-                        }
-                        if best.map_or(true, |b| t < b.4) {
-                            best = Some((si, hi, u, v, t));
-                        }
+        if let Some((hand, offset)) = self.keyboard.grab {
+            match hands.get(hand) {
+                Some(h) if h.active && h.grip >= GRAB_RELEASE => {
+                    self.keyboard.pose = pose_compose(&h.aim, &offset);
+                }
+                _ => {
+                    // Released: snap under a screen if close to its dock.
+                    self.keyboard.grab = None;
+                    let kp = self.keyboard.pose.position;
+                    let near = self
+                        .screens
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.shown)
+                        .map(|(i, s)| (i, dist2(&kp, &KeyboardState::dock_pose(&s.pose, s.size_m()).position)))
+                        .filter(|(_, d)| *d < keyboard::DOCK_SNAP_M * keyboard::DOCK_SNAP_M)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(i, _)| i);
+                    if let Some(i) = near {
+                        self.dock_keyboard(Some(i));
                     }
                 }
             }
         }
+        let grabbing = self.screens.iter().any(|s| s.grab.is_some()) || self.keyboard.grab.is_some();
 
-        // Grip while pointing grabs that screen.
-        if let Some((si, hi, _, _, _)) = best {
+        // Closest hit across hands, screens and keyboard.
+        let mut best: Option<(Target, usize, f32, f32, f32)> = None; // (target, hand, u, v, t)
+        if !grabbing {
+            for (hi, h) in hands.iter().enumerate().filter(|(_, h)| h.active) {
+                let mut consider = |target: Target, hit: Option<(f32, f32, f32)>| {
+                    if let Some((u, v, t)) = hit {
+                        if max_t.is_some_and(|m| t >= m) {
+                            return;
+                        }
+                        if best.map_or(true, |b| t < b.4) {
+                            best = Some((target, hi, u, v, t));
+                        }
+                    }
+                };
+                for (si, s) in self.screens.iter().enumerate() {
+                    consider(Target::Screen(si), s.hit(&h.aim));
+                }
+                if self.keyboard.visible && self.keyboard.placed {
+                    consider(Target::Keyboard, raycast(&h.aim, &self.keyboard.pose, keyboard::size_m()));
+                }
+            }
+        }
+
+        // Grip while pointing grabs the thing (a grabbed keyboard undocks).
+        if let Some((target, hi, _, _, _)) = best {
             if hands[hi].grip > GRAB_START {
                 let aim = hands[hi].aim;
-                self.screens[si].start_grab(hi, &aim);
+                match target {
+                    Target::Screen(si) => self.screens[si].start_grab(hi, &aim),
+                    Target::Keyboard => {
+                        self.keyboard.grab = Some((hi, pose_compose(&pose_invert(&aim), &self.keyboard.pose)));
+                        self.keyboard.attached = None;
+                    }
+                }
                 best = None;
             }
         }
 
-        let mut ray = None;
-        if let Some((si, hi, u, v, t)) = best {
-            self.pointing = Some((si, hi));
-            ray = Some((hands[hi].aim, t));
-            let (x, y) = self.screens[si].desktop_pos(u, v);
+        if let Some((target, hi, u, v, t)) = best {
+            self.pointing = Some((target, hi));
+            out.ray = Some((hands[hi].aim, t));
             let h = &hands[hi];
-            if let Some(hid) = &mut self.hid {
-                // Hover → move (skip sub-pixel jitter).
-                let moved = self.hover_prev.map_or(true, |(px, py)| (px - x).abs() >= 0.5 || (py - y).abs() >= 0.5);
-                if moved {
-                    hid.mouse_move(x, y);
-                    self.hover_prev = Some((x, y));
+            match target {
+                Target::Keyboard => {
+                    out.keyboard_ptr = Some((u, v, h.select));
                 }
-                // Clicks: rising edge of trigger / A on the pointing hand.
-                if h.select && !self.select_prev[hi] && self.held.is_none() {
-                    hid.mouse_move(x, y);
-                    hid.button(hid::BTN_LEFT, true);
-                    self.held = Some((hi, hid::BTN_LEFT));
-                }
-                if h.secondary && !self.secondary_prev[hi] && self.held.is_none() {
-                    hid.mouse_move(x, y);
-                    hid.button(hid::BTN_RIGHT, true);
-                    self.held = Some((hi, hid::BTN_RIGHT));
-                }
-                // Thumbstick scroll.
-                let (sx, sy) = h.scroll;
-                if sx != 0.0 || sy != 0.0 {
-                    hid.wheel(sx * SCROLL_SPEED, sy * SCROLL_SPEED);
+                Target::Screen(si) => {
+                    self.last_screen = Some(si);
+                    let (x, y) = self.screens[si].desktop_pos(u, v);
+                    if let Some(hid) = &mut self.hid {
+                        // Hover → move (skip sub-pixel jitter).
+                        let moved =
+                            self.hover_prev.map_or(true, |(px, py)| (px - x).abs() >= 0.5 || (py - y).abs() >= 0.5);
+                        if moved {
+                            hid.mouse_move(x, y);
+                            self.hover_prev = Some((x, y));
+                        }
+                        // Clicks: rising edge of trigger / A on the pointing hand.
+                        if h.select && !self.select_prev[hi] && self.held.is_none() {
+                            hid.mouse_move(x, y);
+                            hid.button(hid::BTN_LEFT, true);
+                            self.held = Some((hi, hid::BTN_LEFT));
+                        }
+                        if h.secondary && !self.secondary_prev[hi] && self.held.is_none() {
+                            hid.mouse_move(x, y);
+                            hid.button(hid::BTN_RIGHT, true);
+                            self.held = Some((hi, hid::BTN_RIGHT));
+                        }
+                        // Thumbstick scroll.
+                        let (sx, sy) = h.scroll;
+                        if sx != 0.0 || sy != 0.0 {
+                            hid.wheel(sx * SCROLL_SPEED, sy * SCROLL_SPEED);
+                        }
+                    }
                 }
             }
         }
@@ -482,16 +679,19 @@ impl DesktopViewer {
             self.select_prev = [false; 2];
             self.secondary_prev = [false; 2];
         }
-        ray
+        out
     }
 
     /// Index of the screen the laser is on this frame (for the laser fade).
     pub fn pointing_screen(&self) -> Option<usize> {
-        self.pointing.map(|(s, _)| s)
+        match self.pointing {
+            Some((Target::Screen(s), _)) => Some(s),
+            _ => None,
+        }
     }
 
     pub fn pointing(&self) -> bool {
-        self.pointing.is_some() || self.screens.iter().any(|s| s.grab.is_some())
+        self.pointing.is_some() || self.screens.iter().any(|s| s.grab.is_some()) || self.keyboard.grab.is_some()
     }
 
     pub fn quad_layers<'a>(&'a self, space: &'a xr::Space) -> Vec<xr::CompositionLayerQuad<'a, xr::Vulkan>> {
@@ -503,6 +703,11 @@ impl DesktopViewer {
     pub fn frame_counts(&self) -> Vec<(String, u64, Option<String>)> {
         self.screens.iter().map(|s| (s.name.clone(), s.frames, s.last_error.clone())).collect()
     }
+}
+
+fn dist2(a: &xr::Vector3f, b: &xr::Vector3f) -> f32 {
+    let d = [a.x - b.x, a.y - b.y, a.z - b.z];
+    d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
 }
 
 fn output_detail(o: &outputs::OutputInfo) -> String {

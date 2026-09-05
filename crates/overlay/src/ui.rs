@@ -137,8 +137,17 @@ pub struct LibState {
     pub desktop_hid_error: Option<String>,
     pub desktop_dmabuf: bool,
     pub desktop_shown: usize,
-    pub desktop_toggle_request: Option<usize>,
+    pub desktop_ready: bool,   // portal approved at least once
+    pub desktop_pending: bool, // portal dialog in flight
+    pub desktop_setup_request: bool,
     pub desktop_reselect_request: bool,
+    pub desktop_move_request: Option<(usize, i32)>, // reorder approved screen (row, ±1)
+    /// Bottom bar: approved screens (name, shown) in user order + keyboard state.
+    pub desktop_bar: Vec<(String, bool)>,
+    pub desktop_bar_toggle: Option<usize>,
+    pub keyboard_shown: bool,
+    pub keyboard_toggle_request: bool,
+    pub keyboard_layout: String,
     /// Physical width of mirrored screens, metres.
     pub screen_width_m: f32,
     /// Central-view fade-in animation (resets when the tab / splash changes).
@@ -222,8 +231,16 @@ impl LibState {
             desktop_hid_error: None,
             desktop_dmabuf: false,
             desktop_shown: 0,
-            desktop_toggle_request: None,
+            desktop_ready: false,
+            desktop_pending: false,
+            desktop_setup_request: false,
             desktop_reselect_request: false,
+            desktop_move_request: None,
+            desktop_bar: Vec::new(),
+            desktop_bar_toggle: None,
+            keyboard_shown: false,
+            keyboard_toggle_request: false,
+            keyboard_layout: String::new(),
             screen_width_m: 1.35,
             session_minutes: None,
             last_nav: Nav::Home,
@@ -395,6 +412,41 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                 .min_size(egui::vec2(0.0, 40.0));
                 if ui.add(btn).on_hover_text("Active game").clicked() {
                     st.show_splash = !st.show_splash;
+                    st.sound_tab = true;
+                }
+            }
+            // Mirrored screens + keyboard, centred in the bar (fixed order so a
+            // screen is always in the same spot — the WayVR wrist-bar problem).
+            if !st.desktop_bar.is_empty() {
+                let count = st.desktop_bar.len() + 1;
+                let pill_w = 92.0;
+                let total = count as f32 * pill_w + (count as f32 - 1.0) * 8.0;
+                let bar = ui.max_rect();
+                let rect = egui::Rect::from_center_size(bar.center(), egui::vec2(total, 40.0));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                child.spacing_mut().item_spacing.x = 8.0;
+                let mut toggle = None;
+                for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
+                    let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                    let btn = egui::Button::new(
+                        egui::RichText::new(format!("{}  {}", icon::MONITOR, name)).size(14.0).color(fg),
+                    )
+                    .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                    .min_size(egui::vec2(pill_w, 40.0));
+                    if child.add(btn).on_hover_text(if *shown { "Hide screen" } else { "Show screen" }).clicked() {
+                        toggle = Some(i);
+                    }
+                }
+                let kfg = if st.keyboard_shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                let kbtn = egui::Button::new(egui::RichText::new(icon::KEYBOARD).size(20.0).color(kfg))
+                    .fill(if st.keyboard_shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                    .min_size(egui::vec2(pill_w, 40.0));
+                if child.add(kbtn).on_hover_text("VR keyboard").clicked() {
+                    st.keyboard_toggle_request = true;
+                    st.sound_tab = true;
+                }
+                if let Some(i) = toggle {
+                    st.desktop_bar_toggle = Some(i);
                     st.sound_tab = true;
                 }
             }
@@ -1831,47 +1883,69 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
         section(ui, "Screens", |ui| {
             ui.label(egui::RichText::new(&st.desktop_status).color(theme::ON_SURFACE_VAR));
             ui.add_space(6.0);
+            if !st.desktop_ready {
+                ui.horizontal(|ui| {
+                    let (glyph, label) = if st.desktop_pending {
+                        (icon::HOURGLASS, "Waiting for approval…")
+                    } else {
+                        (icon::MONITOR, "Set up screens")
+                    };
+                    if action_button(ui, glyph, label).clicked() && !st.desktop_pending {
+                        st.desktop_setup_request = true;
+                        st.sound_tab = true;
+                    }
+                });
+                divider(ui);
+            }
             if st.desktop_rows.is_empty() {
                 ui.label(egui::RichText::new("No screens detected.").color(theme::ON_SURFACE_VAR));
             }
-            let mut toggle = None;
+            let approved = st.desktop_rows.iter().filter(|r| r.approved).count();
+            let mut mv = None;
             for (i, row) in st.desktop_rows.iter().enumerate() {
                 if i > 0 {
                     divider(ui);
                 }
-                let sub = if row.pending {
-                    "Waiting for approval…".to_string()
-                } else if row.available {
-                    row.detail.clone()
-                } else {
-                    format!("{} · not approved yet", row.detail)
+                let sub = match &row.hint {
+                    Some(h) => format!("{} · {h}", row.detail),
+                    None => row.detail.clone(),
                 };
                 setting_row(ui, &row.name, Some(&sub), |ui| {
-                    let (glyph, label) = if row.shown {
-                        (icon::EYE_SLASH, "Hide")
-                    } else if row.pending {
-                        (icon::HOURGLASS, "Pending")
-                    } else {
-                        (icon::EYE, "Show")
-                    };
-                    if action_button(ui, glyph, label).clicked() {
-                        toggle = Some(i);
+                    if row.approved {
+                        // Order in the bottom bar: ◀ / ▶ (left = earlier).
+                        ui.add_enabled_ui(i + 1 < approved, |ui| {
+                            if action_button(ui, icon::CARET_RIGHT, "").clicked() {
+                                mv = Some((i, 1));
+                            }
+                        });
+                        ui.add_enabled_ui(i > 0, |ui| {
+                            if action_button(ui, icon::CARET_LEFT, "").clicked() {
+                                mv = Some((i, -1));
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new(if row.shown { "shown" } else { "hidden" })
+                                .size(13.0)
+                                .color(theme::ON_SURFACE_VAR),
+                        );
                     }
                 });
             }
-            if let Some(i) = toggle {
-                st.desktop_toggle_request = Some(i);
+            if let Some(m) = mv {
+                st.desktop_move_request = Some(m);
                 st.sound_tab = true;
             }
         });
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if reset_button(ui, "Re-pick screens").clicked() {
-                    st.desktop_reselect_request = true;
-                    st.sound_tab = true;
-                }
+        if st.desktop_ready {
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if reset_button(ui, "Re-pick screens").clicked() {
+                        st.desktop_reselect_request = true;
+                        st.sound_tab = true;
+                    }
+                });
             });
-        });
+        }
         ui.add_space(6.0);
         section(ui, "Placement", |ui| {
             setting_row(ui, "Screen width", Some("Grip a screen to move it · trigger clicks · A right-clicks · stick scrolls"), |ui| {
@@ -1894,6 +1968,13 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
             }
             divider(ui);
             setting_row(ui, "Shown", Some(&format!("{} screen(s) in VR", st.desktop_shown)), |_| {});
+            divider(ui);
+            setting_row(
+                ui,
+                "Keyboard layout",
+                Some(&format!("{} · tap a modifier then a key · grip to move · dock under a screen", st.keyboard_layout)),
+                |_| {},
+            );
         });
     });
 }

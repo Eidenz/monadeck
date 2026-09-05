@@ -159,6 +159,14 @@ unsafe extern "system" fn get_instance_proc_addr(
 fn main() {
     // `monadeck-overlay --desktop-selftest`: exercise the desktop-viewer capture
     // path (portal → PipeWire → Vulkan import → PNG) with no headset/runtime.
+    if std::env::args().any(|a| a == "--keyboard-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Err(e) = desktop::selftest::keyboard() {
+            eprintln!("keyboard selftest FAILED: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args().any(|a| a == "--desktop-selftest") {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
         if let Err(e) = desktop::selftest::run() {
@@ -436,7 +444,18 @@ fn run() -> Result<()> {
     let desktop_importer = desktop_caps
         .dmabuf
         .then(|| desktop::dmabuf::Importer::new(&vk_instance, &device, queue_family_index, format));
-    let mut desktop = desktop::DesktopViewer::new(desktop_caps, desktop_importer, ov_cfg.screencast_token.clone());
+    let mut desktop = desktop::DesktopViewer::new(
+        desktop_caps,
+        desktop_importer,
+        ov_cfg.screencast_token.clone(),
+        ov_cfg.screen_order.clone(),
+    );
+    // The VR keyboard's own panel (egui) — drawn on demand, docks under screens.
+    let kb_px = desktop::keyboard::panel_px();
+    let mut kb_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        kb_px, desktop::keyboard::size_m(), anchor,
+    )?;
     desktop.set_width(ov_cfg.screen_width_m);
     let mut screencast_token = ov_cfg.screencast_token.clone();
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
@@ -905,8 +924,10 @@ fn run() -> Result<()> {
         desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
         if let Some(tok) = desktop.take_token_change() {
             screencast_token = tok;
-            overlay_config_from(&st, &screencast_token).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order()).save();
         }
+        st.keyboard_shown = desktop.keyboard_visible();
+        st.desktop_bar = desktop.bar_items();
 
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
         // order is fresh on the next summon), drop input block, render only toasts.
@@ -921,11 +942,16 @@ fn run() -> Result<()> {
                 }
             }
             // Mirrored screens stay interactive while the dashboard is away.
-            let d_ray = desktop.update_input(&hands, None);
+            let d_in = desktop.update_input(&hands, None);
+            let d_ray = d_in.ray;
             let want_block = desktop.pointing();
             if want_block != blocked_prev {
                 monado.set_block(want_block);
                 blocked_prev = want_block;
+            }
+            let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+            if desktop.keyboard.clicked {
+                audio.select();
             }
             let laser_alpha = screen_laser_alpha(desktop.pointing_screen(), &mut screen_laser_since);
             let laser_q = match (d_ray, hmd) {
@@ -939,6 +965,9 @@ fn run() -> Result<()> {
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
             for q in &screen_quads {
+                layers.push(q);
+            }
+            if let Some(q) = &kb_q {
                 layers.push(q);
             }
             if popup_active {
@@ -1067,14 +1096,19 @@ fn run() -> Result<()> {
 
         // Mirrored screens: one closer than the dashboard takes the pointer. Not
         // while a dashboard grab is in progress (the grip would grab both).
-        let d_ray = if grab.is_some() {
+        let d_in = if grab.is_some() {
             desktop.update_input(&[], None)
         } else {
             desktop.update_input(&hands, best.map(|b| b.t))
         };
+        let d_ray = d_in.ray;
         if d_ray.is_some() {
             best = None;
             scroll = (0.0, 0.0);
+        }
+        let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+        if desktop.keyboard.clicked {
+            audio.select();
         }
         // Feed the Desktop page.
         st.desktop_rows = desktop.rows();
@@ -1082,6 +1116,9 @@ fn run() -> Result<()> {
         st.desktop_hid_error = desktop.hid_error.clone();
         st.desktop_dmabuf = desktop.caps.dmabuf;
         st.desktop_shown = desktop.shown_count();
+        st.desktop_ready = desktop.portal_ready();
+        st.desktop_pending = desktop.portal_pending();
+        st.keyboard_layout = desktop.keyboard.labels.layout_name.clone();
 
         let main_ptr = best.filter(|h| h.panel == PanelId::Main).map(|h| (h.u, h.v, h.down));
         let rail_ptr = best.filter(|h| h.panel == PanelId::Rail).map(|h| (h.u, h.v, h.down));
@@ -1207,6 +1244,9 @@ fn run() -> Result<()> {
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
         // Screens first: they sit behind the dashboard in the composite.
         for q in &screen_quads {
+            layers.push(q);
+        }
+        if let Some(q) = &kb_q {
             layers.push(q);
         }
         if curved {
@@ -1345,7 +1385,7 @@ fn run() -> Result<()> {
             audio.set_volume(st.audio_volume);
             desktop.set_width(st.screen_width_m);
             settings_prev = settings_now;
-            overlay_config_from(&st, &screencast_token).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order()).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
         // effective offset is pushed to libmonado at the top of the loop (which
@@ -1439,13 +1479,26 @@ fn run() -> Result<()> {
             st.recenter_request = false;
             recenter = true;
         }
-        // Desktop page actions.
-        if let Some(i) = st.desktop_toggle_request.take() {
-            desktop.toggle(i);
+        // Desktop page + bottom bar actions.
+        if st.desktop_setup_request {
+            st.desktop_setup_request = false;
+            desktop.setup_screens();
         }
         if st.desktop_reselect_request {
             st.desktop_reselect_request = false;
             desktop.reselect();
+        }
+        if let Some(i) = st.desktop_bar_toggle.take() {
+            desktop.toggle_bar(i);
+        }
+        if let Some((i, d)) = st.desktop_move_request.take() {
+            if desktop.move_order(i, d) {
+                overlay_config_from(&st, &screencast_token, &desktop.order()).save();
+            }
+        }
+        if st.keyboard_toggle_request {
+            st.keyboard_toggle_request = false;
+            desktop.toggle_keyboard();
         }
         if st.recenter_playspace_request {
             st.recenter_playspace_request = false;
@@ -1484,8 +1537,44 @@ fn screen_laser_alpha(screen: Option<usize>, since: &mut Option<(usize, Instant)
     }
 }
 
+/// Render the VR keyboard onto its panel (when visible) and build its layer.
+#[allow(clippy::too_many_arguments)]
+fn render_keyboard<'a>(
+    desktop: &mut desktop::DesktopViewer,
+    panel: &'a mut gfx::PanelGfx,
+    pointer: Option<(f32, f32, bool)>,
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    cmd: vk::CommandBuffer,
+    cmd_pool: vk::CommandPool,
+    queue: vk::Queue,
+    fence: vk::Fence,
+    elapsed: f64,
+    space: &'a xr::Space,
+) -> Result<Option<xr::CompositionLayerQuad<'a, xr::Vulkan>>> {
+    if !desktop.keyboard.visible || !desktop.keyboard.placed {
+        desktop.keyboard.clicked = false;
+        return Ok(None);
+    }
+    panel.pose = desktop.keyboard.pose;
+    panel.size_m = desktop::keyboard::size_m();
+    let kb = &mut desktop.keyboard;
+    render_panel(panel, device, render_pass, cmd, cmd_pool, queue, fence, true, pointer, (0.0, 0.0), elapsed, |ctx| {
+        desktop::keyboard::build(ctx, kb)
+    })?;
+    desktop.flush_keyboard();
+    if !desktop.keyboard.visible {
+        return Ok(None);
+    }
+    Ok(Some(quad_layer(panel, space, true)))
+}
+
 /// The persisted overlay preferences, from live UI state.
-fn overlay_config_from(st: &ui::LibState, screencast_token: &Option<String>) -> monadeck_core::overlay_config::OverlayConfig {
+fn overlay_config_from(
+    st: &ui::LibState,
+    screencast_token: &Option<String>,
+    screen_order: &[String],
+) -> monadeck_core::overlay_config::OverlayConfig {
     monadeck_core::overlay_config::OverlayConfig {
         audio_enabled: st.audio_enabled,
         audio_volume: st.audio_volume,
@@ -1501,6 +1590,7 @@ fn overlay_config_from(st: &ui::LibState, screencast_token: &Option<String>) -> 
         freeze_delay_secs: st.freeze_delay_secs,
         screencast_token: screencast_token.clone(),
         screen_width_m: st.screen_width_m,
+        screen_order: screen_order.to_vec(),
     }
 }
 
