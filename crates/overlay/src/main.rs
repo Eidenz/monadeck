@@ -671,6 +671,7 @@ fn run() -> Result<()> {
     st.keyboard_scale = ov_cfg.keyboard_scale;
     st.layout_active = layouts.last_used.clone();
     st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
+            st.layout_follow = layouts.layouts.iter().map(|l| l.recenter_on_toggle).collect();
     // Hide the UEVR feature entirely if protontricks-launch isn't installed.
     st.uevr_available = monadeck_core::uevr::protontricks_available();
     // If protontricks is present, make sure the chihuahua injector is too —
@@ -1330,7 +1331,10 @@ fn run() -> Result<()> {
         }
         if let Some(i) = st.layout_overwrite.take() {
             if let Some(name) = layouts.layouts.get(i).map(|l| l.name.clone()) {
-                layouts.upsert(desktop.snapshot(name.clone()));
+                let follow = layouts.layouts[i].recenter_on_toggle;
+                let mut snap = desktop.snapshot(name.clone());
+                snap.recenter_on_toggle = follow;
+                layouts.upsert(snap);
                 layouts.last_used = Some(name);
                 layouts_dirty = true;
             }
@@ -1352,6 +1356,12 @@ fn run() -> Result<()> {
         }
         if let Some((i, d)) = st.layout_move.take() {
             layouts_dirty |= layouts.move_by(i, d);
+        }
+        if let Some((i, f)) = st.layout_follow_toggle.take() {
+            if let Some(l) = layouts.layouts.get_mut(i) {
+                l.recenter_on_toggle = f;
+                layouts_dirty = true;
+            }
         }
         if st.layout_cycle_request {
             st.layout_cycle_request = false;
@@ -1997,6 +2007,7 @@ fn run() -> Result<()> {
             monadeck_core::desktop_layouts::save(&layouts);
             st.layout_active = layouts.last_used.clone();
             st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
+            st.layout_follow = layouts.layouts.iter().map(|l| l.recenter_on_toggle).collect();
         }
         if let Some(id) = st.set_active_request.take() {
             monado.set_primary(id);

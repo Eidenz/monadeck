@@ -75,6 +75,8 @@ pub struct LibState {
     pub layout_delete_arm: Option<(usize, f64)>,
     pub layout_create: Option<String>,
     pub layout_rename: Option<usize>,          // naming flow target when renaming
+    pub layout_follow: Vec<bool>,               // per layout: double-B restore follows the head
+    pub layout_follow_toggle: Option<(usize, bool)>,
     pub layout_renamed: Option<(usize, String)>,
     pub layout_move: Option<(usize, i32)>,
     pub restore_layout: bool,
@@ -259,6 +261,8 @@ impl LibState {
             layout_delete_arm: None,
             layout_create: None,
             layout_rename: None,
+            layout_follow: Vec::new(),
+            layout_follow_toggle: None,
             layout_renamed: None,
             layout_move: None,
             restore_layout: true,
@@ -540,7 +544,8 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         let wide = st.wrist_shot.is_some() && !st.watch_layout_menu;
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
-                ui.set_width(if wide { ui.available_width() } else { 214.0 });
+                // (available width includes the card's own margins — keep it inside)
+                ui.set_width(if wide { ui.available_width() - 16.0 } else { 214.0 });
                 ui.set_min_height(120.0);
                 if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
                     let req = crate::photos::wrist_card(ui, shot.thumb.as_ref(), shot.qr.as_deref(), &shot.when, shot.idx, shot.total);
@@ -645,7 +650,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         });
         // Menu + screens (fixed numbering, same as the bottom bar), in a card.
         watch_card(ui, |ui| {
-            ui.set_width(ui.available_width());
+            ui.set_width(ui.available_width() - 16.0);
             ui.horizontal(|ui| {
                 let menu = egui::Button::new(egui::RichText::new(icon::LIST).size(22.0).color(theme::ON_SURFACE))
                     .fill(theme::SURFACE_CONTAINER_HIGH)
@@ -2421,6 +2426,8 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 let active = st.layout_active.as_deref() == Some(name.as_str());
                 let title = if active { format!("{} {name}", icon::CHECK_CIRCLE) } else { name.clone() };
                 let sub = format!("{shown} screen(s) shown{}", if active { " · active" } else { "" });
+                let mut follow = st.layout_follow.get(i).copied().unwrap_or(false);
+                let follow_before = follow;
                 setting_row(ui, &title, Some(&sub), |ui| {
                     let armed = st.layout_delete_arm.is_some_and(|(j, _)| j == i);
                     let del = if armed { "Confirm?" } else { "" };
@@ -2450,7 +2457,14 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                     if action_button(ui, icon::PLAY, "Apply").clicked() {
                         apply = Some(i);
                     }
+                    ui.add_space(6.0);
+                    seg_toggle(ui, &mut follow);
+                    ui.label(egui::RichText::new("follows head").size(12.0).color(theme::ON_SURFACE_VAR))
+                        .on_hover_text("Double-B off/on re-centres this layout on your head, like unsaved arrangements");
                 });
+                if follow != follow_before {
+                    st.layout_follow_toggle = Some((i, follow));
+                }
             }
             if let Some(i) = rename {
                 st.layout_rename = Some(i);

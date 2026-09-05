@@ -27,7 +27,7 @@ use std::sync::Mutex;
 use ash::vk;
 use openxr as xr;
 
-use crate::mathx::{cross, forward, front_pose, normalize, pose_compose, pose_invert, quat_from_axes, quatf, raycast};
+use crate::mathx::{front_pose, pose_compose, pose_invert, raycast};
 use monadeck_core::desktop_layouts::{DesktopLayout, KeyboardPlacement, ScreenPlacement};
 use dmabuf::{Caps, Importer};
 use hid::UInput;
@@ -229,18 +229,11 @@ impl DesktopViewer {
         }
     }
 
-    /// The head's position with only its yaw (gravity-aligned), so restored
-    /// screens follow where you turned, not how you tilted.
+    /// The head pose the double-B restore is relative to: position + full
+    /// orientation, so screens come back exactly where they sat in your view
+    /// (turn 90° and look up: still dead centre).
     fn head_flat(h: &xr::Posef) -> xr::Posef {
-        let f = forward(h);
-        let mut flat = [f[0], 0.0, f[2]];
-        if flat[0].abs() + flat[2].abs() < 1e-4 {
-            flat = [0.0, 0.0, -1.0];
-        }
-        let z = normalize([-flat[0], 0.0, -flat[2]]);
-        let up = [0.0, 1.0, 0.0];
-        let x = normalize(cross(up, z));
-        xr::Posef { orientation: quatf(quat_from_axes(x, up, z)), position: h.position }
+        *h
     }
 
     /// Double-A: hide every shown screen (remembering the set), or bring that
@@ -359,7 +352,7 @@ impl DesktopViewer {
             pose: pose_to_arr(&self.to_stage(&kb.pose)),
             scale: kb.scale,
         });
-        DesktopLayout { name, screens, keyboard }
+        DesktopLayout { name, screens, keyboard, recenter_on_toggle: false }
     }
 
     /// Apply an arrangement. Screens the layout doesn't mention are hidden.
@@ -419,7 +412,8 @@ impl DesktopViewer {
                 self.clipboard.set_active(false);
             }
         }
-        self.layout_untouched = true;
+        // A "follows head" layout behaves like an unsaved arrangement.
+        self.layout_untouched = !layout.recenter_on_toggle;
     }
 
     /// Default width: applies to screens that were never sized by hand.

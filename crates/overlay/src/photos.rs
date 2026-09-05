@@ -660,7 +660,7 @@ fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         .corner_radius(16)
         .inner_margin(egui::Margin::same(14))
         // Keep the stroke inside the panel (it was clipped at the bottom edge).
-        .outer_margin(egui::Margin::same(3))
+        .outer_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             add(ui);
@@ -791,13 +791,13 @@ pub fn wrist_card(
             }
         });
     });
-    ui.add_space(4.0);
+    ui.add_space(2.0);
     ui.horizontal(|ui| {
-        let arrow = egui::vec2(28.0, 96.0);
+        let arrow = egui::vec2(26.0, 76.0);
         if ui.add_enabled(idx + 1 < total, egui::Button::new(egui::RichText::new(icon::CARET_LEFT).size(18.0)).min_size(arrow)).clicked() {
             req.older = true;
         }
-        let size = egui::vec2(150.0, 96.0);
+        let size = egui::vec2(120.0, 76.0);
         match (qr, thumb) {
             (Some(content), _) => {
                 let ic = egui::RichText::new(icon::QR_CODE).size(36.0).color(egui::Color32::BLACK);

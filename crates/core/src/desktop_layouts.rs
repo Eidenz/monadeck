@@ -43,6 +43,10 @@ pub struct DesktopLayout {
     pub name: String,
     pub screens: Vec<ScreenPlacement>,
     pub keyboard: Option<KeyboardPlacement>,
+    /// Double-B off/on re-centres this layout on the head (like an unsaved
+    /// arrangement) instead of restoring it exactly.
+    #[serde(default)]
+    pub recenter_on_toggle: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
