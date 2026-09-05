@@ -463,6 +463,15 @@ fn run() -> Result<()> {
     desktop.set_width(ov_cfg.screen_width_m);
     desktop.caps.curved = curved;
     let mut screencast_token = ov_cfg.screencast_token.clone();
+    // Named screen arrangements; the last used one is re-applied when the
+    // screens come up (if enabled) so nothing has to be re-placed by hand.
+    let mut layouts = monadeck_core::desktop_layouts::load();
+    if ov_cfg.restore_layout {
+        if let Some(l) = layouts.last_used.clone().and_then(|n| layouts.find(&n).cloned()) {
+            log::info!("desktop: will restore layout '{}'", l.name);
+            desktop.apply(&l);
+        }
+    }
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
     let mut settings_prev = (
         ov_cfg.audio_enabled,
@@ -476,7 +485,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        ov_cfg.screen_width_m,
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -520,6 +529,9 @@ fn run() -> Result<()> {
     st.uevr_delay = ov_cfg.uevr_delay;
     st.freeze_delay_secs = ov_cfg.freeze_delay_secs;
     st.screen_width_m = ov_cfg.screen_width_m;
+    st.restore_layout = ov_cfg.restore_layout;
+    st.layout_active = layouts.last_used.clone();
+    st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
     // Hide the UEVR feature entirely if protontricks-launch isn't installed.
     st.uevr_available = monadeck_core::uevr::protontricks_available();
     // If protontricks is present, make sure the chihuahua injector is too —
@@ -1392,7 +1404,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            st.screen_width_m,
+            (st.screen_width_m, st.restore_layout),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -1514,6 +1526,36 @@ fn run() -> Result<()> {
             st.keyboard_toggle_request = false;
             desktop.toggle_keyboard();
         }
+        // Desktop layouts: create / overwrite / apply / delete.
+        let mut layouts_dirty = false;
+        if let Some(name) = st.layout_create.take() {
+            layouts.upsert(desktop.snapshot(name.clone()));
+            layouts.last_used = Some(name);
+            layouts_dirty = true;
+        }
+        if let Some(i) = st.layout_overwrite.take() {
+            if let Some(name) = layouts.layouts.get(i).map(|l| l.name.clone()) {
+                layouts.upsert(desktop.snapshot(name.clone()));
+                layouts.last_used = Some(name);
+                layouts_dirty = true;
+            }
+        }
+        if let Some(i) = st.layout_apply.take() {
+            if let Some(l) = layouts.layouts.get(i).cloned() {
+                desktop.apply(&l);
+                layouts.last_used = Some(l.name);
+                layouts_dirty = true;
+            }
+        }
+        if let Some(i) = st.layout_delete.take() {
+            layouts.remove(i);
+            layouts_dirty = true;
+        }
+        if layouts_dirty {
+            monadeck_core::desktop_layouts::save(&layouts);
+            st.layout_active = layouts.last_used.clone();
+            st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
+        }
         if st.recenter_playspace_request {
             st.recenter_playspace_request = false;
             monado.recenter();
@@ -1605,6 +1647,7 @@ fn overlay_config_from(
         screencast_token: screencast_token.clone(),
         screen_width_m: st.screen_width_m,
         screen_order: screen_order.to_vec(),
+        restore_layout: st.restore_layout,
     }
 }
 

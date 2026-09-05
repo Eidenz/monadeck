@@ -28,6 +28,7 @@ use ash::vk;
 use openxr as xr;
 
 use crate::mathx::{front_pose, pose_compose, pose_invert, raycast};
+use monadeck_core::desktop_layouts::{DesktopLayout, KeyboardPlacement, ScreenPlacement};
 use dmabuf::{Caps, Importer};
 use hid::UInput;
 use keyboard::{KeyAction, KeyboardState};
@@ -131,6 +132,8 @@ pub struct DesktopViewer {
     pending_gpu_teardown: bool,
     width_m: f32,
     keyboard_place: bool,
+    /// A layout to apply once the portal has produced the screens.
+    pending_layout: Option<DesktopLayout>,
 }
 
 impl DesktopViewer {
@@ -183,6 +186,84 @@ impl DesktopViewer {
             pending_gpu_teardown: false,
             width_m: screen::DEFAULT_WIDTH_M,
             keyboard_place: false,
+            pending_layout: None,
+        }
+    }
+
+    // --- Layouts (named arrangements) ------------------------------------------
+
+    /// The current arrangement: every approved screen (shown or not), placed
+    /// ones with their pose/size/curve, plus the keyboard.
+    pub fn snapshot(&self, name: String) -> DesktopLayout {
+        let screens = self
+            .screens
+            .iter()
+            .map(|s| ScreenPlacement {
+                name: s.name.clone(),
+                shown: s.shown && s.placed,
+                pose: pose_to_arr(&s.pose),
+                width_m: s.width_m,
+                curve: s.curve,
+            })
+            .collect();
+        let kb = &self.keyboard;
+        let keyboard = kb.placed.then(|| KeyboardPlacement {
+            visible: kb.visible,
+            attached: kb.attached.and_then(|i| self.screens.get(i)).map(|s| s.name.clone()),
+            pose: pose_to_arr(&kb.pose),
+        });
+        DesktopLayout { name, screens, keyboard }
+    }
+
+    /// Apply an arrangement. Screens the layout doesn't mention are hidden.
+    /// Before the portal has answered, it's kept and applied when it does.
+    pub fn apply(&mut self, layout: &DesktopLayout) {
+        if self.screens.is_empty() {
+            self.pending_layout = Some(layout.clone());
+            if matches!(self.portal, PortalState::Idle | PortalState::Failed(_)) {
+                self.start_portal();
+            }
+            return;
+        }
+        for s in &mut self.screens {
+            match layout.screens.iter().find(|p| p.name == s.name) {
+                Some(p) => {
+                    s.pose = arr_to_pose(&p.pose);
+                    s.width_m = p.width_m.clamp(0.3, 4.0);
+                    s.curve = p.curve.clamp(0.0, 1.0);
+                    s.placed = true;
+                    if p.shown && !s.shown {
+                        s.show(&self.caps);
+                    } else if !p.shown && s.shown {
+                        s.hide();
+                    }
+                }
+                None => {
+                    if s.shown {
+                        s.hide();
+                    }
+                }
+            }
+        }
+        match &layout.keyboard {
+            Some(k) => {
+                self.keyboard.visible = k.visible;
+                self.keyboard.grab = None;
+                self.keyboard.pose = arr_to_pose(&k.pose);
+                self.keyboard.placed = true;
+                self.keyboard_place = false;
+                let target = k.attached.as_ref().and_then(|n| self.screens.iter().position(|s| &s.name == n));
+                match target {
+                    Some(i) if self.screens[i].shown => self.dock_keyboard(Some(i)),
+                    _ => self.keyboard.attached = None,
+                }
+                self.clipboard.set_active(self.keyboard.visible);
+            }
+            None => {
+                self.keyboard.visible = false;
+                self.keyboard.attached = None;
+                self.clipboard.set_active(false);
+            }
         }
     }
 
@@ -474,6 +555,9 @@ impl DesktopViewer {
                     }
                     self.build_screens(&cast);
                     self.portal = PortalState::Ready(cast);
+                    if let Some(l) = self.pending_layout.take() {
+                        self.apply(&l);
+                    }
                 }
                 Ok(Err(e)) => {
                     log::error!("desktop: {e}");
@@ -801,6 +885,17 @@ impl DesktopViewer {
     #[allow(dead_code)]
     pub fn frame_counts(&self) -> Vec<(String, u64, Option<String>)> {
         self.screens.iter().map(|s| (s.name.clone(), s.frames, s.last_error.clone())).collect()
+    }
+}
+
+fn pose_to_arr(p: &xr::Posef) -> [f32; 7] {
+    [p.position.x, p.position.y, p.position.z, p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w]
+}
+
+fn arr_to_pose(a: &[f32; 7]) -> xr::Posef {
+    xr::Posef {
+        position: xr::Vector3f { x: a[0], y: a[1], z: a[2] },
+        orientation: xr::Quaternionf { x: a[3], y: a[4], z: a[5], w: a[6] },
     }
 }
 

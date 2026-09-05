@@ -36,6 +36,8 @@ pub struct OverlayConfig {
     pub screen_width_m: f32,
     /// Bottom-bar order of the mirrored screens (output names, first = leftmost).
     pub screen_order: Vec<String>,
+    /// Re-apply the last used desktop layout when the screens become available.
+    pub restore_layout: bool,
 }
 
 impl Default for OverlayConfig {
@@ -56,6 +58,7 @@ impl Default for OverlayConfig {
             screencast_token: None,
             screen_width_m: 1.35,
             screen_order: Vec::new(),
+            restore_layout: true,
         }
     }
 }

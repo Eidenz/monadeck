@@ -52,9 +52,19 @@ pub struct LibState {
     pub collection_toggle: Option<usize>, // toggle the selected game in collection #
     pub collection_create: Option<String>, // create a new collection with this name
     pub collection_delete: Option<usize>, // delete collection #
-    /// Naming a new collection: the keyboard targets `name_buf` instead of search.
+    /// Naming something new: the keyboard targets `name_buf` instead of search.
     pub naming: bool,
+    pub naming_layout: bool, // true = a desktop layout, false = a collection
     pub name_buf: String,
+    // Desktop layouts (named screen arrangements).
+    pub layouts: Vec<(String, usize)>, // (name, screens shown)
+    pub layout_active: Option<String>,
+    pub layout_apply: Option<usize>,
+    pub layout_overwrite: Option<usize>,
+    pub layout_delete: Option<usize>,
+    pub layout_delete_arm: Option<(usize, f64)>,
+    pub layout_create: Option<String>,
+    pub restore_layout: bool,
     pub recenter_request: bool,
     pub recenter_playspace_request: bool,
     /// Re-scan the catalogue + re-probe artwork (picks up covers added at runtime).
@@ -177,7 +187,16 @@ impl LibState {
             collection_create: None,
             collection_delete: None,
             naming: false,
+            naming_layout: false,
             name_buf: String::new(),
+            layouts: Vec::new(),
+            layout_active: None,
+            layout_apply: None,
+            layout_overwrite: None,
+            layout_delete: None,
+            layout_delete_arm: None,
+            layout_create: None,
+            restore_layout: true,
             recenter_request: false,
             recenter_playspace_request: false,
             refresh_request: false,
@@ -518,7 +537,8 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
         ui.spacing_mut().item_spacing.y = 6.0;
         if naming {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("{}  New collection:", icon::FOLDER_PLUS)).size(14.0).color(theme::ON_SURFACE_VAR));
+                let what = if st.naming_layout { "New layout:" } else { "New collection:" };
+                ui.label(egui::RichText::new(format!("{}  {what}", icon::FOLDER_PLUS)).size(14.0).color(theme::ON_SURFACE_VAR));
                 ui.add_space(6.0);
                 let shown = if st.name_buf.is_empty() { "…" } else { st.name_buf.as_str() };
                 ui.label(egui::RichText::new(shown).size(16.0).strong().color(egui::Color32::WHITE));
@@ -548,10 +568,15 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
                 if naming {
                     let name = st.name_buf.trim().to_string();
                     if !name.is_empty() {
-                        st.collection_create = Some(name);
+                        if st.naming_layout {
+                            st.layout_create = Some(name);
+                        } else {
+                            st.collection_create = Some(name);
+                        }
                     }
                     st.name_buf.clear();
                     st.naming = false;
+                    st.naming_layout = false;
                 }
                 st.keyboard_open = false;
             }
@@ -563,6 +588,7 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
                 if fkey(ui, "Cancel", 110.0, false).clicked() {
                     st.name_buf.clear();
                     st.naming = false;
+                    st.naming_layout = false;
                     st.keyboard_open = false;
                 }
             });
@@ -1949,6 +1975,78 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 });
             });
         }
+        ui.add_space(6.0);
+        section(ui, "Layouts", |ui| {
+            ui.label(
+                egui::RichText::new("Named arrangements of your screens + keyboard (e.g. Standing, Lying down).")
+                    .color(theme::ON_SURFACE_VAR),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if action_button(ui, icon::PLUS, "Save current as new layout").clicked() {
+                    st.naming = true;
+                    st.naming_layout = true;
+                    st.name_buf.clear();
+                    st.keyboard_open = true;
+                    st.sound_tab = true;
+                }
+            });
+            let now = ui.input(|i| i.time);
+            if st.layout_delete_arm.is_some_and(|(_, t)| now - t > 3.0) {
+                st.layout_delete_arm = None;
+            }
+            let (mut apply, mut overwrite, mut delete, mut arm) = (None, None, None, None);
+            for (i, (name, shown)) in st.layouts.iter().enumerate() {
+                divider(ui);
+                let active = st.layout_active.as_deref() == Some(name.as_str());
+                let title = if active { format!("{} {name}", icon::CHECK_CIRCLE) } else { name.clone() };
+                let sub = format!("{shown} screen(s) shown{}", if active { " · active" } else { "" });
+                setting_row(ui, &title, Some(&sub), |ui| {
+                    let armed = st.layout_delete_arm.is_some_and(|(j, _)| j == i);
+                    let del = if armed { "Confirm?" } else { "" };
+                    if action_button(ui, icon::TRASH, del).clicked() {
+                        if armed {
+                            delete = Some(i);
+                        } else {
+                            arm = Some(i);
+                        }
+                    }
+                    if action_button(ui, icon::FLOPPY_DISK, "Save over").clicked() {
+                        overwrite = Some(i);
+                    }
+                    if action_button(ui, icon::PLAY, "Apply").clicked() {
+                        apply = Some(i);
+                    }
+                });
+            }
+            if st.layouts.is_empty() {
+                ui.label(egui::RichText::new("No layouts yet.").color(theme::ON_SURFACE_VAR));
+            }
+            if let Some(i) = arm {
+                st.layout_delete_arm = Some((i, now));
+            }
+            if let Some(i) = delete {
+                st.layout_delete = Some(i);
+                st.layout_delete_arm = None;
+                st.sound_tab = true;
+            }
+            if let Some(i) = overwrite {
+                st.layout_overwrite = Some(i);
+                st.sound_tab = true;
+            }
+            if let Some(i) = apply {
+                st.layout_apply = Some(i);
+                st.sound_tab = true;
+            }
+            divider(ui);
+            let mut t = false;
+            setting_row(ui, "Restore last layout on start", Some("Bring the screens back where they were"), |ui| {
+                t = seg_toggle(ui, &mut st.restore_layout);
+            });
+            if t {
+                st.sound_tab = true;
+            }
+        });
         ui.add_space(6.0);
         section(ui, "Placement", |ui| {
             setting_row(

@@ -28,13 +28,17 @@ marked **done** are on the branch; everything else is a proposal.
   it, stick up/down pushes it away/closer, trigger + stick left/right curves it
   (cylinder layer, per screen).
 
+- **Layouts**: named presets of the whole arrangement (each screen's shown
+  state, pose, width, curvature + the keyboard's dock/free pose). Desktop page:
+  save current as new (named with the on-panel keyboard), apply, save over,
+  delete (two-tap confirm). The last used one is restored on start (toggle).
+  Stored in `~/.config/monadeck/desktop_layouts.json`.
+
 ## Proposed next
 
-1. **Remember screen placement.** Persist each screen's pose, width and
-   curvature per output name so DP-3 comes back where you left it instead of in
-   front of your head every launch. Also remember the keyboard's dock target /
-   free pose. Then: named **favourite layouts** (save/recall whole arrangements),
-   switchable from the Desktop page.
+1. **Layout extras.** Rename, reorder, a quick-switch on the bottom bar or a
+   controller chord, per-layout keyboard scale. (The keyboard top bar's KDE
+   layout switcher is a separate thing and only appears with 2+ system layouts.)
 2. **Opacity per screen**, and a "keep visible while playing" toggle so a
    game's own frames don't fight a screen you want to keep as a HUD.
 3. **Middle click.** All face buttons are used now (trigger/A/B); a long-press
