@@ -406,17 +406,19 @@ fn run() -> Result<()> {
     )?;
     let mut laser = make_laser(&session, format)?;
     // Wrist watch on the left controller (WayVR's offsets from the aim/tip pose).
-    const WATCH_W: f32 = 0.13;
+    // ~WayVR's size (their watch is 0.115 m wide).
+    const WATCH_W: f32 = 0.105;
+    const WATCH_PX: (u32, u32) = (600, 372);
     let mut watch_panel = make_panel(
         &session, &device, allocator.clone(), render_pass, format, srgb,
-        (600, 340), (WATCH_W, WATCH_W * 340.0 / 600.0), anchor,
+        WATCH_PX, (WATCH_W, WATCH_W * WATCH_PX.1 as f32 / WATCH_PX.0 as f32), anchor,
     )?;
     let watch_default = xr::Posef {
         position: xr::Vector3f { x: -0.03, y: -0.01, z: 0.125 },
         orientation: xr::Quaternionf { x: -0.707_106_6, y: 0.000_796_361_8, z: 0.707_106_6, w: 0.0 },
     };
-    // (right-hand grab offset) while the watch is being repositioned.
-    let mut watch_grab: Option<xr::Posef> = None;
+    // (right-hand grab offset, last gripped pose) while the watch is being repositioned.
+    let mut watch_grab: Option<(xr::Posef, xr::Posef)> = None;
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -1016,14 +1018,21 @@ fn run() -> Result<()> {
         // Repositioning: while gripped by the right hand the watch follows it;
         // on release the new left-hand-relative offset is remembered.
         let mut watch_pose = if st.watch_enabled { left_aim_pose.map(|p| pose_compose(&p, &watch_offset)) } else { None };
-        if let Some(off) = watch_grab {
+        if let Some((off, last)) = watch_grab {
             match right_hand {
-                Some(h) if h.grip >= GRAB_RELEASE => watch_pose = Some(pose_compose(&h.aim, &off)),
+                Some(h) if h.grip >= GRAB_RELEASE => {
+                    let wp = pose_compose(&h.aim, &off);
+                    watch_pose = Some(wp);
+                    watch_grab = Some((off, wp));
+                }
                 _ => {
+                    // Released: remember where it ended up, relative to the left hand.
                     watch_grab = None;
-                    if let (Some(l), Some(wp)) = (left_aim_pose, watch_pose) {
-                        watch_offset = pose_compose(&pose_invert(&l), &wp);
+                    if let Some(l) = left_aim_pose {
+                        watch_offset = pose_compose(&pose_invert(&l), &last);
+                        watch_pose = Some(last);
                         overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset))).save();
+                        log::info!("watch: position saved");
                     }
                 }
             }
@@ -1036,7 +1045,7 @@ fn run() -> Result<()> {
         if let (Some((_, _, _, _, _)), Some(h)) = (watch_hit, right_hand) {
             if !st.watch_locked && watch_grab.is_none() && h.grip > GRAB_START {
                 if let Some(wp) = watch_pose {
-                    watch_grab = Some(pose_compose(&pose_invert(&h.aim), &wp));
+                    watch_grab = Some((pose_compose(&pose_invert(&h.aim), &wp), wp));
                 }
             }
         }
