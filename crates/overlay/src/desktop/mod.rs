@@ -27,7 +27,7 @@ use std::sync::Mutex;
 use ash::vk;
 use openxr as xr;
 
-use crate::mathx::{front_pose, pose_compose, pose_invert, raycast};
+use crate::mathx::{cross, forward, front_pose, normalize, pose_compose, pose_invert, quat_from_axes, quatf, raycast};
 use monadeck_core::desktop_layouts::{DesktopLayout, KeyboardPlacement, ScreenPlacement};
 use dmabuf::{Caps, Importer};
 use hid::UInput;
@@ -156,6 +156,12 @@ pub struct DesktopViewer {
     /// Screens hidden by "toggle all" (double-A), to bring back the same set.
     stash: Vec<usize>,
     stash_keyboard: bool,
+    /// Head-relative poses captured at hide time (screen index / keyboard).
+    stash_rel: Vec<(usize, xr::Posef)>,
+    stash_kb_rel: Option<xr::Posef>,
+    /// A layout was applied and nothing has been touched since: a double-B
+    /// restore puts things back exactly instead of re-centring on the head.
+    layout_untouched: bool,
     /// LOCAL space's pose in STAGE space this frame. LOCAL is re-anchored at the
     /// head on every session start, so layouts are stored in STAGE (floor +
     /// tracking origin) and converted through this.
@@ -217,14 +223,43 @@ impl DesktopViewer {
             local_in_stage: None,
             stash: Vec::new(),
             stash_keyboard: false,
+            stash_rel: Vec::new(),
+            stash_kb_rel: None,
+            layout_untouched: false,
         }
+    }
+
+    /// The head's position with only its yaw (gravity-aligned), so restored
+    /// screens follow where you turned, not how you tilted.
+    fn head_flat(h: &xr::Posef) -> xr::Posef {
+        let f = forward(h);
+        let mut flat = [f[0], 0.0, f[2]];
+        if flat[0].abs() + flat[2].abs() < 1e-4 {
+            flat = [0.0, 0.0, -1.0];
+        }
+        let z = normalize([-flat[0], 0.0, -flat[2]]);
+        let up = [0.0, 1.0, 0.0];
+        let x = normalize(cross(up, z));
+        xr::Posef { orientation: quatf(quat_from_axes(x, up, z)), position: h.position }
     }
 
     /// Double-A: hide every shown screen (remembering the set), or bring that
     /// set back. Returns what happened for feedback.
-    pub fn toggle_all(&mut self) -> ToggleAll {
+    pub fn toggle_all(&mut self, hmd: Option<&xr::Posef>, recenter: bool) -> ToggleAll {
         let shown: Vec<usize> = self.screens.iter().enumerate().filter(|(_, s)| s.shown).map(|(i, _)| i).collect();
         if !shown.is_empty() || self.keyboard.visible {
+            // Remember where things were relative to the head, for the way back.
+            self.stash_rel.clear();
+            self.stash_kb_rel = None;
+            if let (Some(h), true) = (hmd, recenter) {
+                let inv = pose_invert(&Self::head_flat(h));
+                for &i in &shown {
+                    self.stash_rel.push((i, pose_compose(&inv, &self.screens[i].pose)));
+                }
+                if self.keyboard.visible && self.keyboard.attached.is_none() {
+                    self.stash_kb_rel = Some(pose_compose(&inv, &self.keyboard.pose));
+                }
+            }
             for &i in &shown {
                 self.screens[i].hide(); // keeps `placed`: they come back where they were
             }
@@ -241,6 +276,21 @@ impl DesktopViewer {
         let kb = std::mem::take(&mut self.stash_keyboard);
         if valid.is_empty() && !kb {
             return ToggleAll::Nothing;
+        }
+        // Re-centre on the head unless this is an untouched loaded layout.
+        let rel = std::mem::take(&mut self.stash_rel);
+        let kb_rel = self.stash_kb_rel.take();
+        let recentre_now = recenter && !self.layout_untouched;
+        if let (Some(h), true) = (hmd, recentre_now) {
+            let head = Self::head_flat(h);
+            for (i, r) in &rel {
+                if let Some(s) = self.screens.get_mut(*i) {
+                    s.pose = pose_compose(&head, r);
+                }
+            }
+            if let Some(r) = kb_rel {
+                self.keyboard.pose = pose_compose(&head, &r);
+            }
         }
         for &i in &valid {
             self.screens[i].show(&self.caps);
@@ -369,6 +419,7 @@ impl DesktopViewer {
                 self.clipboard.set_active(false);
             }
         }
+        self.layout_untouched = true;
     }
 
     /// Default width: applies to screens that were never sized by hand.
@@ -425,6 +476,7 @@ impl DesktopViewer {
 
     /// Show/hide the screen at bar position `i`.
     pub fn toggle_bar(&mut self, i: usize) {
+        self.layout_untouched = false;
         let Some(&si) = self.ordered_screens().get(i) else { return };
         if self.screens[si].shown {
             self.screens[si].hide();
@@ -548,6 +600,7 @@ impl DesktopViewer {
     // --- Keyboard --------------------------------------------------------------
 
     pub fn toggle_keyboard(&mut self) {
+        self.layout_untouched = false;
         self.keyboard.visible = !self.keyboard.visible;
         if self.keyboard.visible {
             self.keyboard_place = true;
@@ -907,6 +960,7 @@ impl DesktopViewer {
         // Grip while pointing grabs the thing (a grabbed keyboard undocks).
         if let Some((target, hi, _, _, _)) = best {
             if hands[hi].grip > GRAB_START {
+                self.layout_untouched = false;
                 let aim = hands[hi].aim;
                 match target {
                     Target::Screen(si) => self.screens[si].start_grab(hi, &aim),

@@ -69,6 +69,7 @@ pub struct LibState {
     pub layout_move: Option<(usize, i32)>,
     pub restore_layout: bool,
     pub gaze_pause: bool,
+    pub recenter_on_toggle: bool,
     pub keyboard_scale: f32,
     pub desktop_opacity_request: Option<(usize, f32)>,
     // Wrist watch.
@@ -220,6 +221,7 @@ impl LibState {
             layout_move: None,
             restore_layout: true,
             gaze_pause: true,
+            recenter_on_toggle: true,
             keyboard_scale: 1.0,
             desktop_opacity_request: None,
             watch_enabled: true,
@@ -2318,6 +2320,15 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 t |= seg_toggle(ui, &mut st.gaze_pause);
             });
             divider(ui);
+            setting_row(
+                ui,
+                "Double-B restore follows your head",
+                Some("Screens come back where they were relative to you (turn 90°, they turn too) — except an untouched loaded layout"),
+                |ui| {
+                    t |= seg_toggle(ui, &mut st.recenter_on_toggle);
+                },
+            );
+            divider(ui);
             setting_row(ui, "Keyboard size", Some("Also saved in layouts"), |ui| {
                 stepper_inline(ui, &mut st.keyboard_scale, 0.6, 1.6, 0.1, |v| format!("{:.0}%", v * 100.0));
             });
@@ -2335,7 +2346,7 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 stepper_inline(ui, &mut st.screen_width_m, 0.6, 3.0, 0.1, |v| format!("{v:.1} m"));
             });
             divider(ui);
-            setting_row(ui, "Mouse", Some("Trigger clicks & drags · A right-clicks · B clicks without moving (for tricky targets) · stick scrolls"), |_| {});
+            setting_row(ui, "Mouse", Some("Trigger clicks & drags · A right-clicks · B clicks without moving (for tricky targets) · stick scrolls · double-B on the left hand hides/restores all screens + keyboard"), |_| {});
         });
         ui.add_space(6.0);
         section(ui, "Status", |ui| {

@@ -531,7 +531,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -577,6 +577,7 @@ fn run() -> Result<()> {
     st.screen_width_m = ov_cfg.screen_width_m;
     st.restore_layout = ov_cfg.restore_layout;
     st.gaze_pause = ov_cfg.gaze_pause;
+    st.recenter_on_toggle = ov_cfg.recenter_on_toggle;
     st.watch_enabled = ov_cfg.watch_enabled;
     st.watch_24h = ov_cfg.watch_24h;
     st.watch_locked = ov_cfg.watch_locked;
@@ -617,9 +618,9 @@ fn run() -> Result<()> {
     let mut click_prev = false; // haptic click edge
     // Laser fade over mirrored screens: (screen index, when the ray entered it).
     let mut screen_laser_since: Option<(usize, Instant)> = None;
-    // Double-tap A on the LEFT controller toggles all screens.
-    let mut left_a_prev = false;
-    let mut left_a_last: Option<Instant> = None;
+    // Double-tap B on the LEFT controller toggles all screens (+ keyboard).
+    let mut left_b_prev = false;
+    let mut left_b_last: Option<Instant> = None;
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     // Re-scan to refresh last-played ordering when a game starts/stops.
     let mut running_app_prev: Option<String> = None;
@@ -1073,20 +1074,20 @@ fn run() -> Result<()> {
                 summon_at = Some(Instant::now());
             }
         }
-        // Double-A (left): hide every shown screen / bring the same set back.
-        // Ignored while that hand is pointing at a screen (A = right-click there).
-        let left_a = hands.first().is_some_and(|h| h.active && h.secondary);
-        if left_a && !left_a_prev && desktop.pointing_hand() != Some(0) {
-            let double = left_a_last.is_some_and(|t| t.elapsed().as_millis() < 450);
+        // Double-B (left): hide every shown screen / bring the same set back.
+        // Ignored while that hand is pointing at a screen (B = frozen click there).
+        let left_b = hands.first().is_some_and(|h| h.active && h.precise);
+        if left_b && !left_b_prev && desktop.pointing_hand() != Some(0) {
+            let double = left_b_last.is_some_and(|t| t.elapsed().as_millis() < 450);
             if double {
-                left_a_last = None;
-                match desktop.toggle_all() {
+                left_b_last = None;
+                match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
                     desktop::ToggleAll::Hidden(n) => {
-                        log::info!("desktop: double-A hid {n} screen(s)");
+                        log::info!("desktop: double-B hid {n} item(s)");
                         audio.tab();
                     }
                     desktop::ToggleAll::Shown(n) => {
-                        log::info!("desktop: double-A restored {n} screen(s)");
+                        log::info!("desktop: double-B restored {n} item(s)");
                         audio.tab();
                     }
                     desktop::ToggleAll::Nothing => {
@@ -1098,10 +1099,10 @@ fn run() -> Result<()> {
                     }
                 }
             } else {
-                left_a_last = Some(Instant::now());
+                left_b_last = Some(Instant::now());
             }
         }
-        left_a_prev = left_a;
+        left_b_prev = left_b;
 
         // Watch buttons must work with the dashboard dismissed, so these
         // requests drain here rather than in the visible-only path below.
@@ -1656,7 +1657,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -1889,6 +1890,7 @@ fn overlay_config_from(
         watch_locked: st.watch_locked,
         watch_offset,
         gaze_pause: st.gaze_pause,
+        recenter_on_toggle: st.recenter_on_toggle,
         keyboard_scale: st.keyboard_scale,
     }
 }

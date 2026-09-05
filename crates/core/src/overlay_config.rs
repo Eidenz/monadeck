@@ -51,6 +51,9 @@ pub struct OverlayConfig {
     pub watch_offset: Option<[f32; 7]>,
     /// Pause a screen's capture after a couple of seconds out of view.
     pub gaze_pause: bool,
+    /// Double-B restore: bring screens back where they were *relative to your
+    /// head* (turn 90°, they follow), unless it's an untouched loaded layout.
+    pub recenter_on_toggle: bool,
     /// VR keyboard size multiplier.
     pub keyboard_scale: f32,
 }
@@ -80,6 +83,7 @@ impl Default for OverlayConfig {
             watch_locked: true,
             watch_offset: None,
             gaze_pause: true,
+            recenter_on_toggle: true,
             keyboard_scale: 1.0,
         }
     }
