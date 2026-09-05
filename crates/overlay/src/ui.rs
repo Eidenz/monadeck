@@ -68,11 +68,17 @@ pub struct LibState {
     pub layout_renamed: Option<(usize, String)>,
     pub layout_move: Option<(usize, i32)>,
     pub restore_layout: bool,
-    pub hide_in_game: bool,
     pub gaze_pause: bool,
     pub keyboard_scale: f32,
     pub desktop_opacity_request: Option<(usize, f32)>,
-    pub desktop_keep_request: Option<(usize, bool)>,
+    // Wrist watch.
+    pub watch_enabled: bool,
+    pub watch_date: String,
+    pub watch_times: Vec<(String, String)>, // (label, HH:MM)
+    pub watch_menu_request: bool,
+    pub layout_cycle_request: bool,
+    /// Running game's client (id, frozen) for the watch's freeze button.
+    pub watch_freeze_client: Option<(u32, bool)>,
     pub recenter_request: bool,
     pub recenter_playspace_request: bool,
     /// Re-scan the catalogue + re-probe artwork (picks up covers added at runtime).
@@ -208,11 +214,15 @@ impl LibState {
             layout_renamed: None,
             layout_move: None,
             restore_layout: true,
-            hide_in_game: false,
             gaze_pause: true,
             keyboard_scale: 1.0,
             desktop_opacity_request: None,
-            desktop_keep_request: None,
+            watch_enabled: true,
+            watch_date: String::new(),
+            watch_times: Vec::new(),
+            watch_menu_request: false,
+            layout_cycle_request: false,
+            watch_freeze_client: None,
             recenter_request: false,
             recenter_playspace_request: false,
             refresh_request: false,
@@ -398,6 +408,113 @@ fn top_bar(ctx: &egui::Context, st: &mut LibState) {
                 .fill(if st.keyboard_open { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH });
             if ui.add(kbd).clicked() {
                 st.keyboard_open = !st.keyboard_open;
+            }
+        });
+    });
+}
+
+/// The wrist watch (its own layer on the left controller): batteries, clock +
+/// extra time zones, quick buttons, and the menu + screen toggles like WayVR.
+pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
+    let frame = egui::Frame::default()
+        .fill(egui::Color32::from_rgba_unmultiplied(14, 18, 24, 235))
+        .corner_radius(18)
+        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 110, 120)))
+        .inner_margin(egui::Margin::same(10));
+    egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        // Batteries.
+        ui.horizontal(|ui| {
+            if st.batteries.is_empty() {
+                ui.label(egui::RichText::new("no batteries").size(12.0).color(theme::ON_SURFACE_VAR));
+            }
+            for b in &st.batteries {
+                battery_widget(ui, b);
+                ui.add_space(4.0);
+            }
+        });
+        // Clock + zones | quick buttons.
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(220.0);
+                ui.label(egui::RichText::new(&st.clock).size(40.0).strong().color(egui::Color32::WHITE));
+                ui.label(egui::RichText::new(&st.watch_date).size(14.0).color(theme::ON_SURFACE_VAR));
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    for (label, time) in &st.watch_times {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(label).size(11.0).color(theme::ON_SURFACE_VAR));
+                            ui.label(egui::RichText::new(time).size(20.0).strong().color(theme::PRIMARY));
+                        });
+                        ui.add_space(10.0);
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                let b = 58.0;
+                let quick = |ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str| -> bool {
+                    let fg = if on { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                    let btn = egui::Button::new(egui::RichText::new(glyph).size(24.0).color(fg))
+                        .fill(if on { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                        .min_size(egui::vec2(b, b));
+                    ui.add(btn).on_hover_text(tip).clicked()
+                };
+                ui.horizontal(|ui| {
+                    if quick(ui, icon::KEYBOARD, st.keyboard_shown, "VR keyboard") {
+                        st.keyboard_toggle_request = true;
+                        st.sound_tab = true;
+                    }
+                    if quick(ui, icon::CROSSHAIR, false, "Recenter playspace") {
+                        st.recenter_playspace_request = true;
+                        st.sound_tab = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let has_layouts = !st.layouts.is_empty();
+                    if quick(ui, icon::SQUARES_FOUR, false, "Next screen layout") && has_layouts {
+                        st.layout_cycle_request = true;
+                        st.sound_tab = true;
+                    }
+                    let (frozen, enabled) = match st.watch_freeze_client {
+                        Some((_, f)) => (f, true),
+                        None => (false, false),
+                    };
+                    ui.add_enabled_ui(enabled, |ui| {
+                        if quick(ui, icon::SNOWFLAKE, frozen, "Freeze game controllers") {
+                            if let Some((id, _)) = st.watch_freeze_client {
+                                st.freeze_toggle_request = Some(id);
+                                st.sound_tab = true;
+                            }
+                        }
+                    });
+                });
+            });
+        });
+        ui.add_space(2.0);
+        // Menu + screens (fixed numbering, same as the bottom bar).
+        ui.horizontal(|ui| {
+            let menu = egui::Button::new(egui::RichText::new(icon::LIST).size(22.0).color(theme::ON_SURFACE))
+                .fill(theme::SURFACE_CONTAINER_HIGH)
+                .min_size(egui::vec2(58.0, 44.0));
+            if ui.add(menu).on_hover_text("Monadeck menu").clicked() {
+                st.watch_menu_request = true;
+                st.sound_tab = true;
+            }
+            ui.add_space(4.0);
+            let mut toggle = None;
+            for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
+                let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                let btn = egui::Button::new(egui::RichText::new(format!("{} {}", icon::MONITOR, i + 1)).size(14.0).color(fg))
+                    .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                    .min_size(egui::vec2(58.0, 44.0));
+                if ui.add(btn).on_hover_text(name).clicked() {
+                    toggle = Some(i);
+                }
+            }
+            if let Some(i) = toggle {
+                st.desktop_bar_toggle = Some(i);
+                st.sound_tab = true;
             }
         });
     });
@@ -1964,7 +2081,7 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                     Some(h) => format!("{} · {h}", row.detail),
                     None => row.detail.clone(),
                 };
-                let (mut op, mut keep) = (row.opacity, row.keep_in_game);
+                let mut op = row.opacity;
                 setting_row(ui, &row.name, Some(&sub), |ui| {
                     if row.approved {
                         // Order in the bottom bar: ◀ / ▶ (left = earlier).
@@ -1984,20 +2101,11 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                                 .color(theme::ON_SURFACE_VAR),
                         );
                         ui.add_space(8.0);
-                        seg_toggle(ui, &mut keep);
-                        ui.label(egui::RichText::new("keep in game").size(12.0).color(theme::ON_SURFACE_VAR));
-                        ui.add_space(8.0);
                         stepper_inline(ui, &mut op, 0.2, 1.0, 0.1, |v| format!("{:.0}%", v * 100.0));
                     }
                 });
-                if row.approved {
-                    if (op - row.opacity).abs() > 1e-3 {
-                        st.desktop_opacity_request = Some((i, op));
-                    }
-                    if keep != row.keep_in_game {
-                        st.desktop_keep_request = Some((i, keep));
-                        st.sound_tab = true;
-                    }
+                if row.approved && (op - row.opacity).abs() > 1e-3 {
+                    st.desktop_opacity_request = Some((i, op));
                 }
             }
             if let Some(m) = mv {
@@ -2117,8 +2225,8 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
         ui.add_space(6.0);
         section(ui, "Behaviour", |ui| {
             let mut t = false;
-            setting_row(ui, "Hide screens while a game runs", Some("Screens marked \"keep in game\" stay up as a HUD"), |ui| {
-                t |= seg_toggle(ui, &mut st.hide_in_game);
+            setting_row(ui, "Wrist watch", Some("Clock, time zones, batteries and quick buttons on your left controller"), |ui| {
+                t |= seg_toggle(ui, &mut st.watch_enabled);
             });
             divider(ui);
             setting_row(ui, "Pause capture when not looking", Some("Frees GPU/CPU after ~2 s out of view; resumes instantly"), |ui| {

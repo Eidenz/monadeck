@@ -405,6 +405,16 @@ fn run() -> Result<()> {
         (840, 480), (LAUNCH_W, LAUNCH_W * 480.0 / 840.0), anchor,
     )?;
     let mut laser = make_laser(&session, format)?;
+    // Wrist watch on the left controller (WayVR's offsets from the aim/tip pose).
+    const WATCH_W: f32 = 0.13;
+    let mut watch_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        (600, 440), (WATCH_W, WATCH_W * 440.0 / 600.0), anchor,
+    )?;
+    let watch_offset = xr::Posef {
+        position: xr::Vector3f { x: -0.03, y: -0.01, z: 0.125 },
+        orientation: xr::Quaternionf { x: -0.707_106_6, y: 0.000_796_361_8, z: 0.707_106_6, w: 0.0 },
+    };
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -472,8 +482,19 @@ fn run() -> Result<()> {
     desktop.set_width(ov_cfg.screen_width_m);
     desktop.caps.curved = curved;
     desktop.caps.color_scale = color_scale;
-    desktop.hide_in_game = ov_cfg.hide_in_game;
     desktop.gaze_pause = ov_cfg.gaze_pause;
+    // Watch time zones (bad names are skipped with a warning).
+    let watch_zones: Vec<(String, chrono_tz::Tz)> = ov_cfg
+        .watch_timezones
+        .iter()
+        .filter_map(|n| match n.parse::<chrono_tz::Tz>() {
+            Ok(tz) => Some((n.rsplit('/').next().unwrap_or(n).replace('_', " "), tz)),
+            Err(_) => {
+                log::warn!("watch: unknown time zone '{n}'");
+                None
+            }
+        })
+        .collect();
     desktop.keyboard.scale = ov_cfg.keyboard_scale.clamp(0.5, 2.0);
     log::info!("desktop: curved={curved} opacity={color_scale}");
     let mut screencast_token = ov_cfg.screencast_token.clone();
@@ -504,7 +525,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.hide_in_game, ov_cfg.gaze_pause, ov_cfg.keyboard_scale),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -549,8 +570,8 @@ fn run() -> Result<()> {
     st.freeze_delay_secs = ov_cfg.freeze_delay_secs;
     st.screen_width_m = ov_cfg.screen_width_m;
     st.restore_layout = ov_cfg.restore_layout;
-    st.hide_in_game = ov_cfg.hide_in_game;
     st.gaze_pause = ov_cfg.gaze_pause;
+    st.watch_enabled = ov_cfg.watch_enabled;
     st.keyboard_scale = ov_cfg.keyboard_scale;
     st.layout_active = layouts.last_used.clone();
     st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
@@ -965,11 +986,55 @@ fn run() -> Result<()> {
         desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
         if let Some(tok) = desktop.take_token_change() {
             screencast_token = tok;
-            overlay_config_from(&st, &screencast_token, &desktop.order()).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones).save();
         }
         st.keyboard_shown = desktop.keyboard_visible();
         st.desktop_bar = desktop.bar_items();
-        desktop.set_game_running(running.is_some());
+
+        // --- Wrist watch (left controller; runs hidden or not) ------------------
+        st.clock = chrono::Local::now().format("%-I:%M %p").to_string();
+        st.watch_date = chrono::Local::now().format("%a %d/%m/%y").to_string();
+        let utc = chrono::Utc::now();
+        st.watch_times = watch_zones.iter().map(|(l, tz)| (l.clone(), utc.with_timezone(tz).format("%H:%M").to_string())).collect();
+        st.watch_freeze_client = running.as_ref().and_then(|app| {
+            st.monado_clients.iter().find(|c| name_matches(&c.name, app)).map(|c| (c.id, c.frozen))
+        });
+        let watch_pose = if st.watch_enabled { locate_pose(&aim_left, &space, time).map(|p| pose_compose(&p, &watch_offset)) } else { None };
+        // The right hand points at the watch; it wins over everything behind it.
+        let watch_hit = match (&watch_pose, hands.get(1)) {
+            (Some(wp), Some(h)) if h.active => raycast(&h.aim, wp, watch_panel.size_m).map(|(u, v, t)| (u, v, t, h.select, h.aim)),
+            _ => None,
+        };
+        let watch_active = watch_pose.is_some();
+        if let Some(wp) = watch_pose {
+            watch_panel.pose = wp;
+            let ptr = watch_hit.map(|(u, v, _, d, _)| (u, v, d));
+            render_panel(
+                &mut watch_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
+                true, ptr, (0.0, 0.0), start.elapsed().as_secs_f64(),
+                |ctx| ui::build_watch(ctx, &mut st),
+            )?;
+        }
+        if st.watch_menu_request {
+            st.watch_menu_request = false;
+            visible = !visible;
+            if visible {
+                recenter = true;
+                summon_at = Some(Instant::now());
+            }
+        }
+        if st.layout_cycle_request {
+            st.layout_cycle_request = false;
+            if !layouts.layouts.is_empty() {
+                let cur = layouts.last_used.as_ref().and_then(|n| layouts.layouts.iter().position(|l| &l.name == n));
+                let next = cur.map_or(0, |c| (c + 1) % layouts.layouts.len());
+                let l = layouts.layouts[next].clone();
+                desktop.apply(&l);
+                layouts.last_used = Some(l.name);
+                monadeck_core::desktop_layouts::save(&layouts);
+                st.layout_active = layouts.last_used.clone();
+            }
+        }
 
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
         // order is fresh on the next summon), drop input block, render only toasts.
@@ -984,8 +1049,11 @@ fn run() -> Result<()> {
                 }
             }
             // Mirrored screens stay interactive while the dashboard is away.
-            let d_in = desktop.update_input(&hands, None, hmd.as_ref());
-            let d_ray = d_in.ray;
+            let d_in = desktop.update_input(&hands, if watch_hit.is_some() { Some(0.0) } else { None }, hmd.as_ref());
+            let d_ray = d_in.ray.or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
+            if let Some(g) = d_in.gesture {
+                toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700) });
+            }
             let want_block = desktop.pointing();
             if want_block != blocked_prev {
                 monado.set_block(want_block);
@@ -1004,6 +1072,7 @@ fn run() -> Result<()> {
                 _ => None,
             };
             let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
+            let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
             for q in &screen_quads {
@@ -1022,6 +1091,9 @@ fn run() -> Result<()> {
             if toast_active {
                 toast_q = quad_layer(&toast_panel, &space, true);
                 layers.push(&toast_q);
+            }
+            if let Some(q) = &watch_q {
+                layers.push(q);
             }
             if let Some(q) = &laser_q {
                 layers.push(q);
@@ -1084,6 +1156,7 @@ fn run() -> Result<()> {
         // --- Input: laser hit-test across the 3 panels + grip-to-move --------
         let mut best: Option<Hit> = None;
         let mut scroll = (0.0f32, 0.0f32);
+        let mut dash_zone = false;
         if focused {
             // Continue an in-progress grab — moves the whole layout anchor.
             if let Some((hand_i, offset)) = grab {
@@ -1113,6 +1186,16 @@ fn run() -> Result<()> {
                         ]
                     };
                     let pointing = candidates.iter().any(|(_, h)| h.is_some());
+                    // The whole dashboard band (panels + the gaps between them) is
+                    // dashboard territory: nothing behind it gets the ray.
+                    let zone_w = main_w + 2.0 * (gap_m + rail_w);
+                    let zone_h = main_h + 2.0 * (gap_m + bottom_h);
+                    let in_zone = if curved {
+                        raycast_cylinder(&p, &main_l.pose, main_l.radius, (zone_w / main_l.radius).min(std::f32::consts::PI * 0.95), zone_h).is_some()
+                    } else {
+                        raycast(&p, &main_panel.pose, (zone_w, zone_h)).is_some()
+                    };
+                    dash_zone |= in_zone;
                     // Grip while pointing at any panel grabs the whole layout.
                     let grip = grab_action.state(&session, path)?.current_state;
                     if grip > GRAB_START && pointing {
@@ -1143,12 +1226,20 @@ fn run() -> Result<()> {
         // while a dashboard grab is in progress (the grip would grab both).
         // The dashboard is always composited over the screens, so when the ray
         // hits it, it wins outright (max_t = 0 hides everything behind it).
+        if watch_hit.is_some() {
+            best = None;
+            scroll = (0.0, 0.0);
+        }
         let d_in = if grab.is_some() {
             desktop.update_input(&[], None, hmd.as_ref())
         } else {
-            desktop.update_input(&hands, best.map(|_| 0.0), hmd.as_ref())
+            let block = best.is_some() || dash_zone || watch_hit.is_some();
+            desktop.update_input(&hands, block.then_some(0.0), hmd.as_ref())
         };
-        let d_ray = d_in.ray;
+        let d_ray = d_in.ray.or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
+        if let Some(g) = d_in.gesture {
+            toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700) });
+        }
         if d_ray.is_some() {
             best = None;
             scroll = (0.0, 0.0);
@@ -1323,6 +1414,10 @@ fn run() -> Result<()> {
             toast_q = quad_layer(&toast_panel, &space, true);
             layers.push(&toast_q);
         }
+        let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
+        if let Some(q) = &watch_q {
+            layers.push(q);
+        }
         if let Some(q) = &laser_q {
             layers.push(q);
         }
@@ -1428,17 +1523,16 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.hide_in_game, st.gaze_pause, st.keyboard_scale),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
             audio.set_volume(st.audio_volume);
             desktop.set_width(st.screen_width_m);
-            desktop.hide_in_game = st.hide_in_game;
             desktop.gaze_pause = st.gaze_pause;
             desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
             settings_prev = settings_now;
-            overlay_config_from(&st, &screencast_token, &desktop.order()).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
         // effective offset is pushed to libmonado at the top of the loop (which
@@ -1546,7 +1640,7 @@ fn run() -> Result<()> {
         }
         if let Some((i, d)) = st.desktop_move_request.take() {
             if desktop.move_order(i, d) {
-                overlay_config_from(&st, &screencast_token, &desktop.order()).save();
+                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones).save();
             }
         }
         if st.keyboard_toggle_request {
@@ -1588,9 +1682,7 @@ fn run() -> Result<()> {
         if let Some((i, o)) = st.desktop_opacity_request.take() {
             desktop.set_screen_opacity(i, o);
         }
-        if let Some((i, k)) = st.desktop_keep_request.take() {
-            desktop.set_screen_keep(i, k);
-        }
+
         if layouts_dirty {
             monadeck_core::desktop_layouts::save(&layouts);
             st.layout_active = layouts.last_used.clone();
@@ -1670,6 +1762,7 @@ fn overlay_config_from(
     st: &ui::LibState,
     screencast_token: &Option<String>,
     screen_order: &[String],
+    watch_timezones: &[String],
 ) -> monadeck_core::overlay_config::OverlayConfig {
     monadeck_core::overlay_config::OverlayConfig {
         audio_enabled: st.audio_enabled,
@@ -1688,7 +1781,8 @@ fn overlay_config_from(
         screen_width_m: st.screen_width_m,
         screen_order: screen_order.to_vec(),
         restore_layout: st.restore_layout,
-        hide_in_game: st.hide_in_game,
+        watch_enabled: st.watch_enabled,
+        watch_timezones: watch_timezones.to_vec(),
         gaze_pause: st.gaze_pause,
         keyboard_scale: st.keyboard_scale,
     }

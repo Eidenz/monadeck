@@ -22,8 +22,6 @@ pub struct ScreenPlacement {
     pub curve: f32,
     #[serde(default = "one")]
     pub opacity: f32,
-    #[serde(default)]
-    pub keep_in_game: bool,
 }
 
 fn one() -> f32 {

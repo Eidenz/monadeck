@@ -38,8 +38,10 @@ pub struct OverlayConfig {
     pub screen_order: Vec<String>,
     /// Re-apply the last used desktop layout when the screens become available.
     pub restore_layout: bool,
-    /// Hide mirrored screens while a game runs (screens flagged "keep" stay).
-    pub hide_in_game: bool,
+    /// Show the wrist watch (left controller).
+    pub watch_enabled: bool,
+    /// Extra time zones on the watch (IANA names, e.g. "Asia/Tokyo").
+    pub watch_timezones: Vec<String>,
     /// Pause a screen's capture after a couple of seconds out of view.
     pub gaze_pause: bool,
     /// VR keyboard size multiplier.
@@ -65,7 +67,8 @@ impl Default for OverlayConfig {
             screen_width_m: 1.35,
             screen_order: Vec::new(),
             restore_layout: true,
-            hide_in_game: false,
+            watch_enabled: true,
+            watch_timezones: vec!["America/New_York".into(), "Asia/Tokyo".into()],
             gaze_pause: true,
             keyboard_scale: 1.0,
         }

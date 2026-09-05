@@ -44,10 +44,6 @@ pub struct ScreenPanel {
     pub custom_size: bool,
     /// Layer opacity 0.2..=1 (needs XR_KHR_composition_layer_color_scale_bias).
     pub opacity: f32,
-    /// Stays up while a game runs even when "hide screens in game" is on.
-    pub keep_in_game: bool,
-    /// Hidden automatically by the in-game rule (restored when the game stops).
-    pub auto_hidden: bool,
     /// Capture paused because nobody's looking at it.
     pub gaze_paused: bool,
     pub unseen_since: Option<Instant>,
@@ -80,8 +76,6 @@ impl ScreenPanel {
             resize_ref: None,
             custom_size: false,
             opacity: 1.0,
-            keep_in_game: false,
-            auto_hidden: false,
             gaze_paused: false,
             unseen_since: None,
             scale_bias: xr::sys::CompositionLayerColorScaleBiasKHR {

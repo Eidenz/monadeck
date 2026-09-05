@@ -76,7 +76,14 @@ pub struct ScreenRow {
     /// A stream exists for it (portal approved this monitor).
     pub approved: bool,
     pub opacity: f32,
-    pub keep_in_game: bool,
+}
+
+/// Live readout while a screen is gripped (size · distance · curve).
+pub struct GestureInfo {
+    pub title: String,
+    pub body: String,
+    /// Just above the screen's top edge.
+    pub pose: xr::Posef,
 }
 
 
@@ -87,6 +94,8 @@ pub struct InputOut {
     pub ray: Option<(xr::Posef, f32)>,
     /// Pointer on the keyboard panel: (u, v, trigger down).
     pub keyboard_ptr: Option<(f32, f32, bool)>,
+    /// A screen is being gripped/resized: show its numbers.
+    pub gesture: Option<GestureInfo>,
 }
 
 enum PortalState {
@@ -132,9 +141,7 @@ pub struct DesktopViewer {
     secondary_prev: [bool; 2],
     precise_prev: [bool; 2],
     clipboard: clipboard::ClipboardWatcher,
-    pub hide_in_game: bool,
     pub gaze_pause: bool,
-    game_running: bool,
     pending_gpu_teardown: bool,
     width_m: f32,
     keyboard_place: bool,
@@ -193,9 +200,7 @@ impl DesktopViewer {
             secondary_prev: [false; 2],
             precise_prev: [false; 2],
             clipboard: clipboard::ClipboardWatcher::new(),
-            hide_in_game: false,
             gaze_pause: true,
-            game_running: false,
             pending_gpu_teardown: false,
             width_m: screen::DEFAULT_WIDTH_M,
             keyboard_place: false,
@@ -243,7 +248,6 @@ impl DesktopViewer {
                 width_m: s.width_m,
                 curve: s.curve,
                 opacity: s.opacity,
-                keep_in_game: s.keep_in_game,
             })
             .collect();
         let kb = &self.keyboard;
@@ -277,7 +281,6 @@ impl DesktopViewer {
                     s.width_m = p.width_m.clamp(0.3, 4.0);
                     s.curve = p.curve.clamp(0.0, 1.0);
                     s.opacity = p.opacity.clamp(0.2, 1.0);
-                    s.keep_in_game = p.keep_in_game;
                     s.custom_size = true;
                     s.placed = true;
                     if p.shown && !s.shown {
@@ -324,39 +327,10 @@ impl DesktopViewer {
         }
     }
 
-    /// Whether a game is running (drives the hide-in-game rule).
-    pub fn set_game_running(&mut self, running: bool) {
-        if running == self.game_running {
-            return;
-        }
-        self.game_running = running;
-        if running && self.hide_in_game {
-            for s in &mut self.screens {
-                if s.shown && !s.keep_in_game {
-                    s.hide();
-                    s.auto_hidden = true;
-                }
-            }
-        } else if !running {
-            for s in &mut self.screens {
-                if s.auto_hidden {
-                    s.auto_hidden = false;
-                    s.show(&self.caps);
-                }
-            }
-        }
-    }
-
-    /// Per-screen opacity / keep-while-playing, by Desktop-page row.
+    /// Per-screen opacity, by Desktop-page row.
     pub fn set_screen_opacity(&mut self, row: usize, opacity: f32) {
         if let Some(&si) = self.ordered_screens().get(row) {
             self.screens[si].opacity = opacity.clamp(0.2, 1.0);
-        }
-    }
-
-    pub fn set_screen_keep(&mut self, row: usize, keep: bool) {
-        if let Some(&si) = self.ordered_screens().get(row) {
-            self.screens[si].keep_in_game = keep;
         }
     }
 
@@ -402,6 +376,8 @@ impl DesktopViewer {
         let Some(&si) = self.ordered_screens().get(i) else { return };
         if self.screens[si].shown {
             self.screens[si].hide();
+            // Off then on = a fresh spawn in front of you (not the old spot).
+            self.screens[si].placed = false;
             if self.keyboard.attached == Some(si) {
                 self.keyboard.attached = None;
             }
@@ -424,7 +400,6 @@ impl DesktopViewer {
                     shown: s.shown,
                     approved: true,
                     opacity: s.opacity,
-                    keep_in_game: s.keep_in_game,
                 }
             })
             .collect();
@@ -441,7 +416,6 @@ impl DesktopViewer {
                     shown: false,
                     approved: false,
                     opacity: 1.0,
-                    keep_in_game: false,
                 });
             }
         }
@@ -806,6 +780,26 @@ impl DesktopViewer {
                     }
                 }
             }
+        }
+        // Live numbers for the gripped screen.
+        if let Some(s) = self.screens.iter().find(|s| s.grab.is_some()) {
+            let (w, h) = s.size_m();
+            let dist = hmd.map(|m| dist2(&s.pose.position, &m.position).sqrt());
+            let deg = s.curve * screen::MAX_CURVE_ANGLE.to_degrees();
+            let mut body = format!("{w:.2} × {h:.2} m", );
+            if let Some(d) = dist {
+                body.push_str(&format!("  ·  {d:.2} m away"));
+            }
+            if s.curve > 0.01 {
+                body.push_str(&format!("  ·  curve {deg:.0}°"));
+            } else {
+                body.push_str("  ·  flat");
+            }
+            let above = xr::Posef {
+                orientation: s.pose.orientation,
+                position: crate::mathx::offset_pose(&s.pose, 0.0, h / 2.0 + 0.10, 0.0).position,
+            };
+            out.gesture = Some(GestureInfo { title: s.name.clone(), body, pose: above });
         }
         if let Some((hand, offset)) = self.keyboard.grab {
             match hands.get(hand) {

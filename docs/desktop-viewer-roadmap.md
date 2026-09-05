@@ -35,14 +35,23 @@ marked **done** are on the branch; everything else is a proposal.
   Stored in `~/.config/monadeck/desktop_layouts.json`.
 
 - Layouts: rename, reorder, keyboard size saved per layout.
-- Per-screen opacity (color-scale-bias layer) and "keep in game"; a global
-  "Hide screens while a game runs" rule that auto-restores when the game stops.
+- Per-screen opacity (color-scale-bias layer). ("Keep in game" was dropped:
+  you're always in-game and the menu is independent anyway.)
 - Keyboard: key repeat while held, Shift double-tap = lock (third tap clears),
   click sound, size stepper (Behaviour section).
 - Capture pauses after ~2 s with the screen more than ~75° off your gaze and
   resumes the moment you look back (toggle in Behaviour).
 - Dashboard always wins the ray when it's under the laser (it is always
-  composited on top). Default width no longer touches hand-sized screens.
+  composited on top), gaps between its panels included. Default width no longer
+  touches hand-sized screens. Hiding a screen and showing it again spawns it
+  fresh in front of you.
+- Live readout above a gripped screen: size · distance · curve.
+- **Wrist watch** on the left controller (WayVR offsets): batteries, clock +
+  date, extra time zones (`watch_timezones` in overlay.json, IANA names),
+  quick buttons (keyboard · recenter playspace · next layout · freeze game
+  controllers), and a bottom row with the menu button + numbered screen
+  toggles. Pointed at with the right hand; it wins over anything behind it.
+  Toggle in Desktop → Behaviour.
 
 ## Proposed next
 
