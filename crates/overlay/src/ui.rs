@@ -542,10 +542,11 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         // Clock + zones (or the layout picker) | quick buttons — each in its own
         // card. A queued screenshot takes the whole row (bigger preview).
         let wide = st.wrist_shot.is_some() && !st.watch_layout_menu;
+        let row_w = ui.available_width();
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
-                // (available width includes the card's own margins — keep it inside)
-                ui.set_width(if wide { ui.available_width() - 16.0 } else { 214.0 });
+                // (the row width includes the card's own margins — keep it inside)
+                ui.set_width(if wide { row_w - 26.0 } else { 214.0 });
                 ui.set_min_height(120.0);
                 if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
                     let req = crate::photos::wrist_card(ui, shot.thumb.as_ref(), shot.qr.as_deref(), &shot.when, shot.idx, shot.total);
@@ -1775,6 +1776,19 @@ fn stepper_inline(
 }
 
 /// A neutral pill button for a row's right-hand action (Recenter, Refresh, …).
+/// A compact square icon button (rows with several actions). `hot` = danger
+/// state (e.g. delete armed).
+fn icon_button(ui: &mut egui::Ui, glyph: &str, tip: &str, hot: bool) -> egui::Response {
+    let fg = if hot { egui::Color32::BLACK } else { theme::ON_SURFACE };
+    ui.add(
+        egui::Button::new(egui::RichText::new(glyph).size(18.0).color(fg))
+            .fill(if hot { STOP_RED } else { theme::SURFACE_CONTAINER_HIGH })
+            .corner_radius(10)
+            .min_size(egui::vec2(42.0, 42.0)),
+    )
+    .on_hover_text(tip)
+}
+
 fn action_button(ui: &mut egui::Ui, glyph: &str, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(
@@ -2430,34 +2444,33 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 let follow_before = follow;
                 setting_row(ui, &title, Some(&sub), |ui| {
                     let armed = st.layout_delete_arm.is_some_and(|(j, _)| j == i);
-                    let del = if armed { "Confirm?" } else { "" };
-                    if action_button(ui, icon::TRASH, del).clicked() {
+                    if icon_button(ui, icon::TRASH, if armed { "Tap again to delete" } else { "Delete" }, armed).clicked() {
                         if armed {
                             delete = Some(i);
                         } else {
                             arm = Some(i);
                         }
                     }
-                    if action_button(ui, icon::FLOPPY_DISK, "Save over").clicked() {
+                    if icon_button(ui, icon::FLOPPY_DISK, "Save current arrangement over this layout", false).clicked() {
                         overwrite = Some(i);
                     }
-                    if action_button(ui, icon::PENCIL_SIMPLE, "").clicked() {
+                    if icon_button(ui, icon::PENCIL_SIMPLE, "Rename", false).clicked() {
                         rename = Some(i);
                     }
                     ui.add_enabled_ui(i + 1 < n_layouts, |ui| {
-                        if action_button(ui, icon::CARET_DOWN, "").clicked() {
+                        if icon_button(ui, icon::CARET_DOWN, "Move down", false).clicked() {
                             mv = Some((i, 1));
                         }
                     });
                     ui.add_enabled_ui(i > 0, |ui| {
-                        if action_button(ui, icon::CARET_UP, "").clicked() {
+                        if icon_button(ui, icon::CARET_UP, "Move up", false).clicked() {
                             mv = Some((i, -1));
                         }
                     });
-                    if action_button(ui, icon::PLAY, "Apply").clicked() {
+                    if icon_button(ui, icon::PLAY, "Apply", false).clicked() {
                         apply = Some(i);
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(10.0);
                     seg_toggle(ui, &mut follow);
                     ui.label(egui::RichText::new("follows head").size(12.0).color(theme::ON_SURFACE_VAR))
                         .on_hover_text("Double-B off/on re-centres this layout on your head, like unsaved arrangements");

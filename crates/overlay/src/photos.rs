@@ -805,7 +805,7 @@ pub fn wrist_card(
                     req.open = true;
                 }
                 ui.vertical(|ui| {
-                    ui.set_width(ui.available_width() - 34.0);
+                    ui.set_width((ui.available_width() - 44.0).max(40.0));
                     ui.label(egui::RichText::new(truncate(content, 80)).size(12.0).color(theme::ON_SURFACE_VAR));
                     ui.label(egui::RichText::new("Tap the code to open").size(11.0).color(theme::ON_SURFACE_VAR));
                 });
@@ -816,7 +816,7 @@ pub fn wrist_card(
                     req.open = true;
                 }
                 ui.vertical(|ui| {
-                    ui.set_width(ui.available_width() - 34.0);
+                    ui.set_width((ui.available_width() - 44.0).max(40.0));
                     ui.label(egui::RichText::new(when).size(13.0).color(theme::ON_SURFACE_VAR));
                     ui.label(egui::RichText::new("Tap the preview to open").size(11.0).color(theme::ON_SURFACE_VAR));
                 });
