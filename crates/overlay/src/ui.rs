@@ -594,7 +594,10 @@ fn watch_card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(16)))
         .corner_radius(12)
         .inner_margin(egui::Margin::same(8))
-        .show(ui, contents);
+        .show(ui, |ui| {
+            // Cards sit in a horizontal row; their contents stack vertically.
+            ui.vertical(contents);
+        });
 }
 
 /// The bottom floating bar (its own layer): recenter · active-game splash toggle ·
