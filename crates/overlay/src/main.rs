@@ -528,6 +528,8 @@ fn run() -> Result<()> {
     // A freeze counting down before it applies: (client id, deadline).
     let mut pending_freeze: Option<(u32, Instant)> = None;
     let mut click_prev = false; // haptic click edge
+    // Laser fade over mirrored screens: (screen index, when the ray entered it).
+    let mut screen_laser_since: Option<(usize, Instant)> = None;
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     // Re-scan to refresh last-played ordering when a game starts/stops.
     let mut running_app_prev: Option<String> = None;
@@ -925,11 +927,12 @@ fn run() -> Result<()> {
                 monado.set_block(want_block);
                 blocked_prev = want_block;
             }
-            if d_ray.is_some() {
-                fill_laser(&mut laser, &device, cmd, queue, fence)?;
-            }
+            let laser_alpha = screen_laser_alpha(desktop.pointing_screen(), &mut screen_laser_since);
             let laser_q = match (d_ray, hmd) {
-                (Some((aim, t)), Some(h)) => Some(laser_quad(&laser, &space, &aim, t, &h)),
+                (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => {
+                    fill_laser(&mut laser, &device, cmd, queue, fence, laser_alpha)?;
+                    Some(laser_quad(&laser, &space, &aim, t, &h))
+                }
                 _ => None,
             };
             let screen_quads = desktop.quad_layers(&space);
@@ -1180,8 +1183,15 @@ fn run() -> Result<()> {
         }
         hover_prev = st.hovered_index;
 
-        if laser_ray.is_some() {
-            fill_laser(&mut laser, &device, cmd, queue, fence)?;
+        // Full laser on the dashboard; on a mirrored screen it fades out after entry.
+        let laser_alpha = if best.is_some() {
+            screen_laser_since = None;
+            1.0
+        } else {
+            screen_laser_alpha(desktop.pointing_screen(), &mut screen_laser_since)
+        };
+        if laser_ray.is_some() && laser_alpha > 0.0 {
+            fill_laser(&mut laser, &device, cmd, queue, fence, laser_alpha)?;
         }
 
         // All three panels as curved cylinder segments (rail + bottom alpha so
@@ -1190,7 +1200,7 @@ fn run() -> Result<()> {
         let (main_cyl, rail_cyl, bottom_cyl);
         let (main_quad, rail_quad, bottom_quad);
         let laser_q = match (laser_ray, hmd) {
-            (Some((aim, t)), Some(h)) => Some(laser_quad(&laser, &space, &aim, t, &h)),
+            (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => Some(laser_quad(&laser, &space, &aim, t, &h)),
             _ => None,
         };
         let screen_quads = desktop.quad_layers(&space);
@@ -1446,6 +1456,30 @@ fn run() -> Result<()> {
         }
         if let Some(name) = st.kill_request.take() {
             stop_game(&name);
+        }
+    }
+}
+
+/// Laser opacity over a mirrored screen: full when the ray enters, gone after
+/// `SCREEN_LASER_FADE` seconds, so it shows where you landed without covering
+/// the desktop. Leaving (or switching screens) resets the fade.
+const SCREEN_LASER_FADE: f32 = 2.0;
+fn screen_laser_alpha(screen: Option<usize>, since: &mut Option<(usize, Instant)>) -> f32 {
+    match screen {
+        None => {
+            *since = None;
+            1.0
+        }
+        Some(s) => {
+            let entered = match *since {
+                Some((prev, t)) if prev == s => t,
+                _ => {
+                    let now = Instant::now();
+                    *since = Some((s, now));
+                    now
+                }
+            };
+            (1.0 - entered.elapsed().as_secs_f32() / SCREEN_LASER_FADE).clamp(0.0, 1.0)
         }
     }
 }

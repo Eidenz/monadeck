@@ -485,6 +485,11 @@ impl DesktopViewer {
         ray
     }
 
+    /// Index of the screen the laser is on this frame (for the laser fade).
+    pub fn pointing_screen(&self) -> Option<usize> {
+        self.pointing.map(|(s, _)| s)
+    }
+
     pub fn pointing(&self) -> bool {
         self.pointing.is_some() || self.screens.iter().any(|s| s.grab.is_some())
     }

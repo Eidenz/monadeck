@@ -408,13 +408,15 @@ pub fn make_laser(session: &xr::Session<xr::Vulkan>, format: vk::Format) -> Resu
     Ok(Laser { swapchain, images })
 }
 
-/// Fill the laser texture with the accent colour (called per shown frame).
+/// Fill the laser texture with the accent colour at `alpha` (premultiplied, so
+/// the layer can be blended over what's behind it). Called per shown frame.
 pub fn fill_laser(
     laser: &mut Laser,
     device: &ash::Device,
     cmd: vk::CommandBuffer,
     queue: vk::Queue,
     fence: vk::Fence,
+    alpha: f32,
 ) -> Result<()> {
     let index = laser.swapchain.acquire_image()? as usize;
     laser.swapchain.wait_image(xr::Duration::INFINITE)?;
@@ -450,7 +452,8 @@ pub fn fill_laser(
             &[],
             &[to_dst],
         );
-        let color = vk::ClearColorValue { float32: [0.25, 0.88, 0.81, 1.0] };
+        let a = alpha.clamp(0.0, 1.0);
+        let color = vk::ClearColorValue { float32: [0.25 * a, 0.88 * a, 0.81 * a, a] };
         device.cmd_clear_color_image(cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &color, &[range]);
         let to_src = vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -481,6 +484,7 @@ pub fn fill_laser(
 }
 
 /// A thin quad from the controller to the hit point, billboarded toward the HMD.
+/// Alpha-blended so a faded laser (see the desktop screens) shows through.
 pub fn laser_quad<'a>(
     laser: &'a Laser,
     space: &'a xr::Space,
@@ -507,4 +511,5 @@ pub fn laser_quad<'a>(
         .sub_image(sub)
         .pose(xr::Posef { orientation: quatf(q), position: vec3f(mid) })
         .size(xr::Extent2Df { width: 0.006, height: dist })
+        .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
 }
