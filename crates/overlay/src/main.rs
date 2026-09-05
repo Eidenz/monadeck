@@ -408,7 +408,7 @@ fn run() -> Result<()> {
     // Wrist watch on the left controller (WayVR's offsets from the aim/tip pose).
     // ~WayVR's size (their watch is 0.115 m wide).
     const WATCH_W: f32 = 0.105;
-    const WATCH_PX: (u32, u32) = (600, 372);
+    const WATCH_PX: (u32, u32) = (600, 404);
     let mut watch_panel = make_panel(
         &session, &device, allocator.clone(), render_pass, format, srgb,
         WATCH_PX, (WATCH_W, WATCH_W * WATCH_PX.1 as f32 / WATCH_PX.0 as f32), anchor,

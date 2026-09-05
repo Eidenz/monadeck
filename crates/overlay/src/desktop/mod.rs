@@ -155,6 +155,7 @@ pub struct DesktopViewer {
     pending_layout: Option<DesktopLayout>,
     /// Screens hidden by "toggle all" (double-A), to bring back the same set.
     stash: Vec<usize>,
+    stash_keyboard: bool,
     /// LOCAL space's pose in STAGE space this frame. LOCAL is re-anchored at the
     /// head on every session start, so layouts are stored in STAGE (floor +
     /// tracking origin) and converted through this.
@@ -215,6 +216,7 @@ impl DesktopViewer {
             pending_layout: None,
             local_in_stage: None,
             stash: Vec::new(),
+            stash_keyboard: false,
         }
     }
 
@@ -222,25 +224,36 @@ impl DesktopViewer {
     /// set back. Returns what happened for feedback.
     pub fn toggle_all(&mut self) -> ToggleAll {
         let shown: Vec<usize> = self.screens.iter().enumerate().filter(|(_, s)| s.shown).map(|(i, _)| i).collect();
-        if !shown.is_empty() {
+        if !shown.is_empty() || self.keyboard.visible {
             for &i in &shown {
                 self.screens[i].hide(); // keeps `placed`: they come back where they were
-                if self.keyboard.attached == Some(i) {
-                    self.keyboard.attached = None;
-                }
             }
+            // The keyboard goes with them (its dock is remembered for the way back).
+            self.stash_keyboard = self.keyboard.visible;
+            self.keyboard.visible = false;
+            self.keyboard.grab = None;
+            self.clipboard.set_active(false);
             self.stash = shown;
-            return ToggleAll::Hidden(self.stash.len());
+            return ToggleAll::Hidden(self.stash.len() + self.stash_keyboard as usize);
         }
         let stash = std::mem::take(&mut self.stash);
         let valid: Vec<usize> = stash.into_iter().filter(|&i| i < self.screens.len()).collect();
-        if valid.is_empty() {
+        let kb = std::mem::take(&mut self.stash_keyboard);
+        if valid.is_empty() && !kb {
             return ToggleAll::Nothing;
         }
         for &i in &valid {
             self.screens[i].show(&self.caps);
         }
-        ToggleAll::Shown(valid.len())
+        if kb {
+            self.keyboard.visible = true;
+            self.clipboard.set_active(true);
+            // Re-dock under the same screen (it kept `attached`), else stay put.
+            if let Some(i) = self.keyboard.attached {
+                self.dock_keyboard(Some(i));
+            }
+        }
+        ToggleAll::Shown(valid.len() + kb as usize)
     }
 
     /// Which hand the laser is on a screen/keyboard with this frame.

@@ -464,7 +464,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
                 ui.set_width(214.0);
-                ui.set_min_height(122.0);
+                ui.set_min_height(120.0);
                 if st.watch_layout_menu {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{}  Layouts", icon::SQUARES_FOUR)).size(14.0).strong().color(egui::Color32::WHITE));
@@ -496,22 +496,31 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         st.sound_tab = true;
                     }
                 } else {
-                    ui.label(egui::RichText::new(&st.clock).size(40.0).strong().color(egui::Color32::WHITE));
-                    ui.label(egui::RichText::new(&st.watch_date).size(14.0).color(theme::ON_SURFACE_VAR));
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new(&st.clock).size(40.0).strong().color(egui::Color32::WHITE));
+                        ui.label(egui::RichText::new(&st.watch_date).size(14.0).color(theme::ON_SURFACE_VAR));
+                    });
                     ui.add_space(2.0);
-                    ui.horizontal(|ui| {
+                    // Zones: fixed-width cells, centred as a row.
+                    let cell = 92.0;
+                    let n = st.watch_times.len() as f32;
+                    centered_row(ui, (cell * n).max(0.0), |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
                         for (label, time) in &st.watch_times {
                             ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(label).size(11.0).color(theme::ON_SURFACE_VAR));
-                                ui.label(egui::RichText::new(time).size(20.0).strong().color(theme::PRIMARY));
+                                ui.set_width(cell);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(egui::RichText::new(label).size(11.0).color(theme::ON_SURFACE_VAR));
+                                    ui.label(egui::RichText::new(time).size(20.0).strong().color(theme::PRIMARY));
+                                });
                             });
-                            ui.add_space(10.0);
                         }
                     });
                 }
             });
             watch_card(ui, |ui| {
-                let b = 56.0;
+                ui.set_min_height(120.0);
+                let b = 57.0;
                 let quick = |ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str| -> bool {
                     let fg = if on { egui::Color32::BLACK } else { theme::ON_SURFACE };
                     let btn = egui::Button::new(egui::RichText::new(glyph).size(24.0).color(fg))
