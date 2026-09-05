@@ -109,7 +109,9 @@ pub fn run() -> Result<()> {
     let importer = caps.dmabuf.then(|| Importer::new(&instance, &device, qf, fmt));
 
     println!("== portal (approve the screen-share dialog on your desktop) ==");
-    let rx = portal::start(None);
+    // Reuse the overlay's saved approval when there is one (no dialog).
+    let token = monadeck_core::overlay_config::OverlayConfig::load().screencast_token;
+    let rx = portal::start(token);
     let cast = match rx.recv_timeout(Duration::from_secs(90)) {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => bail!("portal: {e}"),
@@ -119,14 +121,26 @@ pub fn run() -> Result<()> {
     for s in &cast.streams {
         println!("  stream node {} pos {:?} size {:?} mapping {:?}", s.node_id, s.position, s.size, s.mapping_id);
     }
-    let Some(first) = cast.streams.first() else { bail!("no streams") };
+    let want = std::env::var("MONADECK_SELFTEST_SCREEN").ok();
+    let Some(first) = cast
+        .streams
+        .iter()
+        .find(|s| want.as_deref().is_none_or(|w| s.mapping_id.as_deref() == Some(w)))
+        .or(cast.streams.first())
+    else {
+        bail!("no streams")
+    };
+    println!("  testing stream {:?} (MONADECK_SELFTEST_SCREEN to pick)", first.mapping_id);
 
     println!("== pipewire ==");
-    let capture = Capture::start("selftest".into(), first.node_id, caps.formats.clone(), 90);
+    let max_fps: u32 = std::env::var("MONADECK_SELFTEST_FPS").ok().and_then(|v| v.parse().ok()).unwrap_or(90);
+    println!("  requesting maxFramerate {max_fps} (MONADECK_SELFTEST_FPS to change)");
+    let capture = Capture::start("selftest".into(), first.node_id, caps.formats.clone(), max_fps);
     let start = Instant::now();
     let mut got: Option<Frame> = None;
     let mut count = 0u32;
-    while start.elapsed() < Duration::from_secs(8) {
+    // Count for a fixed window so the rate can be compared with the cap.
+    while start.elapsed() < Duration::from_secs(4) {
         if let Some(f) = capture.latest() {
             count += 1;
             let ff = f.format();
@@ -138,14 +152,11 @@ pub fn run() -> Result<()> {
                 println!("  frame {}x{} {} mod 0x{:016x}: {kind}", ff.width, ff.height, ff.fourcc, ff.modifier);
             }
             got = Some(f);
-            if count >= 30 {
-                break;
-            }
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(2));
     }
-    let Some(frame) = got else { bail!("no frames received in 8 s") };
-    println!("  {count} frame(s) in {:.1} s", start.elapsed().as_secs_f32());
+    let Some(frame) = got else { bail!("no frames received in 4 s") };
+    println!("  {count} frame(s) in {:.1} s = {:.0} fps received (move something on that screen for a fair number)", start.elapsed().as_secs_f32(), count as f32 / start.elapsed().as_secs_f32());
 
     println!("== gpu import + readback ==");
     let ff = frame.format();
