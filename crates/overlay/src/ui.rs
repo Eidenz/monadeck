@@ -106,6 +106,13 @@ pub struct LibState {
     pub photo_translate_ok: bool,
     pub photo_share_ok: bool,
     pub photo_dir: String,
+    // Notifications.
+    pub notif_enabled: bool,
+    pub notif_sound: bool,
+    pub notif_xso: bool,
+    pub notif_dbus_ok: bool,
+    pub notif_udp_ok: bool,
+    pub notif_test_request: bool,
     pub desktop_opacity_request: Option<(usize, f32)>,
     // Wrist watch.
     pub watch_enabled: bool,
@@ -282,6 +289,12 @@ impl LibState {
             photo_translate_ok: false,
             photo_share_ok: false,
             photo_dir: String::new(),
+            notif_enabled: true,
+            notif_sound: true,
+            notif_xso: true,
+            notif_dbus_ok: false,
+            notif_udp_ok: false,
+            notif_test_request: false,
             desktop_opacity_request: None,
             watch_enabled: true,
             watch_24h: false,
@@ -522,10 +535,12 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 }
             });
         });
-        // Clock + zones (or the layout picker) | quick buttons — each in its own card.
+        // Clock + zones (or the layout picker) | quick buttons — each in its own
+        // card. A queued screenshot takes the whole row (bigger preview).
+        let wide = st.wrist_shot.is_some() && !st.watch_layout_menu;
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
-                ui.set_width(214.0);
+                ui.set_width(if wide { ui.available_width() } else { 214.0 });
                 ui.set_min_height(120.0);
                 if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
                     let req = crate::photos::wrist_card(ui, shot.thumb.as_ref(), shot.qr.as_deref(), &shot.when, shot.idx, shot.total);
@@ -586,6 +601,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     });
                 }
             });
+            if !wide {
             watch_card(ui, |ui| {
                 ui.set_min_height(120.0);
                 let b = 57.0;
@@ -625,6 +641,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     });
                 });
             });
+            }
         });
         // Menu + screens (fixed numbering, same as the bottom bar), in a card.
         watch_card(ui, |ui| {
@@ -1786,6 +1803,8 @@ pub enum ToastKind {
     Timer,
     Battery,
     Info,
+    /// A desktop / XSOverlay notification.
+    Notification,
 }
 
 impl ToastKind {
@@ -1794,13 +1813,14 @@ impl ToastKind {
             ToastKind::Timer => (icon::TIMER, theme::PRIMARY),
             ToastKind::Battery => (icon::BATTERY_WARNING, FAV_GOLD),
             ToastKind::Info => (icon::BELL_RINGING, theme::PRIMARY),
+            ToastKind::Notification => (icon::BELL, egui::Color32::from_rgb(150, 190, 255)),
         }
     }
 }
 
 /// The floating notification card (its own layer; shows over a game too). The
 /// quad is cleared transparent, so the card hugs its content and floats centred.
-pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind) {
+pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind, icon_tex: Option<&egui::TextureHandle>) {
     let (glyph, accent) = kind.style();
     let card = egui::Frame::default()
         .fill(egui::Color32::from_rgb(24, 28, 35))
@@ -1819,19 +1839,34 @@ pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind
                         egui::CornerRadius::same(14),
                         egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38),
                     );
-                    ui.painter().text(
-                        chip.center(),
-                        egui::Align2::CENTER_CENTER,
-                        glyph,
-                        egui::FontId::proportional(27.0),
-                        accent,
-                    );
+                    match icon_tex {
+                        Some(t) => {
+                            egui::Image::new(egui::load::SizedTexture::new(t.id(), egui::vec2(44.0, 44.0)))
+                                .corner_radius(10)
+                                .paint_at(ui, egui::Rect::from_center_size(chip.center(), egui::vec2(44.0, 44.0)));
+                        }
+                        None => {
+                            ui.painter().text(
+                                chip.center(),
+                                egui::Align2::CENTER_CENTER,
+                                glyph,
+                                egui::FontId::proportional(27.0),
+                                accent,
+                            );
+                        }
+                    }
                     ui.add_space(16.0);
                     ui.vertical(|ui| {
+                        ui.set_max_width(560.0);
                         ui.label(egui::RichText::new(title).size(21.0).strong().color(egui::Color32::WHITE));
                         if !body.is_empty() {
                             ui.add_space(3.0);
-                            ui.label(egui::RichText::new(body).size(15.0).color(theme::ON_SURFACE_VAR));
+                            let short: String = if body.chars().count() > 140 {
+                                format!("{}…", body.chars().take(140).collect::<String>())
+                            } else {
+                                body.to_string()
+                            };
+                            ui.add(egui::Label::new(egui::RichText::new(short).size(15.0).color(theme::ON_SURFACE_VAR)).wrap());
                         }
                     });
                 });
@@ -2558,6 +2593,31 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
             let zones: Vec<String> = st.watch_times.iter().map(|(l, _)| l.clone()).collect();
             let zl = if zones.is_empty() { "none".to_string() } else { zones.join(" · ") };
             setting_row(ui, "Extra time zones", Some(&format!("{zl} — edit `watch_timezones` in overlay.json (IANA names)")), |_| {});
+            if t {
+                st.sound_tab = true;
+            }
+        });
+        section(ui, "Notifications", |ui| {
+            let mut t = false;
+            let st_desk = if st.notif_dbus_ok { "listening" } else { "unavailable" };
+            setting_row(ui, "Desktop notifications", Some(&format!("Mirror what your desktop shows (D-Bus monitor) · {st_desk}")), |ui| {
+                t |= seg_toggle(ui, &mut st.notif_enabled);
+            });
+            divider(ui);
+            let st_xso = if st.notif_udp_ok { "listening on udp/42069" } else { "port busy (WayVR/XSOverlay?) — restart the overlay" };
+            setting_row(ui, "XSOverlay notifications", Some(&format!("VRCX and friends · {st_xso}")), |ui| {
+                t |= seg_toggle(ui, &mut st.notif_xso);
+            });
+            divider(ui);
+            setting_row(ui, "Sound", Some("A short tick with each notification"), |ui| {
+                t |= seg_toggle(ui, &mut st.notif_sound);
+            });
+            divider(ui);
+            setting_row(ui, "Test", Some("Show a sample notification"), |ui| {
+                if action_button(ui, icon::BELL, "Test").clicked() {
+                    st.notif_test_request = true;
+                }
+            });
             if t {
                 st.sound_tab = true;
             }

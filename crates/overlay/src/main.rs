@@ -13,6 +13,7 @@ mod games;
 mod gfx;
 mod mathx;
 mod monado;
+mod notifications;
 mod photos;
 mod shots;
 mod sky;
@@ -70,6 +71,9 @@ struct ToastState {
     kind: ui::ToastKind,
     pose: xr::Posef,
     until: Instant,
+    /// Optional app icon (uploaded to the toast panel on first draw).
+    icon: Option<egui::ColorImage>,
+    icon_tex: Option<egui::TextureHandle>,
 }
 
 /// The SteamVR-style game-launch popup: its own composition layer (so it
@@ -115,6 +119,8 @@ fn make_toast(
         kind,
         pose: mathx::toast_pose(hmd, 1.3, 0.42),
         until: Instant::now() + std::time::Duration::from_secs(5),
+        icon: None,
+        icon_tex: None,
     }
 }
 
@@ -162,6 +168,19 @@ unsafe extern "system" fn get_instance_proc_addr(
 fn main() {
     // `monadeck-overlay --desktop-selftest`: exercise the desktop-viewer capture
     // path (portal → PipeWire → Vulkan import → PNG) with no headset/runtime.
+    if std::env::args().any(|a| a == "--notify-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        let n = notifications::Notifications::start(true, true);
+        println!("dbus={} udp={} — listening 12 s; send `notify-send` / an XSO UDP packet", n.dbus_ok, n.udp_ok);
+        let t = Instant::now();
+        while t.elapsed().as_secs() < 12 {
+            for i in n.drain() {
+                println!("  [{:?}] app={:?} title={:?} body={:?} timeout={} icon={}", i.source, i.app, i.title, i.body, i.timeout, i.icon.is_some());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return;
+    }
     if std::env::args().any(|a| a == "--keyboard-selftest") {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
         if let Err(e) = desktop::selftest::keyboard() {
@@ -457,6 +476,9 @@ fn run() -> Result<()> {
     let mut photos = photos::Photos::new(&session, &device, allocator.clone(), render_pass, format, srgb, &photo_cfg)?;
     let mut gestures = shots::gestures::load();
     let mut gestures_prev = gestures.clone();
+    // Desktop + XSOverlay notifications → toasts (queued, one at a time).
+    let notifications = notifications::Notifications::start(ov_cfg.notifications_enabled, ov_cfg.notifications_xso);
+    let mut toast_queue: std::collections::VecDeque<(ToastState, f32)> = std::collections::VecDeque::new();
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -574,7 +596,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound)),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -637,6 +659,11 @@ fn run() -> Result<()> {
     st.photo_translate_ok = photos.translate_ok;
     st.photo_share_ok = photos.share_ok;
     st.photo_dir = photos.dir.clone();
+    st.notif_enabled = ov_cfg.notifications_enabled;
+    st.notif_xso = ov_cfg.notifications_xso;
+    st.notif_sound = ov_cfg.notifications_sound;
+    st.notif_dbus_ok = notifications.dbus_ok;
+    st.notif_udp_ok = notifications.udp_ok;
     let mut nav_prev = st.nav;
     st.watch_enabled = ov_cfg.watch_enabled;
     st.watch_24h = ov_cfg.watch_24h;
@@ -906,17 +933,57 @@ fn run() -> Result<()> {
             battery_low_warned = false;
         }
 
+        // Incoming notifications → the toast queue (respecting the toggles).
+        for n in notifications.drain() {
+            let allowed = match n.source {
+                notifications::Source::Desktop => st.notif_enabled,
+                notifications::Source::XsOverlay => st.notif_xso,
+            };
+            if !allowed {
+                continue;
+            }
+            let title = if n.app.is_empty() || n.app == n.title { n.title.clone() } else { format!("{} · {}", n.app, n.title) };
+            toast_queue.push_back((
+                ToastState { title, body: n.body, kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: n.icon, icon_tex: None },
+                n.timeout,
+            ));
+        }
+        if st.notif_test_request {
+            st.notif_test_request = false;
+            toast_queue.push_back((
+                ToastState { title: "Monadeck · Test".into(), body: "This is how a desktop or XSOverlay notification looks.".into(), kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: None, icon_tex: None },
+                5.0,
+            ));
+        }
         // Expire + render the toast on its own layer (shows even over a game).
         if toast.as_ref().map_or(false, |t| now >= t.until) {
             toast = None;
         }
+        if toast.is_none() {
+            if let Some((mut t, secs)) = toast_queue.pop_front() {
+                if let Some(h) = hmd {
+                    t.pose = mathx::toast_pose(&h, 1.3, 0.42);
+                    t.until = now + std::time::Duration::from_secs_f32(secs);
+                    if st.notif_sound {
+                        audio.tab();
+                    }
+                    toast = Some(t);
+                } else {
+                    toast_queue.push_front((t, secs));
+                }
+            }
+        }
         let toast_active = toast.is_some();
-        if let Some(t) = &toast {
+        if let Some(t) = &mut toast {
+            if let Some(img) = t.icon.take() {
+                t.icon_tex = Some(toast_panel.ctx.load_texture("toast-icon", img, egui::TextureOptions::LINEAR));
+            }
             toast_panel.pose = t.pose;
+            let (title, body, kind, icon_tex) = (t.title.clone(), t.body.clone(), t.kind, t.icon_tex.clone());
             render_panel(
                 &mut toast_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
                 true, None, (0.0, 0.0), start.elapsed().as_secs_f64(),
-                |ctx| ui::build_toast(ctx, &t.title, &t.body, t.kind),
+                |ctx| ui::build_toast(ctx, &title, &body, kind, icon_tex.as_ref()),
             )?;
         }
 
@@ -1317,7 +1384,7 @@ fn run() -> Result<()> {
             photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
             let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
             if let Some(g) = d_in.gesture {
-                toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700) });
+                toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None });
             }
             let want_block = desktop.pointing() || p_in.ray.is_some();
             if want_block != blocked_prev {
@@ -1512,7 +1579,7 @@ fn run() -> Result<()> {
         photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
         let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
         if let Some(g) = d_in.gesture {
-            toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700) });
+            toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None });
         }
         if d_ray.is_some() {
             best = None;
@@ -1804,7 +1871,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, st.capture_max_fps, st.capture_max_height, st.skybox_enabled),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound)),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -2052,6 +2119,9 @@ fn overlay_config_from(
         cleanup_days: st.photo_cleanup_days.round() as i32,
         crop_margin: st.photo_crop_margin.round() as i32,
         photos_settings_imported: true,
+        notifications_enabled: st.notif_enabled,
+        notifications_xso: st.notif_xso,
+        notifications_sound: st.notif_sound,
     }
 }
 

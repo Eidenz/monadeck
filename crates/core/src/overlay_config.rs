@@ -76,6 +76,11 @@ pub struct OverlayConfig {
     pub crop_margin: i32,
     /// monado-frame's config.json was imported once.
     pub photos_settings_imported: bool,
+    /// Mirror desktop (D-Bus) notifications as toasts.
+    pub notifications_enabled: bool,
+    /// Listen for XSOverlay-protocol notifications (udp/42069).
+    pub notifications_xso: bool,
+    pub notifications_sound: bool,
 }
 
 impl Default for OverlayConfig {
@@ -116,6 +121,9 @@ impl Default for OverlayConfig {
             cleanup_days: 0,
             crop_margin: 0,
             photos_settings_imported: false,
+            notifications_enabled: true,
+            notifications_xso: true,
+            notifications_sound: true,
         }
     }
 }
