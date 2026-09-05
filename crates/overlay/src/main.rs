@@ -13,6 +13,8 @@ mod games;
 mod gfx;
 mod mathx;
 mod monado;
+mod photos;
+mod shots;
 mod sky;
 mod ui;
 
@@ -424,6 +426,37 @@ fn run() -> Result<()> {
     };
     // (right-hand grab offset, last gripped pose) while the watch is being repositioned.
     let mut watch_grab: Option<(xr::Posef, xr::Posef)> = None;
+    // Screenshots (monado-frame, folded in): watcher, wrist queue, photo windows, gallery.
+    let mut ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
+    if !ov_cfg.photos_settings_imported {
+        // One-time import of monado-frame's settings.
+        let mf = format!("{}/.config/monado-frame/config.json", std::env::var("HOME").unwrap_or_default());
+        if let Ok(txt) = std::fs::read_to_string(&mf) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                ov_cfg.qr_detect = v["qr_detect"].as_bool().unwrap_or(ov_cfg.qr_detect);
+                ov_cfg.qr_autodelete = v["qr_autodelete"].as_bool().unwrap_or(ov_cfg.qr_autodelete);
+                ov_cfg.skip_wrist_photo = v["skip_wrist_photo"].as_bool().unwrap_or(ov_cfg.skip_wrist_photo);
+                ov_cfg.skip_wrist_qr = v["skip_wrist_qr"].as_bool().unwrap_or(ov_cfg.skip_wrist_qr);
+                ov_cfg.cleanup_days = v["cleanup_days"].as_i64().unwrap_or(ov_cfg.cleanup_days as i64) as i32;
+                ov_cfg.crop_margin = v["crop_margin"].as_i64().unwrap_or(ov_cfg.crop_margin as i64) as i32;
+                log::info!("photos: imported monado-frame settings from {mf}");
+            }
+        }
+        ov_cfg.photos_settings_imported = true;
+        ov_cfg.save();
+    }
+    let photo_cfg_of = |c: &monadeck_core::overlay_config::OverlayConfig| photos::PhotoCfg {
+        qr_detect: c.qr_detect,
+        qr_autodelete: c.qr_autodelete,
+        skip_wrist_photo: c.skip_wrist_photo,
+        skip_wrist_qr: c.skip_wrist_qr,
+        cleanup_days: c.cleanup_days,
+        crop_margin: c.crop_margin,
+    };
+    let mut photo_cfg = photo_cfg_of(&ov_cfg);
+    let mut photos = photos::Photos::new(&session, &device, allocator.clone(), render_pass, format, srgb, &photo_cfg)?;
+    let mut gestures = shots::gestures::load();
+    let mut gestures_prev = gestures.clone();
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -470,7 +503,6 @@ fn run() -> Result<()> {
     let art = games::ArtLoader::new();
     // libmonado link: running-game detection, recenter, input arbitration.
     let monado = monado::MonadoLink::new();
-    let ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
     // Desktop viewer (WayVR-style screen mirror): GPU caps + portal token.
     let desktop_caps = desktop::dmabuf::Caps::query(&vk_instance, physical_device, dmabuf_ok, format);
     let desktop_importer = desktop_caps
@@ -593,6 +625,19 @@ fn run() -> Result<()> {
     st.capture_max_height = ov_cfg.capture_max_height;
     st.skybox_enabled = ov_cfg.skybox_enabled;
     st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
+    st.gesture_enabled = gestures.enabled;
+    st.gesture_hold_ms = gestures.hold_ms as f32;
+    st.gesture_feedback = gestures.frame_feedback;
+    st.photo_qr_detect = ov_cfg.qr_detect;
+    st.photo_qr_autodelete = ov_cfg.qr_autodelete;
+    st.photo_skip_wrist = ov_cfg.skip_wrist_photo;
+    st.photo_skip_wrist_qr = ov_cfg.skip_wrist_qr;
+    st.photo_cleanup_days = ov_cfg.cleanup_days as f32;
+    st.photo_crop_margin = ov_cfg.crop_margin as f32;
+    st.photo_translate_ok = photos.translate_ok;
+    st.photo_share_ok = photos.share_ok;
+    st.photo_dir = photos.dir.clone();
+    let mut nav_prev = st.nav;
     st.watch_enabled = ov_cfg.watch_enabled;
     st.watch_24h = ov_cfg.watch_24h;
     st.watch_locked = ov_cfg.watch_locked;
@@ -1018,6 +1063,61 @@ fn run() -> Result<()> {
         st.keyboard_shown = desktop.keyboard_visible();
         st.desktop_bar = desktop.bar_items();
 
+        // --- Screenshots: watch the folder, feed the wrist card ----------------
+        photos.poll(&photo_cfg, hmd.as_ref());
+        if photos.notify_pulse {
+            pulse(&session, &haptic_action, left_path, 0.4, 25);
+            audio.tab();
+        }
+        photos.wrist_textures(&watch_panel.ctx);
+        st.wrist_shot = photos.pending.get(photos.pending_idx).map(|p| ui::WristShot {
+            thumb: p.thumb.clone(),
+            qr: p.qr.clone(),
+            when: p.when.clone(),
+            idx: photos.pending_idx,
+            total: photos.pending.len(),
+        });
+        // Gallery follows the Photos page.
+        if visible && st.nav == ui::Nav::Photos {
+            photos.gallery_open();
+            photos.gallery_textures(&main_panel.ctx);
+            st.gallery_items = photos.gallery.items.clone();
+            st.gallery_page = photos.gallery.page;
+            st.gallery_pages = photos.gallery_pages();
+            st.gallery_total = photos.gallery_total();
+            st.gallery_loading = photos.gallery.loading;
+        } else if nav_prev == ui::Nav::Photos || !visible {
+            if photos.gallery_active() {
+                photos.gallery_close();
+                st.gallery_items.clear();
+            }
+        }
+        nav_prev = st.nav;
+        let gr = std::mem::take(&mut st.gallery_req);
+        if gr.open.is_some() || gr.delete.is_some() || gr.prev || gr.next || gr.refresh {
+            photos.gallery_apply(gr, hmd.as_ref());
+        }
+        // Gesture + photo settings → persist on change.
+        gestures.enabled = st.gesture_enabled;
+        gestures.hold_ms = st.gesture_hold_ms.round() as i32;
+        gestures.frame_feedback = st.gesture_feedback;
+        if gestures != gestures_prev {
+            shots::gestures::save(&gestures);
+            gestures_prev = gestures.clone();
+        }
+        let pc = photos::PhotoCfg {
+            qr_detect: st.photo_qr_detect,
+            qr_autodelete: st.photo_qr_autodelete,
+            skip_wrist_photo: st.photo_skip_wrist,
+            skip_wrist_qr: st.photo_skip_wrist_qr,
+            cleanup_days: st.photo_cleanup_days.round() as i32,
+            crop_margin: st.photo_crop_margin.round() as i32,
+        };
+        if pc != photo_cfg {
+            photo_cfg = pc;
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
+        }
+
         // --- 360° background: upload once, show only while no game runs ------
         if let Some(s) = &mut sky {
             if let Err(e) = s.poll(&session, &device, &allocator, format, cmd, queue, fence) {
@@ -1090,6 +1190,10 @@ fn run() -> Result<()> {
                 true, ptr, (0.0, 0.0), start.elapsed().as_secs_f64(),
                 |ctx| ui::build_watch(ctx, &mut st),
             )?;
+        }
+        let wr = std::mem::take(&mut st.wrist_req);
+        if wr.open || wr.dismiss || wr.older || wr.newer {
+            photos.wrist_apply(wr, hmd.as_ref());
         }
         if st.watch_menu_request {
             st.watch_menu_request = false;
@@ -1208,12 +1312,14 @@ fn run() -> Result<()> {
                 }
             }
             // Mirrored screens stay interactive while the dashboard is away.
-            let d_in = desktop.update_input(&hands, watch_busy.then_some(0.0), hmd.as_ref());
-            let d_ray = d_in.ray.or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
+            let p_in = photos.update_input(&hands, watch_busy.then_some(0.0));
+            let d_in = desktop.update_input(&hands, if watch_busy { Some(0.0) } else { p_in.hit_t }, hmd.as_ref());
+            photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
+            let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
             if let Some(g) = d_in.gesture {
                 toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700) });
             }
-            let want_block = desktop.pointing();
+            let want_block = desktop.pointing() || p_in.ray.is_some();
             if want_block != blocked_prev {
                 monado.set_block(want_block);
                 blocked_prev = want_block;
@@ -1244,6 +1350,10 @@ fn run() -> Result<()> {
                 layers.push(c);
             }
             if let Some(q) = &kb_q {
+                layers.push(q);
+            }
+            let photo_qs = photos.layers(&space);
+            for q in &photo_qs {
                 layers.push(q);
             }
             if popup_active {
@@ -1392,13 +1502,15 @@ fn run() -> Result<()> {
             best = None;
             scroll = (0.0, 0.0);
         }
+        let block = best.is_some() || dash_zone || watch_busy;
+        let p_in = if grab.is_some() { photos.update_input(&[], None) } else { photos.update_input(&hands, block.then_some(0.0)) };
         let d_in = if grab.is_some() {
             desktop.update_input(&[], None, hmd.as_ref())
         } else {
-            let block = best.is_some() || dash_zone || watch_busy;
-            desktop.update_input(&hands, block.then_some(0.0), hmd.as_ref())
+            desktop.update_input(&hands, if block { Some(0.0) } else { p_in.hit_t }, hmd.as_ref())
         };
-        let d_ray = d_in.ray.or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
+        photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
+        let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
         if let Some(g) = d_in.gesture {
             toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700) });
         }
@@ -1426,7 +1538,7 @@ fn run() -> Result<()> {
         let laser_ray = best.map(|h| (h.aim, h.t)).or(d_ray);
 
         // Block the game's controller input while pointing at the dashboard.
-        let want_block = best.is_some() || desktop.pointing();
+        let want_block = best.is_some() || desktop.pointing() || p_in.ray.is_some();
         if want_block != blocked_prev {
             monado.set_block(want_block);
             blocked_prev = want_block;
@@ -1553,6 +1665,10 @@ fn run() -> Result<()> {
             layers.push(c);
         }
         if let Some(q) = &kb_q {
+            layers.push(q);
+        }
+        let photo_qs = photos.layers(&space);
+        for q in &photo_qs {
             layers.push(q);
         }
         if curved {
@@ -1929,6 +2045,13 @@ fn overlay_config_from(
         capture_max_height: st.capture_max_height,
         skybox_enabled: st.skybox_enabled,
         skybox_path: skybox_path.clone(),
+        qr_detect: st.photo_qr_detect,
+        qr_autodelete: st.photo_qr_autodelete,
+        skip_wrist_photo: st.photo_skip_wrist,
+        skip_wrist_qr: st.photo_skip_wrist_qr,
+        cleanup_days: st.photo_cleanup_days.round() as i32,
+        crop_margin: st.photo_crop_margin.round() as i32,
+        photos_settings_imported: true,
     }
 }
 

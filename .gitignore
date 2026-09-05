@@ -14,3 +14,7 @@ node_modules
 
 # Staged overlay sidecar (built by scripts/stage-overlay.sh on dev/build)
 /desktop/src-tauri/binaries
+
+# Build-time feature config for the overlay (Picsur share, Ollama translate)
+/crates/overlay/picsur.env
+/crates/overlay/translate.env

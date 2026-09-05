@@ -65,6 +65,17 @@ pub struct OverlayConfig {
     pub skybox_enabled: bool,
     /// Custom equirectangular JPEG/PNG for the background (None = built-in).
     pub skybox_path: Option<String>,
+    // Screenshots (from monado-frame).
+    pub qr_detect: bool,
+    pub qr_autodelete: bool,
+    pub skip_wrist_photo: bool,
+    pub skip_wrist_qr: bool,
+    /// Delete screenshots older than this on launch (0 = keep forever).
+    pub cleanup_days: i32,
+    /// % trimmed off each edge of new framed shots (0 = off).
+    pub crop_margin: i32,
+    /// monado-frame's config.json was imported once.
+    pub photos_settings_imported: bool,
 }
 
 impl Default for OverlayConfig {
@@ -98,6 +109,13 @@ impl Default for OverlayConfig {
             capture_max_height: 0,
             skybox_enabled: true,
             skybox_path: None,
+            qr_detect: false,
+            qr_autodelete: false,
+            skip_wrist_photo: false,
+            skip_wrist_qr: false,
+            cleanup_days: 0,
+            crop_margin: 0,
+            photos_settings_imported: false,
         }
     }
 }

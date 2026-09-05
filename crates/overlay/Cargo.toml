@@ -59,3 +59,8 @@ serde_json = "1"
 xkbcommon = { version = "0.8", default-features = false }
 # KDE keyboard-layout switching (org.kde.keyboard) — same zbus ashpd already pulls.
 zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
+# --- Screenshots (ported from monado-frame) ------------------------------------
+rqrr = "0.10"
+ureq = { version = "3", features = ["json"] }
+base64 = "0.22"
+filetime = "0.2"

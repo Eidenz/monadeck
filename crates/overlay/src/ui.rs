@@ -16,7 +16,17 @@ pub enum Nav {
     Playspace,
     Monado,
     Desktop,
+    Photos,
     Settings,
+}
+
+/// The wrist card's content (a queued screenshot / QR), mirrored from `photos`.
+pub struct WristShot {
+    pub thumb: Option<egui::TextureHandle>,
+    pub qr: Option<String>,
+    pub when: String,
+    pub idx: usize,
+    pub total: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,6 +85,27 @@ pub struct LibState {
     pub capture_max_height: u32,
     pub skybox_enabled: bool,
     pub skybox_source: String,
+    // Photos / gestures (monado-frame).
+    pub wrist_shot: Option<WristShot>,
+    pub wrist_req: crate::photos::WristRequests,
+    pub gallery_items: Vec<(egui::TextureHandle, String)>,
+    pub gallery_page: usize,
+    pub gallery_pages: usize,
+    pub gallery_total: usize,
+    pub gallery_loading: bool,
+    pub gallery_req: crate::photos::GalleryRequests,
+    pub gesture_enabled: bool,
+    pub gesture_hold_ms: f32,
+    pub gesture_feedback: bool,
+    pub photo_qr_detect: bool,
+    pub photo_qr_autodelete: bool,
+    pub photo_skip_wrist: bool,
+    pub photo_skip_wrist_qr: bool,
+    pub photo_cleanup_days: f32,
+    pub photo_crop_margin: f32,
+    pub photo_translate_ok: bool,
+    pub photo_share_ok: bool,
+    pub photo_dir: String,
     pub desktop_opacity_request: Option<(usize, f32)>,
     // Wrist watch.
     pub watch_enabled: bool,
@@ -231,6 +262,26 @@ impl LibState {
             capture_max_height: 0,
             skybox_enabled: true,
             skybox_source: String::new(),
+            wrist_shot: None,
+            wrist_req: Default::default(),
+            gallery_items: Vec::new(),
+            gallery_page: 0,
+            gallery_pages: 1,
+            gallery_total: 0,
+            gallery_loading: false,
+            gallery_req: Default::default(),
+            gesture_enabled: true,
+            gesture_hold_ms: 2000.0,
+            gesture_feedback: true,
+            photo_qr_detect: false,
+            photo_qr_autodelete: false,
+            photo_skip_wrist: false,
+            photo_skip_wrist_qr: false,
+            photo_cleanup_days: 0.0,
+            photo_crop_margin: 0.0,
+            photo_translate_ok: false,
+            photo_share_ok: false,
+            photo_dir: String::new(),
             desktop_opacity_request: None,
             watch_enabled: true,
             watch_24h: false,
@@ -372,12 +423,13 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
             // margin, or the last icon overruns the panel's rounded bottom (clipped).
             // ~64 px per icon (48 button + 8 add_space + spacing) — bump when adding.
             let avail = ui.available_height();
-            ui.add_space((avail - 336.0).max(0.0));
+            ui.add_space((avail - 400.0).max(0.0));
             let bottom = [
                 (icon::TIMER, Nav::Tools),
                 (icon::ARROWS_OUT_CARDINAL, Nav::Playspace),
                 (icon::STACK, Nav::Monado),
                 (icon::MONITOR, Nav::Desktop),
+                (icon::IMAGES, Nav::Photos),
                 (icon::GEAR, Nav::Settings),
             ];
             for (k, &(glyph, nav)) in bottom.iter().enumerate() {
@@ -475,7 +527,13 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
             watch_card(ui, |ui| {
                 ui.set_width(214.0);
                 ui.set_min_height(120.0);
-                if st.watch_layout_menu {
+                if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
+                    let req = crate::photos::wrist_card(ui, shot.thumb.as_ref(), shot.qr.as_deref(), &shot.when, shot.idx, shot.total);
+                    if req.open || req.dismiss || req.older || req.newer {
+                        st.wrist_req = req;
+                        st.sound_tab = true;
+                    }
+                } else if st.watch_layout_menu {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{}  Layouts", icon::SQUARES_FOUR)).size(14.0).strong().color(egui::Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -915,6 +973,11 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
                 st.visible_now.clear();
                 st.hovered_index = None;
                 desktop_view(ui, st);
+            }
+            Nav::Photos => {
+                st.visible_now.clear();
+                st.hovered_index = None;
+                photos_view(ui, st);
             }
             Nav::Settings => {
                 st.visible_now.clear();
@@ -2142,6 +2205,79 @@ fn monado_view(ui: &mut egui::Ui, st: &mut LibState) {
                     divider(ui);
                 }
             }
+        });
+    });
+}
+
+/// The Photos page: screenshot gallery + finger-frame gesture and photo settings.
+fn photos_view(ui: &mut egui::Ui, st: &mut LibState) {
+    page_header(ui, icon::IMAGES, "Photos");
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        section(ui, "Gallery", |ui| {
+            let req = crate::photos::gallery_ui(ui, &st.gallery_items, st.gallery_page, st.gallery_pages, st.gallery_total, st.gallery_loading);
+            if req.open.is_some() || req.delete.is_some() || req.prev || req.next || req.refresh {
+                st.gallery_req = req;
+                st.sound_tab = true;
+            }
+        });
+        ui.add_space(6.0);
+        section(ui, "Finger-frame gesture", |ui| {
+            let mut t = false;
+            setting_row(ui, "Gesture enabled", Some("Frame a shot with both hands to take a screenshot"), |ui| {
+                t |= seg_toggle(ui, &mut st.gesture_enabled);
+            });
+            divider(ui);
+            setting_row(ui, "Hold delay", Some("Hold the frame this long before the viewfinder appears; then curl an index finger to shoot"), |ui| {
+                modern_slider(ui, &mut st.gesture_hold_ms, 500.0..=4000.0, 360.0, |v| format!("{:.1} s", v / 1000.0));
+            });
+            divider(ui);
+            setting_row(ui, "Show viewfinder in headset", Some("Off = arm silently"), |ui| {
+                t |= seg_toggle(ui, &mut st.gesture_feedback);
+            });
+            if t {
+                st.sound_tab = true;
+            }
+        });
+        ui.add_space(6.0);
+        section(ui, "New screenshots", |ui| {
+            let mut t = false;
+            setting_row(ui, "Detect QR codes", Some("A QR in the shot shows its content on the wrist instead of the photo"), |ui| {
+                t |= seg_toggle(ui, &mut st.photo_qr_detect);
+            });
+            divider(ui);
+            ui.add_enabled_ui(st.photo_qr_detect, |ui| {
+                setting_row(ui, "Delete the screenshot, keep only the code", None, |ui| {
+                    t |= seg_toggle(ui, &mut st.photo_qr_autodelete);
+                });
+            });
+            divider(ui);
+            setting_row(ui, "Open screenshots directly", Some("Skip the wrist card, open a photo window right away"), |ui| {
+                t |= seg_toggle(ui, &mut st.photo_skip_wrist);
+            });
+            divider(ui);
+            setting_row(ui, "Open QR codes directly", Some("Links open on the desktop, text in a window"), |ui| {
+                t |= seg_toggle(ui, &mut st.photo_skip_wrist_qr);
+            });
+            divider(ui);
+            setting_row(ui, "Crop margin", Some("Trim this much off each edge of new shots — hides stray fingers"), |ui| {
+                stepper_inline(ui, &mut st.photo_crop_margin, 0.0, 25.0, 5.0, |v| format!("{v:.0} %"));
+            });
+            divider(ui);
+            setting_row(ui, "Auto-cleanup", Some("Delete screenshots older than this on launch (0 = keep forever)"), |ui| {
+                stepper_inline(ui, &mut st.photo_cleanup_days, 0.0, 90.0, 5.0, |v| if v < 1.0 { "off".into() } else { format!("{v:.0} days") });
+            });
+            if t {
+                st.sound_tab = true;
+            }
+        });
+        ui.add_space(6.0);
+        section(ui, "Integrations", |ui| {
+            let yn = |b: bool| if b { "configured" } else { "not configured (crates/overlay/*.env at build time)" };
+            setting_row(ui, "Translate (vision model)", Some(yn(st.photo_translate_ok)), |_| {});
+            divider(ui);
+            setting_row(ui, "Share (Picsur)", Some(yn(st.photo_share_ok)), |_| {});
+            divider(ui);
+            setting_row(ui, "Folder", Some(&st.photo_dir), |_| {});
         });
     });
 }
