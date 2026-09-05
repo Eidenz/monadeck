@@ -74,6 +74,8 @@ pub struct Caps {
     pub swap_format: vk::Format,
     /// Runtime supports XR_KHR_composition_layer_cylinder (curved screens).
     pub curved: bool,
+    /// Runtime supports XR_KHR_composition_layer_color_scale_bias (opacity).
+    pub color_scale: bool,
 }
 
 impl Caps {
@@ -97,7 +99,7 @@ impl Caps {
                 log::debug!("  {} 0x{:016x}", f.fourcc, f.modifier);
             }
         }
-        Self { dmabuf: dmabuf && !formats.is_empty(), formats, swap_format, curved: false }
+        Self { dmabuf: dmabuf && !formats.is_empty(), formats, swap_format, curved: false, color_scale: false }
     }
 }
 

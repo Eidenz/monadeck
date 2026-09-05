@@ -34,26 +34,19 @@ marked **done** are on the branch; everything else is a proposal.
   delete (two-tap confirm). The last used one is restored on start (toggle).
   Stored in `~/.config/monadeck/desktop_layouts.json`.
 
+- Layouts: rename, reorder, keyboard size saved per layout.
+- Per-screen opacity (color-scale-bias layer) and "keep in game"; a global
+  "Hide screens while a game runs" rule that auto-restores when the game stops.
+- Keyboard: key repeat while held, Shift double-tap = lock (third tap clears),
+  click sound, size stepper (Behaviour section).
+- Capture pauses after ~2 s with the screen more than ~75° off your gaze and
+  resumes the moment you look back (toggle in Behaviour).
+- Dashboard always wins the ray when it's under the laser (it is always
+  composited on top). Default width no longer touches hand-sized screens.
+
 ## Proposed next
 
-1. **Layout extras.** Rename, reorder, a quick-switch on the bottom bar or a
-   controller chord, per-layout keyboard scale. (The keyboard top bar's KDE
-   layout switcher is a separate thing and only appears with 2+ system layouts.)
-2. **Opacity per screen**, and a "keep visible while playing" toggle so a
-   game's own frames don't fight a screen you want to keep as a HUD.
-3. **Middle click.** All face buttons are used now (trigger/A/B); a long-press
-   or stick-click could carry it.
-4. **Keyboard extras.** Key repeat while held (arrows, backspace), a
-   press-and-hold Shift (lock on double tap), key-click sound, scale slider.
-5. **Keyboard top-bar ideas** (not yet decided): current window title, an
-   emoji picker, a "type from VR search box" text field that sends the whole
-   string at once.
-6. **Window capture.** The portal also offers single windows (source type
-   Window). Same pipeline, smaller quads; useful for a chat window as a HUD.
-7. **Mirror pause when hidden / when nobody is looking** to save GPU: pause
-   the PipeWire stream when the screen is out of view for a while.
-8. **Multi-cursor sanity.** Only one hand drives the mouse today (closest hit
-   wins). Consider hand priority or a "dominant hand" setting.
+(empty — add what you'd like here)
 
 ## Known limitations
 

@@ -64,7 +64,15 @@ pub struct LibState {
     pub layout_delete: Option<usize>,
     pub layout_delete_arm: Option<(usize, f64)>,
     pub layout_create: Option<String>,
+    pub layout_rename: Option<usize>,          // naming flow target when renaming
+    pub layout_renamed: Option<(usize, String)>,
+    pub layout_move: Option<(usize, i32)>,
     pub restore_layout: bool,
+    pub hide_in_game: bool,
+    pub gaze_pause: bool,
+    pub keyboard_scale: f32,
+    pub desktop_opacity_request: Option<(usize, f32)>,
+    pub desktop_keep_request: Option<(usize, bool)>,
     pub recenter_request: bool,
     pub recenter_playspace_request: bool,
     /// Re-scan the catalogue + re-probe artwork (picks up covers added at runtime).
@@ -196,7 +204,15 @@ impl LibState {
             layout_delete: None,
             layout_delete_arm: None,
             layout_create: None,
+            layout_rename: None,
+            layout_renamed: None,
+            layout_move: None,
             restore_layout: true,
+            hide_in_game: false,
+            gaze_pause: true,
+            keyboard_scale: 1.0,
+            desktop_opacity_request: None,
+            desktop_keep_request: None,
             recenter_request: false,
             recenter_playspace_request: false,
             refresh_request: false,
@@ -537,7 +553,13 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
         ui.spacing_mut().item_spacing.y = 6.0;
         if naming {
             ui.horizontal(|ui| {
-                let what = if st.naming_layout { "New layout:" } else { "New collection:" };
+                let what = if st.layout_rename.is_some() {
+                    "Rename layout:"
+                } else if st.naming_layout {
+                    "New layout:"
+                } else {
+                    "New collection:"
+                };
                 ui.label(egui::RichText::new(format!("{}  {what}", icon::FOLDER_PLUS)).size(14.0).color(theme::ON_SURFACE_VAR));
                 ui.add_space(6.0);
                 let shown = if st.name_buf.is_empty() { "…" } else { st.name_buf.as_str() };
@@ -568,7 +590,9 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
                 if naming {
                     let name = st.name_buf.trim().to_string();
                     if !name.is_empty() {
-                        if st.naming_layout {
+                        if let Some(i) = st.layout_rename.take() {
+                            st.layout_renamed = Some((i, name));
+                        } else if st.naming_layout {
                             st.layout_create = Some(name);
                         } else {
                             st.collection_create = Some(name);
@@ -589,6 +613,7 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
                     st.name_buf.clear();
                     st.naming = false;
                     st.naming_layout = false;
+                    st.layout_rename = None;
                     st.keyboard_open = false;
                 }
             });
@@ -1939,6 +1964,7 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                     Some(h) => format!("{} · {h}", row.detail),
                     None => row.detail.clone(),
                 };
+                let (mut op, mut keep) = (row.opacity, row.keep_in_game);
                 setting_row(ui, &row.name, Some(&sub), |ui| {
                     if row.approved {
                         // Order in the bottom bar: ◀ / ▶ (left = earlier).
@@ -1957,8 +1983,22 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                                 .size(13.0)
                                 .color(theme::ON_SURFACE_VAR),
                         );
+                        ui.add_space(8.0);
+                        seg_toggle(ui, &mut keep);
+                        ui.label(egui::RichText::new("keep in game").size(12.0).color(theme::ON_SURFACE_VAR));
+                        ui.add_space(8.0);
+                        stepper_inline(ui, &mut op, 0.2, 1.0, 0.1, |v| format!("{:.0}%", v * 100.0));
                     }
                 });
+                if row.approved {
+                    if (op - row.opacity).abs() > 1e-3 {
+                        st.desktop_opacity_request = Some((i, op));
+                    }
+                    if keep != row.keep_in_game {
+                        st.desktop_keep_request = Some((i, keep));
+                        st.sound_tab = true;
+                    }
+                }
             }
             if let Some(m) = mv {
                 st.desktop_move_request = Some(m);
@@ -1996,6 +2036,8 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 st.layout_delete_arm = None;
             }
             let (mut apply, mut overwrite, mut delete, mut arm) = (None, None, None, None);
+            let (mut rename, mut mv) = (None, None);
+            let n_layouts = st.layouts.len();
             for (i, (name, shown)) in st.layouts.iter().enumerate() {
                 divider(ui);
                 let active = st.layout_active.as_deref() == Some(name.as_str());
@@ -2014,10 +2056,35 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                     if action_button(ui, icon::FLOPPY_DISK, "Save over").clicked() {
                         overwrite = Some(i);
                     }
+                    if action_button(ui, icon::PENCIL_SIMPLE, "").clicked() {
+                        rename = Some(i);
+                    }
+                    ui.add_enabled_ui(i + 1 < n_layouts, |ui| {
+                        if action_button(ui, icon::CARET_DOWN, "").clicked() {
+                            mv = Some((i, 1));
+                        }
+                    });
+                    ui.add_enabled_ui(i > 0, |ui| {
+                        if action_button(ui, icon::CARET_UP, "").clicked() {
+                            mv = Some((i, -1));
+                        }
+                    });
                     if action_button(ui, icon::PLAY, "Apply").clicked() {
                         apply = Some(i);
                     }
                 });
+            }
+            if let Some(i) = rename {
+                st.layout_rename = Some(i);
+                st.naming = true;
+                st.naming_layout = true;
+                st.name_buf = st.layouts[i].0.clone();
+                st.keyboard_open = true;
+                st.sound_tab = true;
+            }
+            if let Some(m) = mv {
+                st.layout_move = Some(m);
+                st.sound_tab = true;
             }
             if st.layouts.is_empty() {
                 ui.label(egui::RichText::new("No layouts yet.").color(theme::ON_SURFACE_VAR));
@@ -2042,6 +2109,24 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
             let mut t = false;
             setting_row(ui, "Restore last layout on start", Some("Bring the screens back where they were"), |ui| {
                 t = seg_toggle(ui, &mut st.restore_layout);
+            });
+            if t {
+                st.sound_tab = true;
+            }
+        });
+        ui.add_space(6.0);
+        section(ui, "Behaviour", |ui| {
+            let mut t = false;
+            setting_row(ui, "Hide screens while a game runs", Some("Screens marked \"keep in game\" stay up as a HUD"), |ui| {
+                t |= seg_toggle(ui, &mut st.hide_in_game);
+            });
+            divider(ui);
+            setting_row(ui, "Pause capture when not looking", Some("Frees GPU/CPU after ~2 s out of view; resumes instantly"), |ui| {
+                t |= seg_toggle(ui, &mut st.gaze_pause);
+            });
+            divider(ui);
+            setting_row(ui, "Keyboard size", Some("Also saved in layouts"), |ui| {
+                stepper_inline(ui, &mut st.keyboard_scale, 0.6, 1.6, 0.1, |v| format!("{:.0}%", v * 100.0));
             });
             if t {
                 st.sound_tab = true;

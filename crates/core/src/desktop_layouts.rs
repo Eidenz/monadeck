@@ -20,6 +20,14 @@ pub struct ScreenPlacement {
     pub width_m: f32,
     #[serde(default)]
     pub curve: f32,
+    #[serde(default = "one")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub keep_in_game: bool,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +36,8 @@ pub struct KeyboardPlacement {
     /// Docked under this screen (output name), else free at `pose`.
     pub attached: Option<String>,
     pub pose: Pose,
+    #[serde(default = "one")]
+    pub scale: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +87,24 @@ impl DesktopLayouts {
             Some(slot) => *slot = layout,
             None => self.layouts.push(layout),
         }
+    }
+
+    pub fn rename(&mut self, idx: usize, name: String) {
+        if let Some(l) = self.layouts.get_mut(idx) {
+            if self.last_used.as_deref() == Some(l.name.as_str()) {
+                self.last_used = Some(name.clone());
+            }
+            l.name = name;
+        }
+    }
+
+    pub fn move_by(&mut self, idx: usize, delta: i32) -> bool {
+        let j = idx as i32 + delta;
+        if idx >= self.layouts.len() || j < 0 || j as usize >= self.layouts.len() {
+            return false;
+        }
+        self.layouts.swap(idx, j as usize);
+        true
     }
 
     pub fn remove(&mut self, idx: usize) {

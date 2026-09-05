@@ -75,7 +75,10 @@ pub struct ScreenRow {
     pub shown: bool,
     /// A stream exists for it (portal approved this monitor).
     pub approved: bool,
+    pub opacity: f32,
+    pub keep_in_game: bool,
 }
+
 
 /// What the laser did this frame.
 #[derive(Default)]
@@ -129,6 +132,9 @@ pub struct DesktopViewer {
     secondary_prev: [bool; 2],
     precise_prev: [bool; 2],
     clipboard: clipboard::ClipboardWatcher,
+    pub hide_in_game: bool,
+    pub gaze_pause: bool,
+    game_running: bool,
     pending_gpu_teardown: bool,
     width_m: f32,
     keyboard_place: bool,
@@ -187,6 +193,9 @@ impl DesktopViewer {
             secondary_prev: [false; 2],
             precise_prev: [false; 2],
             clipboard: clipboard::ClipboardWatcher::new(),
+            hide_in_game: false,
+            gaze_pause: true,
+            game_running: false,
             pending_gpu_teardown: false,
             width_m: screen::DEFAULT_WIDTH_M,
             keyboard_place: false,
@@ -233,6 +242,8 @@ impl DesktopViewer {
                 pose: pose_to_arr(&self.to_stage(&s.pose)),
                 width_m: s.width_m,
                 curve: s.curve,
+                opacity: s.opacity,
+                keep_in_game: s.keep_in_game,
             })
             .collect();
         let kb = &self.keyboard;
@@ -240,6 +251,7 @@ impl DesktopViewer {
             visible: kb.visible,
             attached: kb.attached.and_then(|i| self.screens.get(i)).map(|s| s.name.clone()),
             pose: pose_to_arr(&self.to_stage(&kb.pose)),
+            scale: kb.scale,
         });
         DesktopLayout { name, screens, keyboard }
     }
@@ -264,6 +276,9 @@ impl DesktopViewer {
                     s.pose = placements.iter().find(|(n, _)| n == &s.name).map(|(_, q)| *q).unwrap_or(s.pose);
                     s.width_m = p.width_m.clamp(0.3, 4.0);
                     s.curve = p.curve.clamp(0.0, 1.0);
+                    s.opacity = p.opacity.clamp(0.2, 1.0);
+                    s.keep_in_game = p.keep_in_game;
+                    s.custom_size = true;
                     s.placed = true;
                     if p.shown && !s.shown {
                         s.show(&self.caps);
@@ -283,6 +298,7 @@ impl DesktopViewer {
                 self.keyboard.visible = k.visible;
                 self.keyboard.grab = None;
                 self.keyboard.pose = self.from_stage(&arr_to_pose(&k.pose));
+                self.keyboard.scale = k.scale.clamp(0.5, 2.0);
                 self.keyboard.placed = true;
                 self.keyboard_place = false;
                 let target = k.attached.as_ref().and_then(|n| self.screens.iter().position(|s| &s.name == n));
@@ -300,11 +316,47 @@ impl DesktopViewer {
         }
     }
 
-    /// Physical width for every mirrored screen (live + for new ones).
+    /// Default width: applies to screens that were never sized by hand.
     pub fn set_width(&mut self, w: f32) {
         self.width_m = w.clamp(0.4, 4.0);
-        for s in &mut self.screens {
+        for s in &mut self.screens.iter_mut().filter(|s| !s.custom_size) {
             s.width_m = self.width_m;
+        }
+    }
+
+    /// Whether a game is running (drives the hide-in-game rule).
+    pub fn set_game_running(&mut self, running: bool) {
+        if running == self.game_running {
+            return;
+        }
+        self.game_running = running;
+        if running && self.hide_in_game {
+            for s in &mut self.screens {
+                if s.shown && !s.keep_in_game {
+                    s.hide();
+                    s.auto_hidden = true;
+                }
+            }
+        } else if !running {
+            for s in &mut self.screens {
+                if s.auto_hidden {
+                    s.auto_hidden = false;
+                    s.show(&self.caps);
+                }
+            }
+        }
+    }
+
+    /// Per-screen opacity / keep-while-playing, by Desktop-page row.
+    pub fn set_screen_opacity(&mut self, row: usize, opacity: f32) {
+        if let Some(&si) = self.ordered_screens().get(row) {
+            self.screens[si].opacity = opacity.clamp(0.2, 1.0);
+        }
+    }
+
+    pub fn set_screen_keep(&mut self, row: usize, keep: bool) {
+        if let Some(&si) = self.ordered_screens().get(row) {
+            self.screens[si].keep_in_game = keep;
         }
     }
 
@@ -365,7 +417,15 @@ impl DesktopViewer {
             .iter()
             .map(|&i| {
                 let s = &self.screens[i];
-                ScreenRow { name: s.name.clone(), detail: s.detail.clone(), hint: None, shown: s.shown, approved: true }
+                ScreenRow {
+                    name: s.name.clone(),
+                    detail: s.detail.clone(),
+                    hint: None,
+                    shown: s.shown,
+                    approved: true,
+                    opacity: s.opacity,
+                    keep_in_game: s.keep_in_game,
+                }
             })
             .collect();
         for o in &self.outputs {
@@ -380,6 +440,8 @@ impl DesktopViewer {
                     }),
                     shown: false,
                     approved: false,
+                    opacity: 1.0,
+                    keep_in_game: false,
                 });
             }
         }
@@ -482,7 +544,7 @@ impl DesktopViewer {
                 .enumerate()
                 .filter(|(_, s)| s.shown)
                 .map(|(i, s)| {
-                    let d = KeyboardState::dock_pose(&s.pose, s.size_m()).position;
+                    let d = KeyboardState::dock_pose_scaled(&s.pose, s.size_m(), self.keyboard.scale).position;
                     (i, dist2(&kp, &d))
                 })
                 .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -490,7 +552,8 @@ impl DesktopViewer {
         });
         if let Some(i) = target {
             self.keyboard.attached = Some(i);
-            self.keyboard.pose = KeyboardState::dock_pose(&self.screens[i].pose, self.screens[i].size_m());
+            self.keyboard.pose =
+                KeyboardState::dock_pose_scaled(&self.screens[i].pose, self.screens[i].size_m(), self.keyboard.scale);
             self.keyboard.placed = true;
         }
     }
@@ -616,6 +679,7 @@ impl DesktopViewer {
                     s.placed = true;
                 }
             }
+            s.gaze_update(hmd, self.gaze_pause);
             if let Err(e) = s.upload(session, device, allocator, self.importer.as_ref(), &self.caps, cmd, queue, fence) {
                 log::error!("desktop: {} upload: {e}", s.name);
             }
@@ -634,7 +698,7 @@ impl DesktopViewer {
         if let Some(i) = self.keyboard.attached {
             match self.screens.get(i) {
                 Some(s) if s.shown && self.keyboard.grab.is_none() => {
-                    self.keyboard.pose = KeyboardState::dock_pose(&s.pose, s.size_m());
+                    self.keyboard.pose = KeyboardState::dock_pose_scaled(&s.pose, s.size_m(), self.keyboard.scale);
                 }
                 _ => self.keyboard.attached = None,
             }
@@ -717,6 +781,7 @@ impl DesktopViewer {
                                 None => s.resize_ref = Some((d, s.width_m)),
                                 Some((d0, w0)) => {
                                     s.width_m = (w0 * (1.0 + (d - d0) * RESIZE_PER_M)).clamp(0.3, 4.0);
+                                    s.custom_size = true;
                                 }
                             }
                             if curved_ok && sx != 0.0 {
@@ -756,7 +821,9 @@ impl DesktopViewer {
                         .iter()
                         .enumerate()
                         .filter(|(_, s)| s.shown)
-                        .map(|(i, s)| (i, dist2(&kp, &KeyboardState::dock_pose(&s.pose, s.size_m()).position)))
+                        .map(|(i, s)| {
+                            (i, dist2(&kp, &KeyboardState::dock_pose_scaled(&s.pose, s.size_m(), self.keyboard.scale).position))
+                        })
                         .filter(|(_, d)| *d < keyboard::DOCK_SNAP_M * keyboard::DOCK_SNAP_M)
                         .min_by(|a, b| a.1.total_cmp(&b.1))
                         .map(|(i, _)| i);
@@ -786,7 +853,7 @@ impl DesktopViewer {
                     consider(Target::Screen(si), s.hit(&h.aim, curved_ok));
                 }
                 if self.keyboard.visible && self.keyboard.placed {
-                    consider(Target::Keyboard, raycast(&h.aim, &self.keyboard.pose, keyboard::size_m()));
+                    consider(Target::Keyboard, raycast(&h.aim, &self.keyboard.pose, keyboard::size_m_scaled(self.keyboard.scale)));
                 }
             }
         }
@@ -910,12 +977,25 @@ impl DesktopViewer {
         self.pointing.is_some() || self.screens.iter().any(|s| s.grab.is_some()) || self.keyboard.grab.is_some()
     }
 
-    pub fn quad_layers<'a>(&'a self, space: &'a xr::Space) -> Vec<xr::CompositionLayerQuad<'a, xr::Vulkan>> {
-        self.screens.iter().filter_map(|s| s.quad(space, self.caps.curved)).collect()
-    }
-
-    pub fn cylinder_layers<'a>(&'a self, space: &'a xr::Space) -> Vec<xr::CompositionLayerCylinderKHR<'a, xr::Vulkan>> {
-        self.screens.iter().filter_map(|s| s.cylinder(space, self.caps.curved)).collect()
+    /// Layers for every shown screen: flat quads + curved cylinders.
+    #[allow(clippy::type_complexity)]
+    pub fn screen_layers<'a>(
+        &'a mut self,
+        space: &'a xr::Space,
+    ) -> (Vec<xr::CompositionLayerQuad<'a, xr::Vulkan>>, Vec<xr::CompositionLayerCylinderKHR<'a, xr::Vulkan>>) {
+        let (curved, cs) = (self.caps.curved, self.caps.color_scale);
+        let mut quads = Vec::new();
+        let mut cyls = Vec::new();
+        for s in self.screens.iter_mut() {
+            if s.cyl(curved).is_some() {
+                if let Some(c) = s.cylinder(space, curved, cs) {
+                    cyls.push(c);
+                }
+            } else if let Some(q) = s.quad(space, curved, cs) {
+                quads.push(q);
+            }
+        }
+        (quads, cyls)
     }
 
     /// Frames uploaded per screen (debug/status).

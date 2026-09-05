@@ -197,6 +197,9 @@ fn run() -> Result<()> {
     let curved = available.khr_composition_layer_cylinder && std::env::var("MONADECK_OVERLAY_FLAT").is_err();
     let mut exts = xr::ExtensionSet::default();
     exts.khr_vulkan_enable2 = true;
+    // Per-layer opacity for mirrored desktop screens.
+    let color_scale = available.khr_composition_layer_color_scale_bias;
+    exts.khr_composition_layer_color_scale_bias = color_scale;
     exts.extx_overlay = true;
     exts.khr_composition_layer_cylinder = curved;
     let xr_instance = entry.create_instance(
@@ -468,6 +471,11 @@ fn run() -> Result<()> {
     )?;
     desktop.set_width(ov_cfg.screen_width_m);
     desktop.caps.curved = curved;
+    desktop.caps.color_scale = color_scale;
+    desktop.hide_in_game = ov_cfg.hide_in_game;
+    desktop.gaze_pause = ov_cfg.gaze_pause;
+    desktop.keyboard.scale = ov_cfg.keyboard_scale.clamp(0.5, 2.0);
+    log::info!("desktop: curved={curved} opacity={color_scale}");
     let mut screencast_token = ov_cfg.screencast_token.clone();
     // Named screen arrangements; the last used one is re-applied when the
     // screens come up (if enabled) so nothing has to be re-placed by hand.
@@ -496,7 +504,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.hide_in_game, ov_cfg.gaze_pause, ov_cfg.keyboard_scale),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -541,6 +549,9 @@ fn run() -> Result<()> {
     st.freeze_delay_secs = ov_cfg.freeze_delay_secs;
     st.screen_width_m = ov_cfg.screen_width_m;
     st.restore_layout = ov_cfg.restore_layout;
+    st.hide_in_game = ov_cfg.hide_in_game;
+    st.gaze_pause = ov_cfg.gaze_pause;
+    st.keyboard_scale = ov_cfg.keyboard_scale;
     st.layout_active = layouts.last_used.clone();
     st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
     // Hide the UEVR feature entirely if protontricks-launch isn't installed.
@@ -958,6 +969,7 @@ fn run() -> Result<()> {
         }
         st.keyboard_shown = desktop.keyboard_visible();
         st.desktop_bar = desktop.bar_items();
+        desktop.set_game_running(running.is_some());
 
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
         // order is fresh on the next summon), drop input block, render only toasts.
@@ -991,8 +1003,7 @@ fn run() -> Result<()> {
                 }
                 _ => None,
             };
-            let screen_quads = desktop.quad_layers(&space);
-            let screen_cyls = desktop.cylinder_layers(&space);
+            let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
             for q in &screen_quads {
@@ -1130,10 +1141,12 @@ fn run() -> Result<()> {
 
         // Mirrored screens: one closer than the dashboard takes the pointer. Not
         // while a dashboard grab is in progress (the grip would grab both).
+        // The dashboard is always composited over the screens, so when the ray
+        // hits it, it wins outright (max_t = 0 hides everything behind it).
         let d_in = if grab.is_some() {
             desktop.update_input(&[], None, hmd.as_ref())
         } else {
-            desktop.update_input(&hands, best.map(|b| b.t), hmd.as_ref())
+            desktop.update_input(&hands, best.map(|_| 0.0), hmd.as_ref())
         };
         let d_ray = d_in.ray;
         if d_ray.is_some() {
@@ -1274,8 +1287,7 @@ fn run() -> Result<()> {
             (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => Some(laser_quad(&laser, &space, &aim, t, &h)),
             _ => None,
         };
-        let screen_quads = desktop.quad_layers(&space);
-        let screen_cyls = desktop.cylinder_layers(&space);
+        let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
         // Screens first: they sit behind the dashboard in the composite.
         for q in &screen_quads {
@@ -1416,12 +1428,15 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout),
+            (st.screen_width_m, st.restore_layout, st.hide_in_game, st.gaze_pause, st.keyboard_scale),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
             audio.set_volume(st.audio_volume);
             desktop.set_width(st.screen_width_m);
+            desktop.hide_in_game = st.hide_in_game;
+            desktop.gaze_pause = st.gaze_pause;
+            desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
             settings_prev = settings_now;
             overlay_config_from(&st, &screencast_token, &desktop.order()).save();
         }
@@ -1563,6 +1578,19 @@ fn run() -> Result<()> {
             layouts.remove(i);
             layouts_dirty = true;
         }
+        if let Some((i, name)) = st.layout_renamed.take() {
+            layouts.rename(i, name);
+            layouts_dirty = true;
+        }
+        if let Some((i, d)) = st.layout_move.take() {
+            layouts_dirty |= layouts.move_by(i, d);
+        }
+        if let Some((i, o)) = st.desktop_opacity_request.take() {
+            desktop.set_screen_opacity(i, o);
+        }
+        if let Some((i, k)) = st.desktop_keep_request.take() {
+            desktop.set_screen_keep(i, k);
+        }
         if layouts_dirty {
             monadeck_core::desktop_layouts::save(&layouts);
             st.layout_active = layouts.last_used.clone();
@@ -1625,7 +1653,7 @@ fn render_keyboard<'a>(
         return Ok(None);
     }
     panel.pose = desktop.keyboard.pose;
-    panel.size_m = desktop::keyboard::size_m();
+    panel.size_m = desktop::keyboard::size_m_scaled(desktop.keyboard.scale);
     let kb = &mut desktop.keyboard;
     render_panel(panel, device, render_pass, cmd, cmd_pool, queue, fence, true, pointer, (0.0, 0.0), elapsed, |ctx| {
         desktop::keyboard::build(ctx, kb)
@@ -1660,6 +1688,9 @@ fn overlay_config_from(
         screen_width_m: st.screen_width_m,
         screen_order: screen_order.to_vec(),
         restore_layout: st.restore_layout,
+        hide_in_game: st.hide_in_game,
+        gaze_pause: st.gaze_pause,
+        keyboard_scale: st.keyboard_scale,
     }
 }
 

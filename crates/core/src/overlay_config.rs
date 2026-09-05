@@ -38,6 +38,12 @@ pub struct OverlayConfig {
     pub screen_order: Vec<String>,
     /// Re-apply the last used desktop layout when the screens become available.
     pub restore_layout: bool,
+    /// Hide mirrored screens while a game runs (screens flagged "keep" stay).
+    pub hide_in_game: bool,
+    /// Pause a screen's capture after a couple of seconds out of view.
+    pub gaze_pause: bool,
+    /// VR keyboard size multiplier.
+    pub keyboard_scale: f32,
 }
 
 impl Default for OverlayConfig {
@@ -59,6 +65,9 @@ impl Default for OverlayConfig {
             screen_width_m: 1.35,
             screen_order: Vec::new(),
             restore_layout: true,
+            hide_in_game: false,
+            gaze_pause: true,
+            keyboard_scale: 1.0,
         }
     }
 }

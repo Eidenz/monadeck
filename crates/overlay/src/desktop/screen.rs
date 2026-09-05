@@ -1,6 +1,7 @@
 //! One mirrored monitor: a PipeWire capture feeding an OpenXR swapchain that is
 //! shown as a grabbable quad layer, plus the laser → desktop-cursor mapping.
 use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use ash::vk;
@@ -39,6 +40,19 @@ pub struct ScreenPanel {
     pub curve: f32,
     /// Resize gesture in progress: (hand→head distance at start, width at start).
     pub resize_ref: Option<(f32, f32)>,
+    /// Sized by hand (gesture/layout): the default-width setting leaves it alone.
+    pub custom_size: bool,
+    /// Layer opacity 0.2..=1 (needs XR_KHR_composition_layer_color_scale_bias).
+    pub opacity: f32,
+    /// Stays up while a game runs even when "hide screens in game" is on.
+    pub keep_in_game: bool,
+    /// Hidden automatically by the in-game rule (restored when the game stops).
+    pub auto_hidden: bool,
+    /// Capture paused because nobody's looking at it.
+    pub gaze_paused: bool,
+    pub unseen_since: Option<Instant>,
+    /// Chained onto the layer for opacity; lives here so the pointer stays valid.
+    scale_bias: xr::sys::CompositionLayerColorScaleBiasKHR,
     pub capture: Option<Capture>,
     pub swap: Option<Swap>,
     /// At least one frame has been uploaded (the layer may be submitted).
@@ -64,6 +78,18 @@ impl ScreenPanel {
             width_m: DEFAULT_WIDTH_M,
             curve: 0.0,
             resize_ref: None,
+            custom_size: false,
+            opacity: 1.0,
+            keep_in_game: false,
+            auto_hidden: false,
+            gaze_paused: false,
+            unseen_since: None,
+            scale_bias: xr::sys::CompositionLayerColorScaleBiasKHR {
+                ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
+                next: std::ptr::null(),
+                color_scale: xr::Color4f { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                color_bias: xr::Color4f { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+            },
             capture: None,
             swap: None,
             has_content: false,
@@ -130,9 +156,60 @@ impl ScreenPanel {
     pub fn hide(&mut self) {
         self.shown = false;
         self.grab = None;
+        self.gaze_paused = false;
+        self.unseen_since = None;
         if let Some(c) = &self.capture {
             c.set_active(false);
         }
+    }
+
+    /// Pause/resume the capture based on whether the head is turned toward the
+    /// screen (frames keep flowing for ~2 s after looking away).
+    pub fn gaze_update(&mut self, hmd: Option<&xr::Posef>, enabled: bool) {
+        if !self.shown || !self.placed {
+            return;
+        }
+        let looking = match (hmd, enabled) {
+            (Some(h), true) => {
+                let fwd = crate::mathx::normalize(crate::mathx::forward(h));
+                let to = crate::mathx::normalize([
+                    self.pose.position.x - h.position.x,
+                    self.pose.position.y - h.position.y,
+                    self.pose.position.z - h.position.z,
+                ]);
+                let cos = fwd[0] * to[0] + fwd[1] * to[1] + fwd[2] * to[2];
+                cos > 0.25 // ~75° half-angle
+            }
+            _ => true,
+        };
+        if looking {
+            self.unseen_since = None;
+            if self.gaze_paused {
+                self.gaze_paused = false;
+                if let Some(c) = &self.capture {
+                    c.set_active(true);
+                }
+            }
+        } else if !self.gaze_paused {
+            let since = *self.unseen_since.get_or_insert_with(Instant::now);
+            if since.elapsed().as_secs_f32() > 2.0 {
+                self.gaze_paused = true;
+                if let Some(c) = &self.capture {
+                    c.set_active(false);
+                }
+            }
+        }
+    }
+
+    /// Refresh the opacity chain; returns the `next` pointer for the layer.
+    fn opacity_next(&mut self, color_scale_ok: bool) -> *const std::ffi::c_void {
+        if !color_scale_ok || self.opacity >= 0.995 {
+            return std::ptr::null();
+        }
+        let a = self.opacity.clamp(0.05, 1.0);
+        // Premultiplied: scale colour and alpha together.
+        self.scale_bias.color_scale = xr::Color4f { r: a, g: a, b: a, a };
+        &self.scale_bias as *const _ as *const std::ffi::c_void
     }
 
     /// Pull the newest captured frame into the swapchain (creating/resizing it
@@ -266,32 +343,46 @@ impl ScreenPanel {
 
     /// Curved layer (when `curve` > 0 and supported).
     pub fn cylinder<'a>(
-        &'a self,
+        &'a mut self,
         space: &'a xr::Space,
         curved_ok: bool,
+        color_scale_ok: bool,
     ) -> Option<xr::CompositionLayerCylinderKHR<'a, xr::Vulkan>> {
         if !self.shown || !self.has_content {
             return None;
         }
         let l = self.cyl(curved_ok)?;
+        let next = self.opacity_next(color_scale_ok);
         let swap = self.swap.as_ref()?;
-        Some(
-            xr::CompositionLayerCylinderKHR::new()
-                .space(space)
-                .eye_visibility(xr::EyeVisibility::BOTH)
-                .sub_image(Self::sub_image(swap))
-                .pose(l.pose)
-                .radius(l.radius)
-                .central_angle(l.central_angle)
-                .aspect_ratio(swap.px.0 as f32 / swap.px.1 as f32),
-        )
+        let mut c = xr::CompositionLayerCylinderKHR::new()
+            .space(space)
+            .eye_visibility(xr::EyeVisibility::BOTH)
+            .sub_image(Self::sub_image(swap))
+            .pose(l.pose)
+            .radius(l.radius)
+            .central_angle(l.central_angle)
+            .aspect_ratio(swap.px.0 as f32 / swap.px.1 as f32);
+        if !next.is_null() {
+            c = c.layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA);
+            // The safe wrapper is repr(transparent) over the sys struct.
+            let raw: &mut xr::sys::CompositionLayerCylinderKHR =
+                unsafe { &mut *(&mut c as *mut _ as *mut xr::sys::CompositionLayerCylinderKHR) };
+            raw.next = next;
+        }
+        Some(c)
     }
 
     /// Flat layer (when not curved).
-    pub fn quad<'a>(&'a self, space: &'a xr::Space, curved_ok: bool) -> Option<xr::CompositionLayerQuad<'a, xr::Vulkan>> {
+    pub fn quad<'a>(
+        &'a mut self,
+        space: &'a xr::Space,
+        curved_ok: bool,
+        color_scale_ok: bool,
+    ) -> Option<xr::CompositionLayerQuad<'a, xr::Vulkan>> {
         if !self.shown || !self.has_content || self.cyl(curved_ok).is_some() {
             return None;
         }
+        let next = self.opacity_next(color_scale_ok);
         let swap = self.swap.as_ref()?;
         let sub = xr::SwapchainSubImage::new().swapchain(&swap.swapchain).image_array_index(0).image_rect(
             xr::Rect2Di {
@@ -300,14 +391,19 @@ impl ScreenPanel {
             },
         );
         let size = self.size_m();
-        Some(
-            xr::CompositionLayerQuad::new()
-                .space(space)
-                .eye_visibility(xr::EyeVisibility::BOTH)
-                .sub_image(sub)
-                .pose(self.pose)
-                .size(xr::Extent2Df { width: size.0, height: size.1 }),
-        )
+        let mut q = xr::CompositionLayerQuad::new()
+            .space(space)
+            .eye_visibility(xr::EyeVisibility::BOTH)
+            .sub_image(sub)
+            .pose(self.pose)
+            .size(xr::Extent2Df { width: size.0, height: size.1 });
+        if !next.is_null() {
+            q = q.layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA);
+            let raw: &mut xr::sys::CompositionLayerQuad =
+                unsafe { &mut *(&mut q as *mut _ as *mut xr::sys::CompositionLayerQuad) };
+            raw.next = next;
+        }
+        Some(q)
     }
 
     pub fn destroy_gpu(&mut self, device: &ash::Device, allocator: &Mutex<gpu_allocator::vulkan::Allocator>) {

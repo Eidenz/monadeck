@@ -87,8 +87,11 @@ const DOCK_FWD: f32 = 0.04;
 /// Release the keyboard within this distance of a screen's dock to attach.
 pub const DOCK_SNAP_M: f32 = 0.18;
 /// Tapping a latched modifier again within this window sends it on its own
-/// (e.g. a solo Super press opens the app launcher).
+/// (e.g. a solo Super press opens the app launcher); for Shift it locks instead.
 const MOD_DOUBLE_TAP: f32 = 1.5;
+/// Key repeat while a key is held down: initial delay, then interval (s).
+const REPEAT_DELAY: f32 = 0.45;
+const REPEAT_INTERVAL: f32 = 0.05;
 
 pub fn panel_points() -> (f32, f32) {
     (COLS * U + MARGIN * 2.0, TOP_BAR + ROWS * U + MARGIN * 2.0)
@@ -102,6 +105,12 @@ pub fn panel_px() -> (u32, u32) {
 pub fn size_m() -> (f32, f32) {
     let (w, h) = panel_points();
     (WIDTH_M, WIDTH_M * h / w)
+}
+
+/// Physical size at a scale multiplier.
+pub fn size_m_scaled(scale: f32) -> (f32, f32) {
+    let (w, h) = size_m();
+    (w * scale, h * scale)
 }
 
 pub struct KeyboardState {
@@ -129,6 +138,12 @@ pub struct KeyboardState {
     pub clipboard: Option<String>,
     /// Top bar asked to switch to this layout index.
     pub layout_switch_request: Option<usize>,
+    /// Size multiplier (config + layouts).
+    pub scale: f32,
+    /// Shift double-tapped: stays latched across keys until tapped again.
+    pub shift_locked: bool,
+    /// Key held under the pointer: (key index, pressed at, repeats sent).
+    hold: Option<(usize, Instant, u32)>,
 }
 
 impl KeyboardState {
@@ -151,12 +166,15 @@ impl KeyboardState {
             latch_at: None,
             clipboard: None,
             layout_switch_request: None,
+            scale: 1.0,
+            shift_locked: false,
+            hold: None,
         }
     }
 
     /// Pose docked under a screen of `screen_size` at `screen_pose`.
-    pub fn dock_pose(screen_pose: &xr::Posef, screen_size: (f32, f32)) -> xr::Posef {
-        let kb = size_m();
+    pub fn dock_pose_scaled(screen_pose: &xr::Posef, screen_size: (f32, f32), scale: f32) -> xr::Posef {
+        let kb = size_m_scaled(scale);
         let local = xr::Posef {
             orientation: quatf(quat_from_axis_angle([1.0, 0.0, 0.0], DOCK_TILT)),
             position: vec3f([0.0, -(screen_size.1 / 2.0 + DOCK_GAP + kb.1 / 2.0 * DOCK_TILT.cos()), DOCK_FWD]),
@@ -306,6 +324,9 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             if st.caps {
                 chip(ui, "Caps", egui::Color32::from_rgb(232, 188, 84));
             }
+            if st.shift_locked {
+                chip(ui, "Shift lock", egui::Color32::from_rgb(232, 188, 84));
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if small_button(ui, icon::X, "Close").clicked() {
                     st.close_request = true;
@@ -331,6 +352,8 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
         let mut action: Option<KeyAction> = None;
         let mut latch_toggle: Option<u8> = None;
         let mut caps_toggle = false;
+        let mut held_now: Option<usize> = None;
+        let now = Instant::now();
         for (i, k) in st.keys.iter().enumerate() {
             let rect = egui::Rect::from_min_size(
                 origin + egui::vec2(k.x * U + 2.0, k.y * U + 2.0),
@@ -339,6 +362,9 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             let id = ui.id().with(("key", i));
             let resp = ui.interact(rect, id, egui::Sense::click());
             let down = resp.is_pointer_button_down_on();
+            if down && matches!(k.kind, KeyKind::Mapped | KeyKind::Fixed(_)) {
+                held_now = Some(i);
+            }
             let latched_here = matches!(k.kind, KeyKind::Modifier(m) if st.latched & m != 0)
                 || (k.kind == KeyKind::Caps && st.caps);
             let (fill, fg) = if down || latched_here {
@@ -402,10 +428,33 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
                 }
             }
         }
+        // Key repeat: a held printable/nav key re-fires after a delay.
+        match (held_now, st.hold) {
+            (Some(i), Some((hi, t0, n))) if hi == i => {
+                let due = REPEAT_DELAY + n as f32 * REPEAT_INTERVAL;
+                if t0.elapsed().as_secs_f32() >= due {
+                    let k = &st.keys[i];
+                    st.pending.push(KeyAction::Tap { code: k.code, mods: st.latched });
+                    st.hold = Some((i, t0, n + 1));
+                    st.clicked = true;
+                }
+            }
+            (Some(i), _) => st.hold = Some((i, now, 0)),
+            (None, _) => st.hold = None,
+        }
         if let Some(m) = latch_toggle {
             let double = st.latched & m != 0
                 && st.latch_at.is_some_and(|(pm, t)| pm == m && t.elapsed().as_secs_f32() < MOD_DOUBLE_TAP);
-            if double {
+            if m == MOD_SHIFT && st.shift_locked {
+                // Third tap: unlock.
+                st.shift_locked = false;
+                st.latched &= !m;
+                st.latch_at = None;
+            } else if double && m == MOD_SHIFT {
+                // Double-tap Shift: lock it across keys (a solo Shift is useless).
+                st.shift_locked = true;
+                st.latch_at = None;
+            } else if double {
                 // Second tap: send the modifier by itself (solo Super = app launcher).
                 st.latched &= !m;
                 st.latch_at = None;
@@ -421,7 +470,8 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
         }
         if let Some(a) = action {
             st.pending.push(a);
-            st.latched = 0; // one-shot
+            // One-shot latches clear; a locked Shift stays.
+            st.latched = if st.shift_locked { MOD_SHIFT } else { 0 };
             st.latch_at = None;
         }
     });
