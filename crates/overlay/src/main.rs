@@ -13,6 +13,7 @@ mod games;
 mod gfx;
 mod mathx;
 mod monado;
+mod sky;
 mod ui;
 
 use std::collections::{HashMap, HashSet};
@@ -200,6 +201,9 @@ fn run() -> Result<()> {
     // Per-layer opacity for mirrored desktop screens.
     let color_scale = available.khr_composition_layer_color_scale_bias;
     exts.khr_composition_layer_color_scale_bias = color_scale;
+    // 360° background while no game runs.
+    let equirect = available.khr_composition_layer_equirect2;
+    exts.khr_composition_layer_equirect2 = equirect;
     exts.extx_overlay = true;
     exts.khr_composition_layer_cylinder = curved;
     let xr_instance = entry.create_instance(
@@ -505,6 +509,12 @@ fn run() -> Result<()> {
     desktop.keyboard.scale = ov_cfg.keyboard_scale.clamp(0.5, 2.0);
     log::info!("desktop: curved={curved} opacity={color_scale}");
     let mut screencast_token = ov_cfg.screencast_token.clone();
+    let mut sky = if equirect {
+        Some(sky::Sky::load(ov_cfg.skybox_path.clone()))
+    } else {
+        log::warn!("runtime lacks XR_KHR_composition_layer_equirect2; no 360° background");
+        None
+    };
     // Named screen arrangements; the last used one is re-applied when the
     // screens come up (if enabled) so nothing has to be re-placed by hand.
     let mut layouts = monadeck_core::desktop_layouts::load();
@@ -532,7 +542,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, ov_cfg.capture_max_fps, ov_cfg.capture_max_height),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -581,6 +591,8 @@ fn run() -> Result<()> {
     st.recenter_on_toggle = ov_cfg.recenter_on_toggle;
     st.capture_max_fps = ov_cfg.capture_max_fps;
     st.capture_max_height = ov_cfg.capture_max_height;
+    st.skybox_enabled = ov_cfg.skybox_enabled;
+    st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
     st.watch_enabled = ov_cfg.watch_enabled;
     st.watch_24h = ov_cfg.watch_24h;
     st.watch_locked = ov_cfg.watch_locked;
@@ -1001,10 +1013,20 @@ fn run() -> Result<()> {
         desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
         if let Some(tok) = desktop.take_token_change() {
             screencast_token = tok;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset))).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
         }
         st.keyboard_shown = desktop.keyboard_visible();
         st.desktop_bar = desktop.bar_items();
+
+        // --- 360° background: upload once, show only while no game runs ------
+        if let Some(s) = &mut sky {
+            if let Err(e) = s.poll(&session, &device, &allocator, format, cmd, queue, fence) {
+                log::error!("sky: {e}");
+                sky = None;
+            }
+        }
+        let show_sky = st.skybox_enabled && running.is_none();
+        let sky_layer = if show_sky { sky.as_ref().and_then(|s| s.layer(&space)) } else { None };
 
         // --- Wrist watch (left controller; runs hidden or not) ------------------
         let tfmt = if st.watch_24h { "%H:%M" } else { "%-I:%M %p" };
@@ -1016,7 +1038,7 @@ fn run() -> Result<()> {
         if st.watch_reset_request {
             st.watch_reset_request = false;
             watch_offset = watch_default;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset))).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
         }
         st.watch_freeze_client = running.as_ref().and_then(|app| {
             st.monado_clients.iter().find(|c| name_matches(&c.name, app)).map(|c| (c.id, c.frozen))
@@ -1039,7 +1061,7 @@ fn run() -> Result<()> {
                     if let Some(l) = left_aim_pose {
                         watch_offset = pose_compose(&pose_invert(&l), &last);
                         watch_pose = Some(last);
-                        overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset))).save();
+                        overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
                         log::info!("watch: position saved");
                     }
                 }
@@ -1212,6 +1234,9 @@ fn run() -> Result<()> {
             let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+            if let Some(s) = &sky_layer {
+                layers.push(s);
+            }
             for q in &screen_quads {
                 layers.push(q);
             }
@@ -1517,6 +1542,9 @@ fn run() -> Result<()> {
         };
         let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+        if let Some(s) = &sky_layer {
+            layers.push(s);
+        }
         // Screens first: they sit behind the dashboard in the composite.
         for q in &screen_quads {
             layers.push(q);
@@ -1660,7 +1688,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, st.capture_max_fps, st.capture_max_height),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, st.capture_max_fps, st.capture_max_height, st.skybox_enabled),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -1670,7 +1698,7 @@ fn run() -> Result<()> {
             desktop.set_capture_limits(st.capture_max_fps, st.capture_max_height);
             desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
             settings_prev = settings_now;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset))).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
         // effective offset is pushed to libmonado at the top of the loop (which
@@ -1775,7 +1803,7 @@ fn run() -> Result<()> {
         }
         if let Some((i, d)) = st.desktop_move_request.take() {
             if desktop.move_order(i, d) {
-                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset))).save();
+                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
             }
         }
         if let Some((i, o)) = st.desktop_opacity_request.take() {
@@ -1870,6 +1898,7 @@ fn overlay_config_from(
     screen_order: &[String],
     watch_timezones: &[String],
     watch_offset: Option<[f32; 7]>,
+    skybox_path: &Option<String>,
 ) -> monadeck_core::overlay_config::OverlayConfig {
     monadeck_core::overlay_config::OverlayConfig {
         audio_enabled: st.audio_enabled,
@@ -1898,6 +1927,8 @@ fn overlay_config_from(
         keyboard_scale: st.keyboard_scale,
         capture_max_fps: st.capture_max_fps,
         capture_max_height: st.capture_max_height,
+        skybox_enabled: st.skybox_enabled,
+        skybox_path: skybox_path.clone(),
     }
 }
 

@@ -73,6 +73,8 @@ pub struct LibState {
     pub keyboard_scale: f32,
     pub capture_max_fps: u32,
     pub capture_max_height: u32,
+    pub skybox_enabled: bool,
+    pub skybox_source: String,
     pub desktop_opacity_request: Option<(usize, f32)>,
     // Wrist watch.
     pub watch_enabled: bool,
@@ -227,6 +229,8 @@ impl LibState {
             keyboard_scale: 1.0,
             capture_max_fps: 90,
             capture_max_height: 0,
+            skybox_enabled: true,
+            skybox_source: String::new(),
             desktop_opacity_request: None,
             watch_enabled: true,
             watch_24h: false,
@@ -2418,6 +2422,17 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
             let zones: Vec<String> = st.watch_times.iter().map(|(l, _)| l.clone()).collect();
             let zl = if zones.is_empty() { "none".to_string() } else { zones.join(" · ") };
             setting_row(ui, "Extra time zones", Some(&format!("{zl} — edit `watch_timezones` in overlay.json (IANA names)")), |_| {});
+            if t {
+                st.sound_tab = true;
+            }
+        });
+        section(ui, "Background", |ui| {
+            let mut t = false;
+            setting_row(ui, "360° background when no game runs", Some(&format!("Image: {}", st.skybox_source)), |ui| {
+                t |= seg_toggle(ui, &mut st.skybox_enabled);
+            });
+            divider(ui);
+            setting_row(ui, "Custom panorama", Some("Set `skybox_path` in overlay.json to an equirectangular JPEG/PNG (2:1), restart the overlay"), |_| {});
             if t {
                 st.sound_tab = true;
             }

@@ -61,6 +61,10 @@ pub struct OverlayConfig {
     pub capture_max_fps: u32,
     /// Downscale mirrored screens to this height in VR (0 = native).
     pub capture_max_height: u32,
+    /// 360° background while no game runs.
+    pub skybox_enabled: bool,
+    /// Custom equirectangular JPEG/PNG for the background (None = built-in).
+    pub skybox_path: Option<String>,
 }
 
 impl Default for OverlayConfig {
@@ -92,6 +96,8 @@ impl Default for OverlayConfig {
             keyboard_scale: 1.0,
             capture_max_fps: 90,
             capture_max_height: 0,
+            skybox_enabled: true,
+            skybox_path: None,
         }
     }
 }
