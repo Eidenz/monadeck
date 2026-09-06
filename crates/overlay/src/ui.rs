@@ -122,6 +122,7 @@ pub struct LibState {
     // Notifications.
     pub notif_enabled: bool,
     pub notif_sound: bool,
+    pub notif_volume: f32,
     pub notif_xso: bool,
     pub notif_dbus_ok: bool,
     pub notif_udp_ok: bool,
@@ -310,6 +311,7 @@ impl LibState {
             photo_dir: String::new(),
             notif_enabled: true,
             notif_sound: true,
+            notif_volume: 0.7,
             notif_xso: true,
             notif_dbus_ok: false,
             notif_udp_ok: false,
@@ -1931,7 +1933,7 @@ fn reset_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 
 /// Per-notification icon + accent colour.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // `Info` is the generic fallback for future toasts.
 pub enum ToastKind {
     Timer,
@@ -2757,8 +2759,12 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                 t |= seg_toggle(ui, &mut st.notif_xso);
             });
             divider(ui);
-            setting_row(ui, "Sound", Some("A short tick with each notification"), |ui| {
+            setting_row(ui, "Sound", Some("A soft two-note ding with each notification"), |ui| {
                 t |= seg_toggle(ui, &mut st.notif_sound);
+            });
+            divider(ui);
+            setting_row(ui, "Notification volume", Some("On top of the UI volume · 0 = muted"), |ui| {
+                stepper_inline(ui, &mut st.notif_volume, 0.0, 1.0, 0.1, |v| if v < 0.05 { "muted".into() } else { format!("{:.0}%", v * 100.0) });
             });
             divider(ui);
             setting_row(ui, "Test", Some("Show a sample notification"), |ui| {

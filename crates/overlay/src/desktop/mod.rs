@@ -174,6 +174,9 @@ pub struct DesktopViewer {
     /// the gripped screen.
     grab_group: Vec<(usize, xr::Posef)>,
     grab_screen: Option<usize>,
+    /// A screen shown from the keyboard's pills: dock the (free) keyboard
+    /// under it once it's placed.
+    keyboard_dock_pending: Option<usize>,
     /// A layout was applied and nothing has been touched since: a double-B
     /// restore puts things back exactly instead of re-centring on the head.
     layout_untouched: bool,
@@ -245,6 +248,7 @@ impl DesktopViewer {
             restore_tilt: false,
             grab_group: Vec::new(),
             grab_screen: None,
+            keyboard_dock_pending: None,
             layout_untouched: false,
         }
     }
@@ -897,7 +901,12 @@ impl DesktopViewer {
             self.clipboard.set_active(false);
         }
         if let Some(i) = self.keyboard.screen_toggle_request.take() {
+            let was_shown = self.ordered_screens().get(i).is_some_and(|&si| self.screens[si].shown);
             self.toggle_bar(i);
+            // Spawned from the keyboard with no docked screen: dock under it.
+            if !was_shown && self.keyboard.attached.is_none() {
+                self.keyboard_dock_pending = self.ordered_screens().get(i).copied();
+            }
         }
         if let Some(i) = self.keyboard.layout_switch_request.take() {
             if i < self.keyboard.labels.layout_names.len() {
@@ -982,6 +991,14 @@ impl DesktopViewer {
             s.gaze_update(hmd, self.gaze_pause);
             if let Err(e) = s.upload(session, device, allocator, self.importer.as_ref(), &self.caps, cmd, queue, fence) {
                 log::error!("desktop: {} upload: {e}", s.name);
+            }
+        }
+        if let Some(si) = self.keyboard_dock_pending {
+            if self.screens.get(si).is_some_and(|s| s.shown && s.placed) {
+                self.keyboard_dock_pending = None;
+                self.dock_keyboard(Some(si));
+            } else if !self.screens.get(si).is_some_and(|s| s.shown) {
+                self.keyboard_dock_pending = None;
             }
         }
         // Docked screens follow their parents (unless a grab is driving the group).
@@ -1286,6 +1303,24 @@ impl DesktopViewer {
                         let (sx, sy) = h.scroll;
                         if sx != 0.0 || sy != 0.0 {
                             hid.wheel(sx * SCROLL_SPEED, sy * SCROLL_SPEED);
+                        }
+                    }
+                }
+            }
+        }
+        // Second hand on the keyboard: it types too (trigger edge → key under
+        // its ray), without touching the egui pointer the primary hand drives.
+        if self.keyboard.visible && self.keyboard.placed {
+            let primary = best.map(|(_, hi, _, _, _)| hi);
+            let kb_size = keyboard::size_m_scaled(self.keyboard.scale);
+            for (hi, h) in hands.iter().enumerate().filter(|(_, h)| h.active) {
+                if Some(hi) == primary || self.keyboard.grab.is_some() {
+                    continue;
+                }
+                if h.select && !self.select_prev[hi] {
+                    if let Some((u, v, _)) = raycast(&h.aim, &self.keyboard.pose, kb_size) {
+                        if let Some(k) = self.keyboard.key_at(u, v) {
+                            self.keyboard.press(k);
                         }
                     }
                 }

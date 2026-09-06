@@ -84,6 +84,8 @@ pub struct OverlayConfig {
     /// Listen for XSOverlay-protocol notifications (udp/42069).
     pub notifications_xso: bool,
     pub notifications_sound: bool,
+    /// Notification sound level, 0 (mute) ..= 1, on top of the UI volume.
+    pub notifications_volume: f32,
 }
 
 impl Default for OverlayConfig {
@@ -128,6 +130,7 @@ impl Default for OverlayConfig {
             notifications_enabled: true,
             notifications_xso: true,
             notifications_sound: true,
+            notifications_volume: 0.7,
         }
     }
 }

@@ -372,9 +372,7 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
         });
         // --- Keys ---------------------------------------------------------------
         let origin = egui::pos2(ui.max_rect().min.x, ui.max_rect().min.y + TOP_BAR);
-        let mut action: Option<KeyAction> = None;
-        let mut latch_toggle: Option<u8> = None;
-        let mut caps_toggle = false;
+        let mut pressed_idx: Option<usize> = None;
         let mut held_now: Option<usize> = None;
         let now = Instant::now();
         for (i, k) in st.keys.iter().enumerate() {
@@ -438,17 +436,7 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
                 painter.text(rect.center(), egui::Align2::CENTER_CENTER, main, egui::FontId::proportional(size), fg);
             }
             if resp.clicked() {
-                st.clicked = true;
-                match k.kind {
-                    KeyKind::Modifier(m) => latch_toggle = Some(m),
-                    KeyKind::Caps => caps_toggle = true,
-                    KeyKind::Copy => action = Some(KeyAction::Tap { code: KEY_C, mods: MOD_CTRL }),
-                    KeyKind::Cut => action = Some(KeyAction::Tap { code: KEY_X, mods: MOD_CTRL }),
-                    KeyKind::Paste => action = Some(KeyAction::Tap { code: KEY_V, mods: MOD_CTRL }),
-                    KeyKind::Mapped | KeyKind::Fixed(_) => {
-                        action = Some(KeyAction::Tap { code: k.code, mods: st.latched })
-                    }
-                }
+                pressed_idx = Some(i);
             }
         }
         // Key repeat: a held printable/nav key re-fires after a delay.
@@ -465,39 +453,78 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             (Some(i), _) => st.hold = Some((i, now, 0)),
             (None, _) => st.hold = None,
         }
-        if let Some(m) = latch_toggle {
-            let double = st.latched & m != 0
-                && st.latch_at.is_some_and(|(pm, t)| pm == m && t.elapsed().as_secs_f32() < MOD_DOUBLE_TAP);
-            if m == MOD_SHIFT && st.shift_locked {
-                // Third tap: unlock.
-                st.shift_locked = false;
-                st.latched &= !m;
-                st.latch_at = None;
-            } else if double && m == MOD_SHIFT {
-                // Double-tap Shift: lock it across keys (a solo Shift is useless).
-                st.shift_locked = true;
-                st.latch_at = None;
-            } else if double {
-                // Second tap: send the modifier by itself (solo Super = app launcher).
-                st.latched &= !m;
-                st.latch_at = None;
-                st.pending.push(KeyAction::Toggle(mod_code(m)));
-            } else {
-                st.latched ^= m;
-                st.latch_at = (st.latched & m != 0).then(|| (m, Instant::now()));
-            }
-        }
-        if caps_toggle {
-            st.caps = !st.caps;
-            st.pending.push(KeyAction::Toggle(KEY_CAPSLOCK));
-        }
-        if let Some(a) = action {
-            st.pending.push(a);
-            // One-shot latches clear; a locked Shift stays.
-            st.latched = if st.shift_locked { MOD_SHIFT } else { 0 };
-            st.latch_at = None;
+        if let Some(i) = pressed_idx {
+            st.press(i);
         }
     });
+}
+
+impl KeyboardState {
+    /// Press key `i` (from the egui pointer or a second hand): modifiers latch,
+    /// Caps toggles, everything else queues a tap with the latched modifiers.
+    pub fn press(&mut self, i: usize) {
+        let Some(k) = self.keys.get(i) else { return };
+        let (code, kind) = (k.code, k.kind);
+        self.clicked = true;
+        match kind {
+            KeyKind::Modifier(m) => {
+                let double = self.latched & m != 0
+                    && self.latch_at.is_some_and(|(pm, t)| pm == m && t.elapsed().as_secs_f32() < MOD_DOUBLE_TAP);
+                if m == MOD_SHIFT && self.shift_locked {
+                    // Third tap: unlock.
+                    self.shift_locked = false;
+                    self.latched &= !m;
+                    self.latch_at = None;
+                } else if double && m == MOD_SHIFT {
+                    // Double-tap Shift: lock it across keys (a solo Shift is useless).
+                    self.shift_locked = true;
+                    self.latch_at = None;
+                } else if double {
+                    // Second tap: send the modifier by itself (solo Super = app launcher).
+                    self.latched &= !m;
+                    self.latch_at = None;
+                    self.pending.push(KeyAction::Toggle(mod_code(m)));
+                } else {
+                    self.latched ^= m;
+                    self.latch_at = (self.latched & m != 0).then(|| (m, Instant::now()));
+                }
+            }
+            KeyKind::Caps => {
+                self.caps = !self.caps;
+                self.pending.push(KeyAction::Toggle(KEY_CAPSLOCK));
+            }
+            KeyKind::Copy | KeyKind::Cut | KeyKind::Paste => {
+                let c = match kind {
+                    KeyKind::Copy => KEY_C,
+                    KeyKind::Cut => KEY_X,
+                    _ => KEY_V,
+                };
+                self.pending.push(KeyAction::Tap { code: c, mods: MOD_CTRL });
+                self.finish_tap();
+            }
+            KeyKind::Mapped | KeyKind::Fixed(_) => {
+                self.pending.push(KeyAction::Tap { code, mods: self.latched });
+                self.finish_tap();
+            }
+        }
+    }
+
+    fn finish_tap(&mut self) {
+        // One-shot latches clear; a locked Shift stays.
+        self.latched = if self.shift_locked { MOD_SHIFT } else { 0 };
+        self.latch_at = None;
+    }
+
+    /// Key under a panel-space (u, v) hit (0..1), for hands that aren't the
+    /// egui pointer.
+    pub fn key_at(&self, u: f32, v: f32) -> Option<usize> {
+        let (pw, ph) = panel_points();
+        let x = u * pw - MARGIN;
+        let y = v * ph - MARGIN - TOP_BAR;
+        self.keys.iter().position(|k| {
+            x >= k.x * U + 2.0 && x <= (k.x + k.w) * U - 2.0 && y >= k.y * U + 2.0 && y <= (k.y + k.h) * U - 2.0
+        })
+    }
 }
 
 fn chip(ui: &mut egui::Ui, label: &str, color: egui::Color32) {
