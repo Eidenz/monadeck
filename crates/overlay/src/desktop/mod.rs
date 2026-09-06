@@ -1052,7 +1052,17 @@ impl DesktopViewer {
             }
         }
         if let Some(si) = self.keyboard_dock_pending {
-            if self.screens.get(si).is_some_and(|s| s.shown && s.placed) {
+            let kb_ready = self.keyboard.visible && self.keyboard.placed && self.keyboard.attached.is_none();
+            if self.screens.get(si).is_some_and(|s| s.shown) && kb_ready {
+                // The keyboard is the reference: put the screen where the keyboard
+                // docks under it, so the keyboard doesn't move.
+                let size = self.screens[si].size_m();
+                let local = KeyboardState::dock_local(size, self.keyboard.scale);
+                self.screens[si].pose = pose_compose(&self.keyboard.pose, &pose_invert(&local));
+                self.screens[si].placed = true;
+                self.keyboard.attached = Some(si);
+                self.keyboard_dock_pending = None;
+            } else if self.screens.get(si).is_some_and(|s| s.shown && s.placed) {
                 self.keyboard_dock_pending = None;
                 self.dock_keyboard(Some(si));
             } else if !self.screens.get(si).is_some_and(|s| s.shown) {
@@ -1269,82 +1279,116 @@ impl DesktopViewer {
         }
         let grabbing = self.screens.iter().any(|s| s.grab.is_some()) || self.keyboard.grab.is_some();
 
-        // Closest hit across hands, screens and keyboard.
-        let mut best: Option<(Target, usize, f32, f32, f32)> = None; // (target, hand, u, v, t)
+        // Per-hand targets: the keyboard has its own (sticky) pointer hand and
+        // the mouse goes to another hand on a screen, so hands can swap roles
+        // freely. A hand that hits both takes the closer one.
         let mut kb_hits: [Option<(f32, f32, f32)>; 2] = [None, None];
+        let mut scr_hits: [Option<(usize, f32, f32, f32)>; 2] = [None, None];
+        self.keyboard.secondary_hover = None;
         if !grabbing {
-            for (hi, h) in hands.iter().enumerate().filter(|(_, h)| h.active) {
-                let mut consider = |target: Target, hit: Option<(f32, f32, f32)>| {
-                    if let Some((u, v, t)) = hit {
-                        if max_t.is_some_and(|m| t >= m) {
-                            return;
-                        }
-                        if best.map_or(true, |b| t < b.4) {
-                            best = Some((target, hi, u, v, t));
-                        }
-                    }
-                };
-                for (si, s) in self.screens.iter().enumerate() {
-                    consider(Target::Screen(si), s.hit(&h.aim, curved_ok));
-                }
+            for (hi, h) in hands.iter().enumerate().take(2).filter(|(_, h)| h.active) {
+                let mut kb = None;
                 if self.keyboard.visible && self.keyboard.placed {
-                    let hit = raycast(&h.aim, &self.keyboard.pose, keyboard::size_m_scaled(self.keyboard.scale));
-                    if hi < 2 {
-                        kb_hits[hi] = hit;
+                    kb = raycast(&h.aim, &self.keyboard.pose, keyboard::size_m_scaled(self.keyboard.scale))
+                        .filter(|(_, _, t)| !max_t.is_some_and(|m| *t >= m));
+                }
+                let mut scr: Option<(usize, f32, f32, f32)> = None;
+                for (si, s) in self.screens.iter().enumerate() {
+                    if let Some((u, v, t)) = s.hit(&h.aim, curved_ok) {
+                        if max_t.is_some_and(|m| t >= m) {
+                            continue;
+                        }
+                        if scr.map_or(true, |b| t < b.3) {
+                            scr = Some((si, u, v, t));
+                        }
                     }
-                    consider(Target::Keyboard, hit);
                 }
+                match (kb, scr) {
+                    (Some(k), Some(sc)) if sc.3 < k.2 => kb = None,
+                    (Some(_), Some(_)) => scr = None,
+                    _ => {}
+                }
+                kb_hits[hi] = kb;
+                scr_hits[hi] = scr;
             }
         }
-        // Keyboard pointer is sticky: keep the hand that had it while it's still
-        // on the keyboard (the other hand types through `key_at` below).
-        if let Some((Target::Keyboard, hi, _, _, _)) = best {
-            match self.kb_primary {
-                Some(p) if p != hi && p < 2 && kb_hits[p].is_some() => {
-                    let (u, v, t) = kb_hits[p].unwrap();
-                    best = Some((Target::Keyboard, p, u, v, t));
-                }
-                _ => self.kb_primary = Some(hi),
-            }
-        } else {
-            self.kb_primary = None;
-        }
+        // Keyboard pointer hand: sticky while it still hits the keyboard.
+        let kb_hand = match self.kb_primary {
+            Some(p) if p < 2 && kb_hits[p].is_some() => Some(p),
+            _ => (0..2usize)
+                .filter(|&i| kb_hits[i].is_some())
+                .min_by(|&a, &b| kb_hits[a].unwrap().2.total_cmp(&kb_hits[b].unwrap().2)),
+        };
+        self.kb_primary = kb_hand;
+        // Mouse hand: the closest screen hit among the other hands.
+        let mouse_hand = (0..2usize)
+            .filter(|&i| Some(i) != kb_hand && scr_hits[i].is_some())
+            .min_by(|&a, &b| scr_hits[a].unwrap().3.total_cmp(&scr_hits[b].unwrap().3));
 
         // Grip while pointing grabs the thing (a grabbed keyboard undocks).
-        if let Some((target, hi, _, _, _)) = best {
-            if hands[hi].grip > GRAB_START {
+        let mut grabbed = false;
+        for hi in 0..hands.len().min(2) {
+            if !hands[hi].active || hands[hi].grip <= GRAB_START {
+                continue;
+            }
+            let aim = hands[hi].aim;
+            if Some(hi) == kb_hand {
                 self.layout_untouched = false;
-                let aim = hands[hi].aim;
-                match target {
-                    Target::Screen(si) => {
-                        self.screens[si].start_grab(hi, &aim);
-                        self.grab_screen = Some(si);
-                        let root = self.screens[si].pose;
-                        self.grab_group = self
-                            .group_of(si)
-                            .into_iter()
-                            .filter(|&m| m != si)
-                            .map(|m| (m, pose_compose(&pose_invert(&root), &self.screens[m].pose)))
-                            .collect();
-                    }
-                    Target::Keyboard => {
-                        self.keyboard.grab = Some((hi, pose_compose(&pose_invert(&aim), &self.keyboard.pose)));
-                        self.keyboard.attached = None;
-                    }
-                }
-                best = None;
+                self.keyboard.grab = Some((hi, pose_compose(&pose_invert(&aim), &self.keyboard.pose)));
+                self.keyboard.attached = None;
+                grabbed = true;
+                break;
+            } else if let Some((si, _, _, _)) = scr_hits[hi] {
+                self.layout_untouched = false;
+                self.screens[si].start_grab(hi, &aim);
+                self.grab_screen = Some(si);
+                let root = self.screens[si].pose;
+                self.grab_group = self
+                    .group_of(si)
+                    .into_iter()
+                    .filter(|&m| m != si)
+                    .map(|m| (m, pose_compose(&pose_invert(&root), &self.screens[m].pose)))
+                    .collect();
+                grabbed = true;
+                break;
             }
         }
-
-        if let Some((target, hi, u, v, t)) = best {
-            self.pointing = Some((target, hi));
-            out.ray = Some((hands[hi].aim, t));
-            let h = &hands[hi];
-            match target {
-                Target::Keyboard => {
-                    out.keyboard_ptr = Some((u, v, h.select));
+        if !grabbed {
+            // Keyboard: its hand drives the egui pointer (laser 1 unless a
+            // mouse hand exists, then laser 2).
+            if let Some(kh) = kb_hand {
+                if let Some((u, v, t)) = kb_hits[kh] {
+                    out.keyboard_ptr = Some((u, v, hands[kh].select));
+                    if mouse_hand.is_none() {
+                        out.ray = Some((hands[kh].aim, t));
+                        self.pointing = Some((Target::Keyboard, kh));
+                    } else {
+                        out.secondary_ray = Some((hands[kh].aim, t));
+                    }
                 }
-                Target::Screen(si) => {
+            }
+            // Any other hand on the keyboard types too: own laser + highlight.
+            for hi in 0..hands.len().min(2) {
+                if Some(hi) == kb_hand {
+                    continue;
+                }
+                if let Some((u, v, t)) = kb_hits[hi] {
+                    out.secondary_ray = Some((hands[hi].aim, t));
+                    let key = self.keyboard.key_at(u, v);
+                    self.keyboard.secondary_hover = key;
+                    if hands[hi].select && !self.select_prev[hi] {
+                        if let Some(k) = key {
+                            self.keyboard.press(k);
+                        }
+                    }
+                }
+            }
+            // Mouse.
+            if let Some(hi) = mouse_hand {
+                let (si, u, v, t) = scr_hits[hi].unwrap();
+                self.pointing = Some((Target::Screen(si), hi));
+                out.ray = Some((hands[hi].aim, t));
+                let h = &hands[hi];
                     self.last_screen = Some(si);
                     let (x, y) = self.screens[si].desktop_pos(u, v);
                     if let Some(hid) = &mut self.hid {
@@ -1394,26 +1438,6 @@ impl DesktopViewer {
                             hid.wheel(sx * SCROLL_SPEED, sy * SCROLL_SPEED);
                         }
                     }
-                }
-            }
-        }
-        // Second hand on the keyboard: it types too (trigger edge → key under
-        // its ray), without touching the egui pointer the primary hand drives.
-        if self.keyboard.visible && self.keyboard.placed {
-            let primary = best.map(|(_, hi, _, _, _)| hi);
-            let kb_size = keyboard::size_m_scaled(self.keyboard.scale);
-            for (hi, h) in hands.iter().enumerate().filter(|(_, h)| h.active) {
-                if Some(hi) == primary || self.keyboard.grab.is_some() {
-                    continue;
-                }
-                if let Some((u, v, t)) = raycast(&h.aim, &self.keyboard.pose, kb_size) {
-                    out.secondary_ray = Some((h.aim, t));
-                    if h.select && !self.select_prev[hi] {
-                        if let Some(k) = self.keyboard.key_at(u, v) {
-                            self.keyboard.press(k);
-                        }
-                    }
-                }
             }
         }
         // Release a held button when that hand lets go, wherever it points now.

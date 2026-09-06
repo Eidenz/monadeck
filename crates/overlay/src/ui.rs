@@ -640,7 +640,11 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         let rect = egui::Rect::from_min_size(egui::pos2(x, r.top() - 2.0), egui::vec2(26.0, 22.0));
                         let fg = if on { egui::Color32::BLACK } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
                         let fill = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgba_unmultiplied(150, 190, 255, 30) } else { egui::Color32::TRANSPARENT };
-                        ui.put(rect, egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(fill).corner_radius(8))
+                        // A child ui at a fixed rect: nothing is allocated in the
+                        // card's own layout, so the clock doesn't move.
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                        child
+                            .add(egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(fill).corner_radius(8).min_size(rect.size()))
                             .on_hover_text(tip)
                             .clicked()
                     };

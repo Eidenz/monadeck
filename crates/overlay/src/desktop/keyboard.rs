@@ -142,6 +142,8 @@ pub struct KeyboardState {
     pub scale: f32,
     /// Shift double-tapped: stays latched across keys until tapped again.
     pub shift_locked: bool,
+    /// Key under the second hand's ray (highlighted like a hover).
+    pub secondary_hover: Option<usize>,
     /// Approved screens (name, shown) for the top-bar pills; toggle request.
     pub screens: Vec<(String, bool)>,
     pub screen_toggle_request: Option<usize>,
@@ -171,6 +173,7 @@ impl KeyboardState {
             layout_switch_request: None,
             scale: 1.0,
             shift_locked: false,
+            secondary_hover: None,
             screens: Vec::new(),
             screen_toggle_request: None,
             hold: None,
@@ -179,12 +182,17 @@ impl KeyboardState {
 
     /// Pose docked under a screen of `screen_size` at `screen_pose`.
     pub fn dock_pose_scaled(screen_pose: &xr::Posef, screen_size: (f32, f32), scale: f32) -> xr::Posef {
+        pose_compose(screen_pose, &Self::dock_local(screen_size, scale))
+    }
+
+    /// The dock offset in the screen's frame (so a screen can be placed from a
+    /// keyboard: `screen = keyboard ∘ inverse(dock_local)`).
+    pub fn dock_local(screen_size: (f32, f32), scale: f32) -> xr::Posef {
         let kb = size_m_scaled(scale);
-        let local = xr::Posef {
+        xr::Posef {
             orientation: quatf(quat_from_axis_angle([1.0, 0.0, 0.0], DOCK_TILT)),
             position: vec3f([0.0, -(screen_size.1 / 2.0 + DOCK_GAP + kb.1 / 2.0 * DOCK_TILT.cos()), DOCK_FWD]),
-        };
-        pose_compose(screen_pose, &local)
+        }
     }
 }
 
@@ -390,7 +398,7 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
                 || (k.kind == KeyKind::Caps && st.caps);
             let (fill, fg) = if down || latched_here {
                 (theme::PRIMARY, egui::Color32::BLACK)
-            } else if resp.hovered() {
+            } else if resp.hovered() || st.secondary_hover == Some(i) {
                 (egui::Color32::from_rgb(52, 74, 82), egui::Color32::WHITE)
             } else {
                 let special = !matches!(k.kind, KeyKind::Mapped) && !matches!(k.kind, KeyKind::Fixed(""));
