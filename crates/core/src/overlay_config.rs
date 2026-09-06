@@ -86,6 +86,12 @@ pub struct OverlayConfig {
     pub notifications_sound: bool,
     /// Notification sound level, 0 (mute) ..= 1, on top of the UI volume.
     pub notifications_volume: f32,
+    /// The watch's four quick buttons (ids: keyboard, recenter, layouts, freeze,
+    /// timer, screenshot, screens, mute, photos).
+    pub watch_buttons: Vec<String>,
+    /// Keyboard follows its docked screen's visibility, and pops up when a text
+    /// field gets focus on the desktop (accessibility bus). Off by default.
+    pub keyboard_auto: bool,
 }
 
 impl Default for OverlayConfig {
@@ -131,6 +137,8 @@ impl Default for OverlayConfig {
             notifications_xso: true,
             notifications_sound: true,
             notifications_volume: 0.7,
+            watch_buttons: vec!["keyboard".into(), "recenter".into(), "layouts".into(), "freeze".into()],
+            keyboard_auto: false,
         }
     }
 }

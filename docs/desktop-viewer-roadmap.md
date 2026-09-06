@@ -70,7 +70,14 @@ marked **done** are on the branch; everything else is a proposal.
 
 ## Proposed next
 
-(empty — add what you'd like here)
+1. Auto-hide the keyboard when its docked screen is hidden; auto-show on a
+   focused text field (AT-SPI), as a toggle, off by default.
+2. Docking edge indicator while a gripped screen is within snap range.
+3. Media controls (MPRIS) on the watch.
+4. Notification history (last 3) behind a watch badge.
+5. Configurable watch quick buttons.
+
+Everything else: `docs/ideas-parked.md`.
 
 ## Known limitations
 
