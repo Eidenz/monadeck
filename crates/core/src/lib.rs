@@ -20,6 +20,7 @@ pub mod cmd_runner;
 pub mod collections;
 pub mod config;
 pub mod desktop;
+pub mod desktop_layouts;
 pub mod devices;
 pub mod favorites;
 pub mod floor_calibration;

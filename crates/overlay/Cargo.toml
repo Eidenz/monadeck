@@ -33,3 +33,34 @@ mint = "0.5"
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 # Local wall-clock for the bottom bar.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Extra time zones on the wrist watch.
+chrono-tz = "0.10"
+
+# --- Desktop viewer (WayVR-style screen mirror) -------------------------------
+# xdg-desktop-portal ScreenCast negotiation (KDE/GNOME/wlroots all speak it).
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+# The negotiated screencast stream is a PipeWire video node; frames arrive as
+# DMA-BUFs (zero-copy into Vulkan) or SHM (staging upload fallback).
+pipewire = { version = "0.10", features = ["v0_3_33", "v0_3_65"] }
+drm-fourcc = "2.2"
+# Virtual mouse + keyboard through /dev/uinput (works on every compositor —
+# KWin has no wlr virtual-pointer protocol, so this is the portable route).
+input-linux = "0.7"
+libc = "0.2"
+# Monitor layout (logical positions/sizes) so absolute pointer coordinates map
+# onto the right screen: wl_output + xdg_output over the user's Wayland session.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Key labels for the VR keyboard come from the user's real xkb keymap (0.9
+# breaks keymap import on some distros — same pin WayVR uses).
+xkbcommon = { version = "0.8", default-features = false }
+# KDE keyboard-layout switching (org.kde.keyboard) — same zbus ashpd already pulls.
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
+# --- Screenshots (ported from monado-frame) ------------------------------------
+rqrr = "0.10"
+ureq = { version = "3", features = ["json"] }
+base64 = "0.22"
+filetime = "0.2"

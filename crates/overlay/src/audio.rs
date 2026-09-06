@@ -10,6 +10,8 @@ static SELECT: &[u8] = include_bytes!("../assets/sounds/select.wav");
 static LAUNCH: &[u8] = include_bytes!("../assets/sounds/launch.wav");
 static TAB: &[u8] = include_bytes!("../assets/sounds/tab.wav");
 static ALARM: &[u8] = include_bytes!("../assets/sounds/alarm.wav");
+static NOTIFY: &[u8] = include_bytes!("../assets/sounds/notify.wav");
+static KEY: &[u8] = include_bytes!("../assets/sounds/key.wav");
 
 pub struct Audio {
     // Kept alive for the stream to keep playing; not Send, so Audio lives on the
@@ -43,17 +45,32 @@ impl Audio {
     }
 
     fn play(&self, bytes: &'static [u8]) {
-        if !self.enabled || self.volume <= 0.001 {
+        self.play_at(bytes, 1.0);
+    }
+
+    /// Play with an extra gain on top of the UI volume (per-feature volumes).
+    fn play_at(&self, bytes: &'static [u8], gain: f32) {
+        let vol = self.volume * gain.clamp(0.0, 1.0);
+        if !self.enabled || vol <= 0.001 {
             return;
         }
         let Some(handle) = &self.handle else { return };
         match Decoder::new(Cursor::new(bytes)) {
             Ok(decoder) => {
-                let src = decoder.convert_samples::<f32>().amplify(self.volume);
+                let src = decoder.convert_samples::<f32>().amplify(vol);
                 let _ = handle.play_raw(src);
             }
             Err(e) => log::warn!("decode UI sound: {e}"),
         }
+    }
+
+    /// Desktop / XSOverlay notification (soft two-note ding), at `gain` (0 = muted).
+    pub fn notify(&self, gain: f32) {
+        self.play_at(NOTIFY, gain);
+    }
+    /// VR keyboard key press (short tock).
+    pub fn key(&self) {
+        self.play(KEY);
     }
 
     /// Selecting a game (soft tick).

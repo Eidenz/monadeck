@@ -7,11 +7,18 @@
 //
 // The OpenXR/Vulkan/egui/laser plumbing is adapted from monado-frame.
 
+mod a11y;
 mod audio;
+mod desktop;
 mod games;
 mod gfx;
 mod mathx;
+mod media;
 mod monado;
+mod notifications;
+mod photos;
+mod shots;
+mod sky;
 mod ui;
 
 use std::collections::{HashMap, HashSet};
@@ -66,6 +73,9 @@ struct ToastState {
     kind: ui::ToastKind,
     pose: xr::Posef,
     until: Instant,
+    /// Optional app icon (uploaded to the toast panel on first draw).
+    icon: Option<egui::ColorImage>,
+    icon_tex: Option<egui::TextureHandle>,
 }
 
 /// The SteamVR-style game-launch popup: its own composition layer (so it
@@ -111,6 +121,8 @@ fn make_toast(
         kind,
         pose: mathx::toast_pose(hmd, 1.3, 0.42),
         until: Instant::now() + std::time::Duration::from_secs(5),
+        icon: None,
+        icon_tex: None,
     }
 }
 
@@ -156,6 +168,50 @@ unsafe extern "system" fn get_instance_proc_addr(
 }
 
 fn main() {
+    // `monadeck-overlay --desktop-selftest`: exercise the desktop-viewer capture
+    // path (portal → PipeWire → Vulkan import → PNG) with no headset/runtime.
+    if std::env::args().any(|a| a == "--a11y-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+        let a = a11y::A11y::start();
+        println!("a11y ok={} — click into text fields on the desktop for 25 s", a.ok);
+        let t = Instant::now();
+        while t.elapsed().as_secs() < 25 {
+            for ev in a.drain() {
+                println!("  focus: role={:?} editable={} app={:?}", ev.role, ev.editable, ev.app);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return;
+    }
+    if std::env::args().any(|a| a == "--notify-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        let n = notifications::Notifications::start(true, true);
+        println!("dbus={} udp={} — listening 12 s; send `notify-send` / an XSO UDP packet", n.dbus_ok, n.udp_ok);
+        let t = Instant::now();
+        while t.elapsed().as_secs() < 12 {
+            for i in n.drain() {
+                println!("  [{:?}] app={:?} title={:?} body={:?} timeout={} icon={}", i.source, i.app, i.title, i.body, i.timeout, i.icon.is_some());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return;
+    }
+    if std::env::args().any(|a| a == "--keyboard-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Err(e) = desktop::selftest::keyboard() {
+            eprintln!("keyboard selftest FAILED: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args().any(|a| a == "--desktop-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Err(e) = desktop::selftest::run() {
+            eprintln!("desktop selftest FAILED: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     if let Err(e) = run() {
         log::error!("overlay exited with error: {e:?}");
@@ -178,6 +234,12 @@ fn run() -> Result<()> {
     let curved = available.khr_composition_layer_cylinder && std::env::var("MONADECK_OVERLAY_FLAT").is_err();
     let mut exts = xr::ExtensionSet::default();
     exts.khr_vulkan_enable2 = true;
+    // Per-layer opacity for mirrored desktop screens.
+    let color_scale = available.khr_composition_layer_color_scale_bias;
+    exts.khr_composition_layer_color_scale_bias = color_scale;
+    // 360° background while no game runs.
+    let equirect = available.khr_composition_layer_equirect2;
+    exts.khr_composition_layer_equirect2 = equirect;
     exts.extx_overlay = true;
     exts.khr_composition_layer_cylinder = curved;
     let xr_instance = entry.create_instance(
@@ -234,7 +296,10 @@ fn run() -> Result<()> {
     let priorities = [1.0f32];
     let queue_infos =
         [vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family_index).queue_priorities(&priorities)];
-    let device_create_info = vk::DeviceCreateInfo::default().queue_create_infos(&queue_infos);
+    // Desktop viewer: DMA-BUF import extensions (all-or-nothing; SHM fallback otherwise).
+    let (dmabuf_exts, dmabuf_ok) = desktop::dmabuf::available_extensions(&vk_instance, physical_device);
+    let device_create_info =
+        vk::DeviceCreateInfo::default().queue_create_infos(&queue_infos).enabled_extension_names(&dmabuf_exts);
     let vk_device_raw = unsafe {
         xr_instance
             .create_vulkan_device(
@@ -283,6 +348,12 @@ fn run() -> Result<()> {
         xr::Session::<xr::Vulkan>::from_raw(xr_instance.clone(), raw, Box::new(()))
     };
     let space = session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
+    // STAGE (floor, tracking origin) is stable across sessions; LOCAL is
+    // re-anchored at the head each start. Desktop layouts are stored in STAGE.
+    let stage_space = session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY).ok();
+    if stage_space.is_none() {
+        log::warn!("no STAGE reference space; desktop layouts will use LOCAL");
+    }
     let view_space = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
 
     // --- Format + render pass + allocator -----------------------------------
@@ -374,6 +445,67 @@ fn run() -> Result<()> {
         (840, 480), (LAUNCH_W, LAUNCH_W * 480.0 / 840.0), anchor,
     )?;
     let mut laser = make_laser(&session, format)?;
+    // Wrist watch on the left controller (WayVR's offsets from the aim/tip pose).
+    // ~WayVR's size (their watch is 0.115 m wide).
+    const WATCH_W: f32 = 0.105;
+    const WATCH_PX: (u32, u32) = (600, 404);
+    let mut watch_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        WATCH_PX, (WATCH_W, WATCH_W * WATCH_PX.1 as f32 / WATCH_PX.0 as f32), anchor,
+    )?;
+    // Default wrist spot = the user's tuned position (relative to the left aim pose).
+    let watch_default = xr::Posef {
+        position: xr::Vector3f { x: -0.041_881_38, y: -0.054_545_76, z: 0.110_306_92 },
+        orientation: xr::Quaternionf { x: -0.703_661_44, y: -0.053_388_834, z: 0.691_710_65, w: -0.153_453_71 },
+    };
+    // (right-hand grab offset, last gripped pose) while the watch is being repositioned.
+    let mut watch_grab: Option<(xr::Posef, xr::Posef)> = None;
+    let mut watch_scale: f32;
+    // Resize gesture (grip + trigger + push/pull): (hand→head distance, scale) at start.
+    let mut watch_resize_ref: Option<(f32, f32)> = None;
+    // A second laser for the other hand while it types.
+    let mut laser2 = make_laser(&session, format)?;
+    // Screenshots (monado-frame, folded in): watcher, wrist queue, photo windows, gallery.
+    let mut ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
+    if !ov_cfg.photos_settings_imported {
+        // One-time import of monado-frame's settings.
+        let mf = format!("{}/.config/monado-frame/config.json", std::env::var("HOME").unwrap_or_default());
+        if let Ok(txt) = std::fs::read_to_string(&mf) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                ov_cfg.qr_detect = v["qr_detect"].as_bool().unwrap_or(ov_cfg.qr_detect);
+                ov_cfg.qr_autodelete = v["qr_autodelete"].as_bool().unwrap_or(ov_cfg.qr_autodelete);
+                ov_cfg.skip_wrist_photo = v["skip_wrist_photo"].as_bool().unwrap_or(ov_cfg.skip_wrist_photo);
+                ov_cfg.skip_wrist_qr = v["skip_wrist_qr"].as_bool().unwrap_or(ov_cfg.skip_wrist_qr);
+                ov_cfg.cleanup_days = v["cleanup_days"].as_i64().unwrap_or(ov_cfg.cleanup_days as i64) as i32;
+                ov_cfg.crop_margin = v["crop_margin"].as_i64().unwrap_or(ov_cfg.crop_margin as i64) as i32;
+                log::info!("photos: imported monado-frame settings from {mf}");
+            }
+        }
+        ov_cfg.photos_settings_imported = true;
+        ov_cfg.save();
+    }
+    let photo_cfg_of = |c: &monadeck_core::overlay_config::OverlayConfig| photos::PhotoCfg {
+        qr_detect: c.qr_detect,
+        qr_autodelete: c.qr_autodelete,
+        skip_wrist_photo: c.skip_wrist_photo,
+        skip_wrist_qr: c.skip_wrist_qr,
+        cleanup_days: c.cleanup_days,
+        crop_margin: c.crop_margin,
+    };
+    let mut photo_cfg = photo_cfg_of(&ov_cfg);
+    let mut photos = photos::Photos::new(&session, &device, allocator.clone(), render_pass, format, srgb, &photo_cfg)?;
+    let mut gestures = shots::gestures::load();
+    let mut gestures_prev = gestures.clone();
+    // Desktop + XSOverlay notifications → toasts (queued, one at a time).
+    let notifications = notifications::Notifications::start(ov_cfg.notifications_enabled, ov_cfg.notifications_xso);
+    let mut toast_queue: std::collections::VecDeque<(ToastState, f32)> = std::collections::VecDeque::new();
+    let mut notif_history: std::collections::VecDeque<(String, String, Instant)> = std::collections::VecDeque::new();
+    let media = media::Media::start();
+    // Text-field focus (AT-SPI) for the keyboard pop-up; only started when wanted.
+    let mut a11y: Option<a11y::A11y> = if ov_cfg.keyboard_auto { Some(a11y::A11y::start()) } else { None };
+    let mut text_focus_last: Option<Instant> = None;
+    // A second laser-coloured swapchain for the docking marker (filled once).
+    let mut marker = make_laser(&session, format)?;
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -384,6 +516,10 @@ fn run() -> Result<()> {
     let grab_action = action_set.create_action::<f32>("grab", "Grab", &[left_path, right_path])?;
     let scroll_action = action_set.create_action::<xr::Vector2f>("scroll", "Scroll", &[left_path, right_path])?;
     let system_action = action_set.create_action::<bool>("recenter", "Recenter panel", &[left_path, right_path])?;
+    // Desktop viewer: A = right-click on a mirrored screen.
+    let secondary_action = action_set.create_action::<bool>("secondary", "Secondary click", &[left_path, right_path])?;
+    // B = a click that never drags (the cursor is frozen while held).
+    let precise_action = action_set.create_action::<bool>("precise", "Precise click", &[left_path, right_path])?;
     let haptic_action = action_set.create_action::<xr::Haptic>("haptic", "Haptic tick", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
     xr_instance.suggest_interaction_profile_bindings(
@@ -399,6 +535,10 @@ fn run() -> Result<()> {
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
             // Summon/dismiss is the LEFT system (menu) click only.
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
+            xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
+            xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
+            xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/left/input/b/click")?),
+            xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/right/input/b/click")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
         ],
@@ -412,7 +552,71 @@ fn run() -> Result<()> {
     let art = games::ArtLoader::new();
     // libmonado link: running-game detection, recenter, input arbitration.
     let monado = monado::MonadoLink::new();
-    let ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
+    // Desktop viewer (WayVR-style screen mirror): GPU caps + portal token.
+    let desktop_caps = desktop::dmabuf::Caps::query(&vk_instance, physical_device, dmabuf_ok, format);
+    let desktop_importer = desktop_caps
+        .dmabuf
+        .then(|| desktop::dmabuf::Importer::new(&vk_instance, &device, queue_family_index, format));
+    let mut desktop = desktop::DesktopViewer::new(
+        desktop_caps,
+        desktop_importer,
+        ov_cfg.screencast_token.clone(),
+        ov_cfg.screen_order.clone(),
+    );
+    // The VR keyboard's own panel (egui) — drawn on demand, docks under screens.
+    let kb_px = desktop::keyboard::panel_px();
+    let mut kb_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        kb_px, desktop::keyboard::size_m(), anchor,
+    )?;
+    desktop.set_width(ov_cfg.screen_width_m);
+    desktop.caps.curved = curved;
+    desktop.caps.color_scale = color_scale;
+    desktop.gaze_pause = ov_cfg.gaze_pause;
+    desktop.set_capture_limits(ov_cfg.capture_max_fps, ov_cfg.capture_max_height);
+    let mut watch_offset = ov_cfg.watch_offset.map(arr_to_pose).unwrap_or(watch_default);
+    watch_scale = ov_cfg.watch_scale.clamp(0.5, 2.0);
+    // Watch time zones (bad names are skipped with a warning).
+    let watch_zones: Vec<(String, chrono_tz::Tz)> = ov_cfg
+        .watch_timezones
+        .iter()
+        .filter_map(|n| match n.parse::<chrono_tz::Tz>() {
+            Ok(tz) => Some((n.rsplit('/').next().unwrap_or(n).replace('_', " "), tz)),
+            Err(_) => {
+                log::warn!("watch: unknown time zone '{n}'");
+                None
+            }
+        })
+        .collect();
+    desktop.keyboard.scale = ov_cfg.keyboard_scale.clamp(0.5, 2.0);
+    log::info!("desktop: curved={curved} opacity={color_scale}");
+    let mut screencast_token = ov_cfg.screencast_token.clone();
+    let mut sky = if equirect {
+        Some(sky::Sky::load(ov_cfg.skybox_path.clone()))
+    } else {
+        log::warn!("runtime lacks XR_KHR_composition_layer_equirect2; no 360° background");
+        None
+    };
+    // Named screen arrangements; the last used one is re-applied when the
+    // screens come up (if enabled) so nothing has to be re-placed by hand.
+    let mut layouts = monadeck_core::desktop_layouts::load();
+    // With a saved approval the portal answers silently — ask right away so the
+    // bar fills in without a click (and layouts can restore).
+    if screencast_token.is_some() {
+        desktop.setup_screens();
+    }
+    desktop.scroll_speed = ov_cfg.scroll_speed.clamp(0.25, 4.0);
+    desktop.drag_threshold_px = ov_cfg.drag_threshold_px.clamp(0.0, 60.0) as f64;
+    if ov_cfg.restore_layout {
+        if let Some(l) = layouts.last_used.clone().and_then(|n| layouts.find(&n).cloned()) {
+            log::info!("desktop: will restore layout '{}'", l.name);
+            if ov_cfg.restore_layout_hidden {
+                desktop.apply_hidden(&l);
+            } else {
+                desktop.apply(&l);
+            }
+        }
+    }
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
     let mut settings_prev = (
         ov_cfg.audio_enabled,
@@ -426,6 +630,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px))),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -468,6 +673,49 @@ fn run() -> Result<()> {
     st.playspace_yaw = ov_cfg.playspace_yaw;
     st.uevr_delay = ov_cfg.uevr_delay;
     st.freeze_delay_secs = ov_cfg.freeze_delay_secs;
+    st.screen_width_m = ov_cfg.screen_width_m;
+    st.restore_layout = ov_cfg.restore_layout;
+    st.restore_layout_hidden = ov_cfg.restore_layout_hidden;
+    st.scroll_speed = ov_cfg.scroll_speed.clamp(0.25, 4.0);
+    st.drag_threshold_px = ov_cfg.drag_threshold_px.clamp(0.0, 60.0);
+    st.gaze_pause = ov_cfg.gaze_pause;
+    st.recenter_on_toggle = ov_cfg.recenter_on_toggle;
+    st.screen_restore_tilt = ov_cfg.screen_restore_tilt;
+    desktop.restore_tilt = ov_cfg.screen_restore_tilt;
+    st.capture_max_fps = ov_cfg.capture_max_fps;
+    st.capture_max_height = ov_cfg.capture_max_height;
+    st.skybox_enabled = ov_cfg.skybox_enabled;
+    st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
+    st.gesture_enabled = gestures.enabled;
+    st.gesture_hold_ms = gestures.hold_ms as f32;
+    st.gesture_feedback = gestures.frame_feedback;
+    st.photo_qr_detect = ov_cfg.qr_detect;
+    st.photo_qr_autodelete = ov_cfg.qr_autodelete;
+    st.photo_skip_wrist = ov_cfg.skip_wrist_photo;
+    st.photo_skip_wrist_qr = ov_cfg.skip_wrist_qr;
+    st.photo_cleanup_days = ov_cfg.cleanup_days as f32;
+    st.photo_crop_margin = ov_cfg.crop_margin as f32;
+    st.photo_translate_ok = photos.translate_ok;
+    st.photo_share_ok = photos.share_ok;
+    st.photo_dir = photos.dir.clone();
+    st.notif_enabled = ov_cfg.notifications_enabled;
+    st.notif_xso = ov_cfg.notifications_xso;
+    st.notif_sound = ov_cfg.notifications_sound;
+    st.notif_volume = ov_cfg.notifications_volume;
+    st.watch_buttons = ov_cfg.watch_buttons.clone();
+    st.keyboard_auto = ov_cfg.keyboard_auto;
+    desktop.keyboard_auto = ov_cfg.keyboard_auto;
+    st.watch_buttons.resize(4, "keyboard".into());
+    st.notif_dbus_ok = notifications.dbus_ok;
+    st.notif_udp_ok = notifications.udp_ok;
+    let mut nav_prev = st.nav;
+    st.watch_enabled = ov_cfg.watch_enabled;
+    st.watch_24h = ov_cfg.watch_24h;
+    st.watch_locked = ov_cfg.watch_locked;
+    st.keyboard_scale = ov_cfg.keyboard_scale;
+    st.layout_active = layouts.last_used.clone();
+    st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
+            st.layout_follow = layouts.layouts.iter().map(|l| l.recenter_on_toggle).collect();
     // Hide the UEVR feature entirely if protontricks-launch isn't installed.
     st.uevr_available = monadeck_core::uevr::protontricks_available();
     // If protontricks is present, make sure the chihuahua injector is too —
@@ -500,6 +748,11 @@ fn run() -> Result<()> {
     // A freeze counting down before it applies: (client id, deadline).
     let mut pending_freeze: Option<(u32, Instant)> = None;
     let mut click_prev = false; // haptic click edge
+    // Laser fade over mirrored screens: (screen index, when the ray entered it).
+    let mut screen_laser_since: Option<(usize, Instant)> = None;
+    // Double-tap B on the LEFT controller toggles all screens (+ keyboard).
+    let mut left_b_prev = false;
+    let mut left_b_last: Option<Instant> = None;
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     // Re-scan to refresh last-played ordering when a game starts/stops.
     let mut running_app_prev: Option<String> = None;
@@ -725,17 +978,60 @@ fn run() -> Result<()> {
             battery_low_warned = false;
         }
 
+        // Incoming notifications → the toast queue (respecting the toggles).
+        for n in notifications.drain() {
+            let allowed = match n.source {
+                notifications::Source::Desktop => st.notif_enabled,
+                notifications::Source::XsOverlay => st.notif_xso,
+            };
+            if !allowed {
+                continue;
+            }
+            let title = if n.app.is_empty() || n.app == n.title { n.title.clone() } else { format!("{} · {}", n.app, n.title) };
+            notif_history.push_front((title.clone(), n.body.clone(), now));
+            notif_history.truncate(3);
+            st.notif_unseen = (st.notif_unseen + 1).min(3);
+            toast_queue.push_back((
+                ToastState { title, body: n.body, kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: n.icon, icon_tex: None },
+                n.timeout,
+            ));
+        }
+        if st.notif_test_request {
+            st.notif_test_request = false;
+            toast_queue.push_back((
+                ToastState { title: "Monadeck · Test".into(), body: "This is how a desktop or XSOverlay notification looks.".into(), kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: None, icon_tex: None },
+                5.0,
+            ));
+        }
         // Expire + render the toast on its own layer (shows even over a game).
         if toast.as_ref().map_or(false, |t| now >= t.until) {
             toast = None;
         }
+        if toast.is_none() {
+            if let Some((mut t, secs)) = toast_queue.pop_front() {
+                if let Some(h) = hmd {
+                    t.pose = mathx::toast_pose(&h, 1.3, 0.42);
+                    t.until = now + std::time::Duration::from_secs_f32(secs);
+                    if st.notif_sound && t.kind == ui::ToastKind::Notification {
+                        audio.notify(st.notif_volume);
+                    }
+                    toast = Some(t);
+                } else {
+                    toast_queue.push_front((t, secs));
+                }
+            }
+        }
         let toast_active = toast.is_some();
-        if let Some(t) = &toast {
+        if let Some(t) = &mut toast {
+            if let Some(img) = t.icon.take() {
+                t.icon_tex = Some(toast_panel.ctx.load_texture("toast-icon", img, egui::TextureOptions::LINEAR));
+            }
             toast_panel.pose = t.pose;
+            let (title, body, kind, icon_tex) = (t.title.clone(), t.body.clone(), t.kind, t.icon_tex.clone());
             render_panel(
                 &mut toast_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
                 true, None, (0.0, 0.0), start.elapsed().as_secs_f64(),
-                |ctx| ui::build_toast(ctx, &t.title, &t.body, t.kind),
+                |ctx| ui::build_toast(ctx, &title, &body, kind, icon_tex.as_ref()),
             )?;
         }
 
@@ -854,6 +1150,385 @@ fn run() -> Result<()> {
             None => st.freeze_pending = None,
         }
 
+        // --- Desktop viewer (runs hidden or not): controller state, portal,
+        // frame uploads, first placement. Screens persist while dismissed.
+        let mut hands: Vec<desktop::HandInput> = Vec::new();
+        if focused {
+            for (aim, path) in [(&aim_left, left_path), (&aim_right, right_path)] {
+                let located = locate_pose(aim, &space, time);
+                let s = scroll_action.state(&session, path)?.current_state;
+                hands.push(desktop::HandInput {
+                    active: located.is_some(),
+                    aim: located.unwrap_or(xr::Posef::IDENTITY),
+                    path,
+                    select: select_action.state(&session, path)?.current_state > 0.5,
+                    secondary: secondary_action.state(&session, path)?.current_state,
+                    precise: precise_action.state(&session, path)?.current_state,
+                    grip: grab_action.state(&session, path)?.current_state,
+                    scroll: deadzone(s.x, s.y),
+                });
+            }
+        }
+        desktop.set_local_in_stage(stage_space.as_ref().and_then(|st| locate_pose(&space, st, time)));
+        desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
+        if let Some(tok) = desktop.take_token_change() {
+            screencast_token = tok;
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+        }
+        st.keyboard_shown = desktop.keyboard_visible();
+        st.desktop_bar = desktop.bar_items();
+
+        // --- Screenshots: watch the folder, feed the wrist card ----------------
+        photos.poll(&photo_cfg, hmd.as_ref());
+        if photos.notify_pulse {
+            pulse(&session, &haptic_action, left_path, 0.4, 25);
+            audio.tab();
+        }
+        photos.wrist_textures(&watch_panel.ctx);
+        st.wrist_shot = photos.pending.get(photos.pending_idx).map(|p| ui::WristShot {
+            thumb: p.thumb.clone(),
+            qr: p.qr.clone(),
+            when: p.when.clone(),
+            idx: photos.pending_idx,
+            total: photos.pending.len(),
+        });
+        // Gallery follows the Photos page.
+        if visible && st.nav == ui::Nav::Photos {
+            photos.gallery_open();
+            photos.gallery_textures(&main_panel.ctx);
+            st.gallery_items = photos.gallery.items.clone();
+            st.gallery_page = photos.gallery.page;
+            st.gallery_pages = photos.gallery_pages();
+            st.gallery_total = photos.gallery_total();
+            st.gallery_loading = photos.gallery.loading;
+        } else if nav_prev == ui::Nav::Photos || !visible {
+            if photos.gallery_active() {
+                photos.gallery_close();
+                st.gallery_items.clear();
+            }
+        }
+        nav_prev = st.nav;
+        let gr = std::mem::take(&mut st.gallery_req);
+        if gr.open.is_some() || gr.delete.is_some() || gr.prev || gr.next || gr.refresh {
+            photos.gallery_apply(gr, hmd.as_ref());
+        }
+        // Gesture + photo settings → persist on change.
+        gestures.enabled = st.gesture_enabled;
+        gestures.hold_ms = st.gesture_hold_ms.round() as i32;
+        gestures.frame_feedback = st.gesture_feedback;
+        if gestures != gestures_prev {
+            shots::gestures::save(&gestures);
+            gestures_prev = gestures.clone();
+        }
+        let pc = photos::PhotoCfg {
+            qr_detect: st.photo_qr_detect,
+            qr_autodelete: st.photo_qr_autodelete,
+            skip_wrist_photo: st.photo_skip_wrist,
+            skip_wrist_qr: st.photo_skip_wrist_qr,
+            cleanup_days: st.photo_cleanup_days.round() as i32,
+            crop_margin: st.photo_crop_margin.round() as i32,
+        };
+        if pc != photo_cfg {
+            photo_cfg = pc;
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+        }
+
+        // --- 360° background: upload once, show only while no game runs ------
+        if let Some(s) = &mut sky {
+            if let Err(e) = s.poll(&session, &device, &allocator, format, cmd, queue, fence) {
+                log::error!("sky: {e}");
+                sky = None;
+            }
+        }
+        let show_sky = st.skybox_enabled && running.is_none();
+        let sky_layer = if show_sky { sky.as_ref().and_then(|s| s.layer(&space)) } else { None };
+
+        // Text-field focus → keyboard pop-up (debounced; starts the listener on demand).
+        if st.keyboard_auto && a11y.is_none() {
+            a11y = Some(a11y::A11y::start());
+        }
+        if let Some(a) = &a11y {
+            for ev in a.drain() {
+                if ev.editable && st.keyboard_auto {
+                    let recent = text_focus_last.is_some_and(|t| t.elapsed().as_millis() < 800);
+                    text_focus_last = Some(Instant::now());
+                    if !recent {
+                        log::info!("a11y: text field focused ({} / {}) → keyboard", ev.role, ev.app);
+                        desktop.keyboard_popup();
+                    }
+                }
+            }
+        }
+        desktop.keyboard_auto = st.keyboard_auto;
+        // History ages + media state for the watch.
+        if st.notif_clear_request {
+            st.notif_clear_request = false;
+            notif_history.clear();
+            st.notif_unseen = 0;
+        }
+        st.notif_history = notif_history
+            .iter()
+            .map(|(t, b, at)| {
+                let s = at.elapsed().as_secs();
+                let age = if s < 60 { "now".to_string() } else if s < 3600 { format!("{} min", s / 60) } else { format!("{} h", s / 3600) };
+                (t.clone(), b.clone(), age)
+            })
+            .collect();
+        st.media = media.state();
+        if let Some(cmd) = st.media_request.take() {
+            media.send(cmd);
+        }
+        if st.screenshot_request {
+            st.screenshot_request = false;
+            // The fork's compositor takes a screenshot on SIGUSR1.
+            match std::process::Command::new("pkill").args(["-USR1", "-x", "monado-service"]).status() {
+                Ok(s) if s.success() => log::info!("screenshot requested (SIGUSR1)"),
+                Ok(_) => log::warn!("screenshot: monado-service not found"),
+                Err(e) => log::warn!("screenshot: pkill: {e}"),
+            }
+        }
+        if st.screens_toggle_request {
+            st.screens_toggle_request = false;
+            match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
+                desktop::ToggleAll::Nothing => {
+                    if let Some(h) = hmd {
+                        let mut t = make_toast("No screen selected", "Show screens from the watch or the bottom bar", ui::ToastKind::Info, &h);
+                        t.until = Instant::now() + std::time::Duration::from_millis(1500);
+                        toast = Some(t);
+                    }
+                }
+                _ => audio.tab(),
+            }
+        }
+        if let Some(slot) = st.watch_button_cycle.take() {
+            if let Some(cur) = st.watch_buttons.get_mut(slot) {
+                let i = ui::WATCH_BUTTON_IDS.iter().position(|id| id == cur).unwrap_or(0);
+                *cur = ui::WATCH_BUTTON_IDS[(i + 1) % ui::WATCH_BUTTON_IDS.len()].to_string();
+            }
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+        }
+        if st.watch_photos_request {
+            st.watch_photos_request = false;
+            st.nav = ui::Nav::Photos;
+            st.show_splash = false;
+            if !visible {
+                visible = true;
+                recenter = true;
+                summon_at = Some(Instant::now());
+            }
+        }
+
+        // --- Wrist watch (left controller; runs hidden or not) ------------------
+        let tfmt = if st.watch_24h { "%H:%M" } else { "%-I:%M %p" };
+        st.clock = chrono::Local::now().format(tfmt).to_string();
+        st.watch_date = chrono::Local::now().format("%a %d/%m/%y").to_string();
+        let utc = chrono::Utc::now();
+        let zfmt = if st.watch_24h { "%H:%M" } else { "%-I:%M %p" };
+        st.watch_times = watch_zones.iter().map(|(l, tz)| (l.clone(), utc.with_timezone(tz).format(zfmt).to_string())).collect();
+        if st.watch_reset_request {
+            st.watch_reset_request = false;
+            watch_offset = watch_default;
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+        }
+        st.watch_freeze_client = running.as_ref().and_then(|app| {
+            st.monado_clients.iter().find(|c| name_matches(&c.name, app)).map(|c| (c.id, c.frozen))
+        });
+        let left_aim_pose = locate_pose(&aim_left, &space, time);
+        let right_hand = hands.get(1).filter(|h| h.active);
+        // Repositioning: while gripped by the right hand the watch follows it;
+        // on release the new left-hand-relative offset is remembered.
+        let mut watch_pose = if st.watch_enabled { left_aim_pose.map(|p| pose_compose(&p, &watch_offset)) } else { None };
+        watch_panel.size_m = (WATCH_W * watch_scale, WATCH_W * watch_scale * WATCH_PX.1 as f32 / WATCH_PX.0 as f32);
+        if let Some((off, last)) = watch_grab {
+            match right_hand {
+                Some(h) if h.grip >= GRAB_RELEASE => {
+                    if h.select {
+                        // Trigger while gripping: push/pull resizes, position holds.
+                        let d = hmd.map_or(0.0, |m| {
+                            let dx = h.aim.position.x - m.position.x;
+                            let dy = h.aim.position.y - m.position.y;
+                            let dz = h.aim.position.z - m.position.z;
+                            (dx * dx + dy * dy + dz * dz).sqrt()
+                        });
+                        match watch_resize_ref {
+                            None => watch_resize_ref = Some((d, watch_scale)),
+                            Some((d0, s0)) => watch_scale = (s0 * (1.0 + (d - d0) * 3.0)).clamp(0.5, 2.0),
+                        }
+                        watch_pose = Some(last);
+                        // Re-anchor so the watch doesn't jump when the trigger lets go.
+                        watch_grab = Some((pose_compose(&pose_invert(&h.aim), &last), last));
+                    } else {
+                        watch_resize_ref = None;
+                        let wp = pose_compose(&h.aim, &off);
+                        watch_pose = Some(wp);
+                        watch_grab = Some((off, wp));
+                    }
+                }
+                _ => {
+                    // Released: remember where it ended up, relative to the left hand.
+                    watch_grab = None;
+                    watch_resize_ref = None;
+                    if let Some(l) = left_aim_pose {
+                        watch_offset = pose_compose(&pose_invert(&l), &last);
+                        watch_pose = Some(last);
+                        overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+                        log::info!("watch: position/size saved");
+                    }
+                }
+            }
+        }
+        // The right hand points at the watch; it wins over everything behind it.
+        let watch_hit = match (&watch_pose, hands.get(1)) {
+            (Some(wp), Some(h)) if h.active => raycast(&h.aim, wp, watch_panel.size_m).map(|(u, v, t)| (u, v, t, h.select, h.aim)),
+            _ => None,
+        };
+        if let (Some((_, _, _, _, _)), Some(h)) = (watch_hit, right_hand) {
+            if !st.watch_locked && watch_grab.is_none() && h.grip > GRAB_START {
+                if let Some(wp) = watch_pose {
+                    watch_grab = Some((pose_compose(&pose_invert(&h.aim), &wp), wp));
+                }
+            }
+        }
+        let watch_hit = if watch_grab.is_some() { None } else { watch_hit };
+        let watch_busy = watch_hit.is_some() || watch_grab.is_some();
+        let watch_active = watch_pose.is_some();
+        if let Some(wp) = watch_pose {
+            watch_panel.pose = wp;
+            let ptr = watch_hit.map(|(u, v, _, d, _)| (u, v, d));
+            render_panel(
+                &mut watch_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
+                true, ptr, (0.0, 0.0), start.elapsed().as_secs_f64(),
+                |ctx| ui::build_watch(ctx, &mut st),
+            )?;
+        }
+        let wr = std::mem::take(&mut st.wrist_req);
+        if wr.open || wr.dismiss || wr.older || wr.newer {
+            photos.wrist_apply(wr, hmd.as_ref());
+        }
+        if st.watch_menu_request {
+            st.watch_menu_request = false;
+            visible = !visible;
+            if visible {
+                recenter = true;
+                summon_at = Some(Instant::now());
+            }
+        }
+        if st.watch_timer_request {
+            st.watch_timer_request = false;
+            st.nav = ui::Nav::System;
+            st.system_tab = ui::SystemTab::Timer;
+            st.show_splash = false;
+            if !visible {
+                visible = true;
+                recenter = true;
+                summon_at = Some(Instant::now());
+            }
+        }
+        // Double-B (left): hide every shown screen / bring the same set back.
+        // Ignored while that hand is pointing at a screen (B = frozen click there).
+        let left_b = hands.first().is_some_and(|h| h.active && h.precise);
+        if left_b && !left_b_prev && desktop.pointing_hand() != Some(0) {
+            let double = left_b_last.is_some_and(|t| t.elapsed().as_millis() < 450);
+            if double {
+                left_b_last = None;
+                match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
+                    desktop::ToggleAll::Hidden(n) => {
+                        log::info!("desktop: double-B hid {n} item(s)");
+                        audio.tab();
+                    }
+                    desktop::ToggleAll::Shown(n) => {
+                        log::info!("desktop: double-B restored {n} item(s)");
+                        audio.tab();
+                    }
+                    desktop::ToggleAll::Nothing => {
+                        if let Some(h) = hmd {
+                            let mut t = make_toast("No screen selected", "Show screens from the watch or the bottom bar", ui::ToastKind::Info, &h);
+                            t.until = Instant::now() + std::time::Duration::from_millis(1500);
+                            toast = Some(t);
+                        }
+                    }
+                }
+            } else {
+                left_b_last = Some(Instant::now());
+            }
+        }
+        left_b_prev = left_b;
+
+        // Watch buttons must work with the dashboard dismissed, so these
+        // requests drain here rather than in the visible-only path below.
+        if st.keyboard_toggle_request {
+            st.keyboard_toggle_request = false;
+            desktop.toggle_keyboard();
+        }
+        if let Some(i) = st.desktop_bar_toggle.take() {
+            desktop.toggle_bar(i);
+        }
+        if st.recenter_playspace_request {
+            st.recenter_playspace_request = false;
+            monado.recenter();
+        }
+        if st.sound_tab {
+            st.sound_tab = false;
+            audio.tab();
+        }
+        if st.sound_select {
+            st.sound_select = false;
+            audio.select();
+        }
+        // Desktop layouts: create / overwrite / apply / delete.
+        let mut layouts_dirty = false;
+        if let Some(name) = st.layout_create.take() {
+            layouts.upsert(desktop.snapshot(name.clone()));
+            layouts.last_used = Some(name);
+            layouts_dirty = true;
+        }
+        if let Some(i) = st.layout_overwrite.take() {
+            if let Some(name) = layouts.layouts.get(i).map(|l| l.name.clone()) {
+                let follow = layouts.layouts[i].recenter_on_toggle;
+                let mut snap = desktop.snapshot(name.clone());
+                snap.recenter_on_toggle = follow;
+                layouts.upsert(snap);
+                layouts.last_used = Some(name);
+                layouts_dirty = true;
+            }
+        }
+        if let Some(i) = st.layout_apply.take() {
+            if let Some(l) = layouts.layouts.get(i).cloned() {
+                desktop.apply(&l);
+                layouts.last_used = Some(l.name);
+                layouts_dirty = true;
+            }
+        }
+        if let Some(i) = st.layout_delete.take() {
+            layouts.remove(i);
+            layouts_dirty = true;
+        }
+        if let Some((i, name)) = st.layout_renamed.take() {
+            layouts.rename(i, name);
+            layouts_dirty = true;
+        }
+        if let Some((i, d)) = st.layout_move.take() {
+            layouts_dirty |= layouts.move_by(i, d);
+        }
+        if let Some((i, f)) = st.layout_follow_toggle.take() {
+            if let Some(l) = layouts.layouts.get_mut(i) {
+                l.recenter_on_toggle = f;
+                layouts_dirty = true;
+            }
+        }
+        if st.layout_cycle_request {
+            st.layout_cycle_request = false;
+            if !layouts.layouts.is_empty() {
+                let cur = layouts.last_used.as_ref().and_then(|n| layouts.layouts.iter().position(|l| &l.name == n));
+                let next = cur.map_or(0, |c| (c + 1) % layouts.layouts.len());
+                let l = layouts.layouts[next].clone();
+                desktop.apply(&l);
+                layouts.last_used = Some(l.name);
+                monadeck_core::desktop_layouts::save(&layouts);
+                st.layout_active = layouts.last_used.clone();
+            }
+        }
+
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
         // order is fresh on the next summon), drop input block, render only toasts.
         if !visible {
@@ -866,12 +1541,65 @@ fn run() -> Result<()> {
                     refresh_rx = None;
                 }
             }
-            if blocked_prev {
-                monado.set_block(false);
-                blocked_prev = false;
+            // Mirrored screens stay interactive while the dashboard is away.
+            let p_in = photos.update_input(&hands, watch_busy.then_some(0.0));
+            let d_in = desktop.update_input(&hands, if watch_busy { Some(0.0) } else { p_in.hit_t }, hmd.as_ref());
+            photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
+            let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
+            if let Some(g) = d_in.gesture {
+                toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None });
             }
+            let want_block = desktop.pointing() || p_in.ray.is_some();
+            if want_block != blocked_prev {
+                monado.set_block(want_block);
+                blocked_prev = want_block;
+            }
+            let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+            if desktop.keyboard.clicked {
+                audio.key();
+            }
+            let laser_alpha = screen_laser_alpha(desktop.pointing_screen(), &mut screen_laser_since);
+            let laser_q = match (d_ray, hmd) {
+                (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => {
+                    fill_laser(&mut laser, &device, cmd, queue, fence, laser_alpha)?;
+                    Some(laser_quad(&laser, &space, &aim, t, &h))
+                }
+                _ => None,
+            };
+            let laser2_q = match (d_in.secondary_ray, hmd) {
+                (Some((aim, t)), Some(h)) => {
+                    fill_laser(&mut laser2, &device, cmd, queue, fence, 0.8)?;
+                    Some(laser_quad(&laser2, &space, &aim, t, &h))
+                }
+                _ => None,
+            };
+            if let Some((_, _, _, _, near)) = &d_in.dock_hint {
+                fill_laser(&mut marker, &device, cmd, queue, fence, if *near { 0.95 } else { 0.35 })?;
+            }
+            let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
+            let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
+            let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+            if let Some(s) = &sky_layer {
+                layers.push(s);
+            }
+            for q in &screen_quads {
+                layers.push(q);
+            }
+            for c in &screen_cyls {
+                layers.push(c);
+            }
+            if let Some(q) = &dock_q {
+                layers.push(q);
+            }
+            if let Some(q) = &kb_q {
+                layers.push(q);
+            }
+            let photo_qs = photos.layers(&space);
+            for q in &photo_qs {
+                layers.push(q);
+            }
             if popup_active {
                 popup_q = quad_layer(&launch_panel, &space, true);
                 layers.push(&popup_q);
@@ -879,6 +1607,15 @@ fn run() -> Result<()> {
             if toast_active {
                 toast_q = quad_layer(&toast_panel, &space, true);
                 layers.push(&toast_q);
+            }
+            if let Some(q) = &watch_q {
+                layers.push(q);
+            }
+            if let Some(q) = &laser_q {
+                layers.push(q);
+            }
+            if let Some(q) = &laser2_q {
+                layers.push(q);
             }
             frame_stream.end(time, blend_mode, &layers)?;
             continue;
@@ -938,6 +1675,7 @@ fn run() -> Result<()> {
         // --- Input: laser hit-test across the 3 panels + grip-to-move --------
         let mut best: Option<Hit> = None;
         let mut scroll = (0.0f32, 0.0f32);
+        let mut dash_zone = false;
         if focused {
             // Continue an in-progress grab — moves the whole layout anchor.
             if let Some((hand_i, offset)) = grab {
@@ -967,6 +1705,16 @@ fn run() -> Result<()> {
                         ]
                     };
                     let pointing = candidates.iter().any(|(_, h)| h.is_some());
+                    // The whole dashboard band (panels + the gaps between them) is
+                    // dashboard territory: nothing behind it gets the ray.
+                    let zone_w = main_w + 2.0 * (gap_m + rail_w);
+                    let zone_h = main_h + 2.0 * (gap_m + bottom_h);
+                    let in_zone = if curved {
+                        raycast_cylinder(&p, &main_l.pose, main_l.radius, (zone_w / main_l.radius).min(std::f32::consts::PI * 0.95), zone_h).is_some()
+                    } else {
+                        raycast(&p, &main_panel.pose, (zone_w, zone_h)).is_some()
+                    };
+                    dash_zone |= in_zone;
                     // Grip while pointing at any panel grabs the whole layout.
                     let grip = grab_action.state(&session, path)?.current_state;
                     if grip > GRAB_START && pointing {
@@ -993,13 +1741,51 @@ fn run() -> Result<()> {
             }
         }
 
+        // Mirrored screens: one closer than the dashboard takes the pointer. Not
+        // while a dashboard grab is in progress (the grip would grab both).
+        // The dashboard is always composited over the screens, so when the ray
+        // hits it, it wins outright (max_t = 0 hides everything behind it).
+        if watch_busy {
+            best = None;
+            scroll = (0.0, 0.0);
+        }
+        let block = best.is_some() || dash_zone || watch_busy;
+        let p_in = if grab.is_some() { photos.update_input(&[], None) } else { photos.update_input(&hands, block.then_some(0.0)) };
+        let d_in = if grab.is_some() {
+            desktop.update_input(&[], None, hmd.as_ref())
+        } else {
+            desktop.update_input(&hands, if block { Some(0.0) } else { p_in.hit_t }, hmd.as_ref())
+        };
+        photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
+        let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
+        if let Some(g) = d_in.gesture {
+            toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None });
+        }
+        if d_ray.is_some() {
+            best = None;
+            scroll = (0.0, 0.0);
+        }
+        let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+        if desktop.keyboard.clicked {
+            audio.key();
+        }
+        // Feed the Desktop page.
+        st.desktop_rows = desktop.rows();
+        st.desktop_status = desktop.status();
+        st.desktop_hid_error = desktop.hid_error.clone();
+        st.desktop_dmabuf = desktop.caps.dmabuf;
+        st.desktop_shown = desktop.shown_count();
+        st.desktop_ready = desktop.portal_ready();
+        st.desktop_pending = desktop.portal_pending();
+        st.keyboard_layout = desktop.keyboard.labels.layout_name();
+
         let main_ptr = best.filter(|h| h.panel == PanelId::Main).map(|h| (h.u, h.v, h.down));
         let rail_ptr = best.filter(|h| h.panel == PanelId::Rail).map(|h| (h.u, h.v, h.down));
         let bottom_ptr = best.filter(|h| h.panel == PanelId::Bottom).map(|h| (h.u, h.v, h.down));
-        let laser_ray = best.map(|h| (h.aim, h.t));
+        let laser_ray = best.map(|h| (h.aim, h.t)).or(d_ray);
 
         // Block the game's controller input while pointing at the dashboard.
-        let want_block = best.is_some();
+        let want_block = best.is_some() || desktop.pointing() || p_in.ray.is_some();
         if want_block != blocked_prev {
             monado.set_block(want_block);
             blocked_prev = want_block;
@@ -1093,8 +1879,15 @@ fn run() -> Result<()> {
         }
         hover_prev = st.hovered_index;
 
-        if laser_ray.is_some() {
-            fill_laser(&mut laser, &device, cmd, queue, fence)?;
+        // Full laser on the dashboard; on a mirrored screen it fades out after entry.
+        let laser_alpha = if best.is_some() {
+            screen_laser_since = None;
+            1.0
+        } else {
+            screen_laser_alpha(desktop.pointing_screen(), &mut screen_laser_since)
+        };
+        if laser_ray.is_some() && laser_alpha > 0.0 {
+            fill_laser(&mut laser, &device, cmd, queue, fence, laser_alpha)?;
         }
 
         // All three panels as curved cylinder segments (rail + bottom alpha so
@@ -1103,10 +1896,42 @@ fn run() -> Result<()> {
         let (main_cyl, rail_cyl, bottom_cyl);
         let (main_quad, rail_quad, bottom_quad);
         let laser_q = match (laser_ray, hmd) {
-            (Some((aim, t)), Some(h)) => Some(laser_quad(&laser, &space, &aim, t, &h)),
+            (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => Some(laser_quad(&laser, &space, &aim, t, &h)),
             _ => None,
         };
+        let laser2_q = match (d_in.secondary_ray, hmd) {
+            (Some((aim, t)), Some(h)) => {
+                fill_laser(&mut laser2, &device, cmd, queue, fence, 0.8)?;
+                Some(laser_quad(&laser2, &space, &aim, t, &h))
+            }
+            _ => None,
+        };
+        if let Some((_, _, _, _, near)) = &d_in.dock_hint {
+            fill_laser(&mut marker, &device, cmd, queue, fence, if *near { 0.95 } else { 0.35 })?;
+        }
+        let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
+        let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+        if let Some(s) = &sky_layer {
+            layers.push(s);
+        }
+        // Screens first: they sit behind the dashboard in the composite.
+        for q in &screen_quads {
+            layers.push(q);
+        }
+        for c in &screen_cyls {
+            layers.push(c);
+        }
+        if let Some(q) = &dock_q {
+            layers.push(q);
+        }
+        if let Some(q) = &kb_q {
+            layers.push(q);
+        }
+        let photo_qs = photos.layers(&space);
+        for q in &photo_qs {
+            layers.push(q);
+        }
         if curved {
             main_cyl = cylinder_layer(&main_panel, &space, &main_l, false);
             rail_cyl = cylinder_layer(&rail_panel, &space, &rail_l, true);
@@ -1131,7 +1956,14 @@ fn run() -> Result<()> {
             toast_q = quad_layer(&toast_panel, &space, true);
             layers.push(&toast_q);
         }
+        let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
+        if let Some(q) = &watch_q {
+            layers.push(q);
+        }
         if let Some(q) = &laser_q {
+            layers.push(q);
+        }
+        if let Some(q) = &laser2_q {
             layers.push(q);
         }
         frame_stream.end(time, blend_mode, &layers)?;
@@ -1236,26 +2068,20 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px))),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
             audio.set_volume(st.audio_volume);
+            desktop.set_width(st.screen_width_m);
+            desktop.gaze_pause = st.gaze_pause;
+            desktop.restore_tilt = st.screen_restore_tilt;
+            desktop.set_capture_limits(st.capture_max_fps, st.capture_max_height);
+            desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
+            desktop.scroll_speed = st.scroll_speed;
+            desktop.drag_threshold_px = st.drag_threshold_px as f64;
             settings_prev = settings_now;
-            monadeck_core::overlay_config::OverlayConfig {
-                audio_enabled: st.audio_enabled,
-                audio_volume: st.audio_volume,
-                summon_tilt: st.summon_tilt,
-                panel_dist: st.panel_dist,
-                panel_scale: st.panel_scale,
-                panel_curve: st.panel_curve,
-                playspace_x: st.playspace_x,
-                playspace_y: st.playspace_y,
-                playspace_z: st.playspace_z,
-                playspace_yaw: st.playspace_yaw,
-                uevr_delay: st.uevr_delay,
-                freeze_delay_secs: st.freeze_delay_secs,
-            }
-            .save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
         // effective offset is pushed to libmonado at the top of the loop (which
@@ -1349,9 +2175,29 @@ fn run() -> Result<()> {
             st.recenter_request = false;
             recenter = true;
         }
-        if st.recenter_playspace_request {
-            st.recenter_playspace_request = false;
-            monado.recenter();
+        // Desktop page + bottom bar actions.
+        if st.desktop_setup_request {
+            st.desktop_setup_request = false;
+            desktop.setup_screens();
+        }
+        if st.desktop_reselect_request {
+            st.desktop_reselect_request = false;
+            desktop.reselect();
+        }
+        if let Some((i, d)) = st.desktop_move_request.take() {
+            if desktop.move_order(i, d) {
+                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+            }
+        }
+        if let Some((i, o)) = st.desktop_opacity_request.take() {
+            desktop.set_screen_opacity(i, o);
+        }
+
+        if layouts_dirty {
+            monadeck_core::desktop_layouts::save(&layouts);
+            st.layout_active = layouts.last_used.clone();
+            st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
+            st.layout_follow = layouts.layouts.iter().map(|l| l.recenter_on_toggle).collect();
         }
         if let Some(id) = st.set_active_request.take() {
             monado.set_primary(id);
@@ -1359,6 +2205,133 @@ fn run() -> Result<()> {
         if let Some(name) = st.kill_request.take() {
             stop_game(&name);
         }
+    }
+}
+
+/// Laser opacity over a mirrored screen: full when the ray enters, gone after
+/// `SCREEN_LASER_FADE` seconds, so it shows where you landed without covering
+/// the desktop. Leaving (or switching screens) resets the fade.
+const SCREEN_LASER_FADE: f32 = 2.0;
+fn screen_laser_alpha(screen: Option<usize>, since: &mut Option<(usize, Instant)>) -> f32 {
+    match screen {
+        None => {
+            *since = None;
+            1.0
+        }
+        Some(s) => {
+            let entered = match *since {
+                Some((prev, t)) if prev == s => t,
+                _ => {
+                    let now = Instant::now();
+                    *since = Some((s, now));
+                    now
+                }
+            };
+            (1.0 - entered.elapsed().as_secs_f32() / SCREEN_LASER_FADE).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// Render the VR keyboard onto its panel (when visible) and build its layer.
+#[allow(clippy::too_many_arguments)]
+fn render_keyboard<'a>(
+    desktop: &mut desktop::DesktopViewer,
+    panel: &'a mut gfx::PanelGfx,
+    pointer: Option<(f32, f32, bool)>,
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    cmd: vk::CommandBuffer,
+    cmd_pool: vk::CommandPool,
+    queue: vk::Queue,
+    fence: vk::Fence,
+    elapsed: f64,
+    space: &'a xr::Space,
+) -> Result<Option<xr::CompositionLayerQuad<'a, xr::Vulkan>>> {
+    if !desktop.keyboard.visible || !desktop.keyboard.placed {
+        desktop.keyboard.clicked = false;
+        return Ok(None);
+    }
+    panel.pose = desktop.keyboard.pose;
+    panel.size_m = desktop::keyboard::size_m_scaled(desktop.keyboard.scale);
+    let kb = &mut desktop.keyboard;
+    render_panel(panel, device, render_pass, cmd, cmd_pool, queue, fence, true, pointer, (0.0, 0.0), elapsed, |ctx| {
+        desktop::keyboard::build(ctx, kb)
+    })?;
+    desktop.flush_keyboard();
+    if !desktop.keyboard.visible {
+        return Ok(None);
+    }
+    Ok(Some(quad_layer(panel, space, true)))
+}
+
+/// The persisted overlay preferences, from live UI state.
+fn pose_to_arr(p: &xr::Posef) -> [f32; 7] {
+    [p.position.x, p.position.y, p.position.z, p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w]
+}
+
+fn arr_to_pose(a: [f32; 7]) -> xr::Posef {
+    xr::Posef {
+        position: xr::Vector3f { x: a[0], y: a[1], z: a[2] },
+        orientation: xr::Quaternionf { x: a[3], y: a[4], z: a[5], w: a[6] },
+    }
+}
+
+fn overlay_config_from(
+    st: &ui::LibState,
+    screencast_token: &Option<String>,
+    screen_order: &[String],
+    watch_timezones: &[String],
+    watch_offset: Option<[f32; 7]>,
+    skybox_path: &Option<String>,
+    watch_scale: f32,
+) -> monadeck_core::overlay_config::OverlayConfig {
+    monadeck_core::overlay_config::OverlayConfig {
+        audio_enabled: st.audio_enabled,
+        audio_volume: st.audio_volume,
+        summon_tilt: st.summon_tilt,
+        panel_dist: st.panel_dist,
+        panel_scale: st.panel_scale,
+        panel_curve: st.panel_curve,
+        playspace_x: st.playspace_x,
+        playspace_y: st.playspace_y,
+        playspace_z: st.playspace_z,
+        playspace_yaw: st.playspace_yaw,
+        uevr_delay: st.uevr_delay,
+        freeze_delay_secs: st.freeze_delay_secs,
+        screencast_token: screencast_token.clone(),
+        screen_width_m: st.screen_width_m,
+        screen_order: screen_order.to_vec(),
+        restore_layout: st.restore_layout,
+        restore_layout_hidden: st.restore_layout_hidden,
+        scroll_speed: st.scroll_speed,
+        drag_threshold_px: st.drag_threshold_px,
+        watch_enabled: st.watch_enabled,
+        watch_timezones: watch_timezones.to_vec(),
+        watch_24h: st.watch_24h,
+        watch_locked: st.watch_locked,
+        watch_offset,
+        watch_scale,
+        gaze_pause: st.gaze_pause,
+        recenter_on_toggle: st.recenter_on_toggle,
+        screen_restore_tilt: st.screen_restore_tilt,
+        keyboard_scale: st.keyboard_scale,
+        capture_max_fps: st.capture_max_fps,
+        capture_max_height: st.capture_max_height,
+        skybox_enabled: st.skybox_enabled,
+        skybox_path: skybox_path.clone(),
+        qr_detect: st.photo_qr_detect,
+        qr_autodelete: st.photo_qr_autodelete,
+        skip_wrist_photo: st.photo_skip_wrist,
+        skip_wrist_qr: st.photo_skip_wrist_qr,
+        cleanup_days: st.photo_cleanup_days.round() as i32,
+        crop_margin: st.photo_crop_margin.round() as i32,
+        photos_settings_imported: true,
+        notifications_enabled: st.notif_enabled,
+        notifications_xso: st.notif_xso,
+        notifications_sound: st.notif_sound,
+        notifications_volume: st.notif_volume,
+        watch_buttons: st.watch_buttons.clone(),
+        keyboard_auto: st.keyboard_auto,
     }
 }
 
