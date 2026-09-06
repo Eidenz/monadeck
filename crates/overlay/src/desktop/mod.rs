@@ -111,6 +111,8 @@ pub struct InputOut {
     /// A gripped screen would dock here on release: (marker pose at the target's
     /// edge, marker height, target name, side, within snap distance).
     pub dock_hint: Option<(xr::Posef, f32, String, i8, bool)>,
+    /// The other hand's ray onto the keyboard (dual typing gets its own laser).
+    pub secondary_ray: Option<(xr::Posef, f32)>,
 }
 
 enum PortalState {
@@ -1404,8 +1406,9 @@ impl DesktopViewer {
                 if Some(hi) == primary || self.keyboard.grab.is_some() {
                     continue;
                 }
-                if h.select && !self.select_prev[hi] {
-                    if let Some((u, v, _)) = raycast(&h.aim, &self.keyboard.pose, kb_size) {
+                if let Some((u, v, t)) = raycast(&h.aim, &self.keyboard.pose, kb_size) {
+                    out.secondary_ray = Some((h.aim, t));
+                    if h.select && !self.select_prev[hi] {
                         if let Some(k) = self.keyboard.key_at(u, v) {
                             self.keyboard.press(k);
                         }

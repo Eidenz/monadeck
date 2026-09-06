@@ -460,6 +460,11 @@ fn run() -> Result<()> {
     };
     // (right-hand grab offset, last gripped pose) while the watch is being repositioned.
     let mut watch_grab: Option<(xr::Posef, xr::Posef)> = None;
+    let mut watch_scale: f32;
+    // Resize gesture (grip + trigger + push/pull): (hand→head distance, scale) at start.
+    let mut watch_resize_ref: Option<(f32, f32)> = None;
+    // A second laser for the other hand while it types.
+    let mut laser2 = make_laser(&session, format)?;
     // Screenshots (monado-frame, folded in): watcher, wrist queue, photo windows, gallery.
     let mut ov_cfg = monadeck_core::overlay_config::OverlayConfig::load();
     if !ov_cfg.photos_settings_imported {
@@ -570,6 +575,7 @@ fn run() -> Result<()> {
     desktop.gaze_pause = ov_cfg.gaze_pause;
     desktop.set_capture_limits(ov_cfg.capture_max_fps, ov_cfg.capture_max_height);
     let mut watch_offset = ov_cfg.watch_offset.map(arr_to_pose).unwrap_or(watch_default);
+    watch_scale = ov_cfg.watch_scale.clamp(0.5, 2.0);
     // Watch time zones (bad names are skipped with a warning).
     let watch_zones: Vec<(String, chrono_tz::Tz)> = ov_cfg
         .watch_timezones
@@ -1158,7 +1164,7 @@ fn run() -> Result<()> {
         desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
         if let Some(tok) = desktop.take_token_change() {
             screencast_token = tok;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
         st.keyboard_shown = desktop.keyboard_visible();
         st.desktop_bar = desktop.bar_items();
@@ -1215,7 +1221,7 @@ fn run() -> Result<()> {
         };
         if pc != photo_cfg {
             photo_cfg = pc;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
 
         // --- 360° background: upload once, show only while no game runs ------
@@ -1290,7 +1296,7 @@ fn run() -> Result<()> {
                 let i = ui::WATCH_BUTTON_IDS.iter().position(|id| id == cur).unwrap_or(0);
                 *cur = ui::WATCH_BUTTON_IDS[(i + 1) % ui::WATCH_BUTTON_IDS.len()].to_string();
             }
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
         if st.watch_photos_request {
             st.watch_photos_request = false;
@@ -1313,7 +1319,7 @@ fn run() -> Result<()> {
         if st.watch_reset_request {
             st.watch_reset_request = false;
             watch_offset = watch_default;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
         st.watch_freeze_client = running.as_ref().and_then(|app| {
             st.monado_clients.iter().find(|c| name_matches(&c.name, app)).map(|c| (c.id, c.frozen))
@@ -1323,21 +1329,41 @@ fn run() -> Result<()> {
         // Repositioning: while gripped by the right hand the watch follows it;
         // on release the new left-hand-relative offset is remembered.
         let mut watch_pose = if st.watch_enabled { left_aim_pose.map(|p| pose_compose(&p, &watch_offset)) } else { None };
+        watch_panel.size_m = (WATCH_W * watch_scale, WATCH_W * watch_scale * WATCH_PX.1 as f32 / WATCH_PX.0 as f32);
         if let Some((off, last)) = watch_grab {
             match right_hand {
                 Some(h) if h.grip >= GRAB_RELEASE => {
-                    let wp = pose_compose(&h.aim, &off);
-                    watch_pose = Some(wp);
-                    watch_grab = Some((off, wp));
+                    if h.select {
+                        // Trigger while gripping: push/pull resizes, position holds.
+                        let d = hmd.map_or(0.0, |m| {
+                            let dx = h.aim.position.x - m.position.x;
+                            let dy = h.aim.position.y - m.position.y;
+                            let dz = h.aim.position.z - m.position.z;
+                            (dx * dx + dy * dy + dz * dz).sqrt()
+                        });
+                        match watch_resize_ref {
+                            None => watch_resize_ref = Some((d, watch_scale)),
+                            Some((d0, s0)) => watch_scale = (s0 * (1.0 + (d - d0) * 3.0)).clamp(0.5, 2.0),
+                        }
+                        watch_pose = Some(last);
+                        // Re-anchor so the watch doesn't jump when the trigger lets go.
+                        watch_grab = Some((pose_compose(&pose_invert(&h.aim), &last), last));
+                    } else {
+                        watch_resize_ref = None;
+                        let wp = pose_compose(&h.aim, &off);
+                        watch_pose = Some(wp);
+                        watch_grab = Some((off, wp));
+                    }
                 }
                 _ => {
                     // Released: remember where it ended up, relative to the left hand.
                     watch_grab = None;
+                    watch_resize_ref = None;
                     if let Some(l) = left_aim_pose {
                         watch_offset = pose_compose(&pose_invert(&l), &last);
                         watch_pose = Some(last);
-                        overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
-                        log::info!("watch: position saved");
+                        overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+                        log::info!("watch: position/size saved");
                     }
                 }
             }
@@ -1531,6 +1557,13 @@ fn run() -> Result<()> {
                 }
                 _ => None,
             };
+            let laser2_q = match (d_in.secondary_ray, hmd) {
+                (Some((aim, t)), Some(h)) => {
+                    fill_laser(&mut laser2, &device, cmd, queue, fence, 0.8)?;
+                    Some(laser_quad(&laser2, &space, &aim, t, &h))
+                }
+                _ => None,
+            };
             if let Some((_, _, _, _, near)) = &d_in.dock_hint {
                 fill_laser(&mut marker, &device, cmd, queue, fence, if *near { 0.95 } else { 0.35 })?;
             }
@@ -1570,6 +1603,9 @@ fn run() -> Result<()> {
                 layers.push(q);
             }
             if let Some(q) = &laser_q {
+                layers.push(q);
+            }
+            if let Some(q) = &laser2_q {
                 layers.push(q);
             }
             frame_stream.end(time, blend_mode, &layers)?;
@@ -1854,6 +1890,13 @@ fn run() -> Result<()> {
             (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => Some(laser_quad(&laser, &space, &aim, t, &h)),
             _ => None,
         };
+        let laser2_q = match (d_in.secondary_ray, hmd) {
+            (Some((aim, t)), Some(h)) => {
+                fill_laser(&mut laser2, &device, cmd, queue, fence, 0.8)?;
+                Some(laser_quad(&laser2, &space, &aim, t, &h))
+            }
+            _ => None,
+        };
         if let Some((_, _, _, _, near)) = &d_in.dock_hint {
             fill_laser(&mut marker, &device, cmd, queue, fence, if *near { 0.95 } else { 0.35 })?;
         }
@@ -1909,6 +1952,9 @@ fn run() -> Result<()> {
             layers.push(q);
         }
         if let Some(q) = &laser_q {
+            layers.push(q);
+        }
+        if let Some(q) = &laser2_q {
             layers.push(q);
         }
         frame_stream.end(time, blend_mode, &layers)?;
@@ -2024,7 +2070,7 @@ fn run() -> Result<()> {
             desktop.set_capture_limits(st.capture_max_fps, st.capture_max_height);
             desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
             settings_prev = settings_now;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
         // effective offset is pushed to libmonado at the top of the loop (which
@@ -2129,7 +2175,7 @@ fn run() -> Result<()> {
         }
         if let Some((i, d)) = st.desktop_move_request.take() {
             if desktop.move_order(i, d) {
-                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
+                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
             }
         }
         if let Some((i, o)) = st.desktop_opacity_request.take() {
@@ -2226,6 +2272,7 @@ fn overlay_config_from(
     watch_timezones: &[String],
     watch_offset: Option<[f32; 7]>,
     skybox_path: &Option<String>,
+    watch_scale: f32,
 ) -> monadeck_core::overlay_config::OverlayConfig {
     monadeck_core::overlay_config::OverlayConfig {
         audio_enabled: st.audio_enabled,
@@ -2249,6 +2296,7 @@ fn overlay_config_from(
         watch_24h: st.watch_24h,
         watch_locked: st.watch_locked,
         watch_offset,
+        watch_scale,
         gaze_pause: st.gaze_pause,
         recenter_on_toggle: st.recenter_on_toggle,
         screen_restore_tilt: st.screen_restore_tilt,

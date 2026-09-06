@@ -49,6 +49,8 @@ pub struct OverlayConfig {
     /// Watch pose relative to the left controller's aim pose `[x,y,z,qx,qy,qz,qw]`
     /// (None = built-in default).
     pub watch_offset: Option<[f32; 7]>,
+    /// Watch size multiplier (grip + trigger + push/pull, like screens).
+    pub watch_scale: f32,
     /// Pause a screen's capture after a couple of seconds out of view.
     pub gaze_pause: bool,
     /// Double-B restore: bring screens back centred in view (one screen / one
@@ -118,6 +120,7 @@ impl Default for OverlayConfig {
             watch_24h: false,
             watch_locked: true,
             watch_offset: None,
+            watch_scale: 1.0,
             gaze_pause: true,
             recenter_on_toggle: true,
             screen_restore_tilt: false,

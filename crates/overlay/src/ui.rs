@@ -617,25 +617,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 if !st.watch_locked {
                     ui.label(egui::RichText::new("grip to move").size(11.0).color(theme::ON_SURFACE_VAR));
                 }
-                if !st.notif_history.is_empty() {
-                    let label = if st.notif_unseen > 0 { format!("{} {}", icon::BELL_RINGING, st.notif_unseen) } else { icon::BELL.to_string() };
-                    if corner(ui, label, st.watch_history_menu, st.notif_unseen > 0, "Recent notifications") {
-                        st.watch_history_menu = !st.watch_history_menu;
-                        st.watch_media_menu = false;
-                        st.watch_layout_menu = false;
-                        st.notif_unseen = 0;
-                        st.sound_tab = true;
-                    }
-                }
-                if st.media.is_some() {
-                    let playing = st.media.as_ref().is_some_and(|m| m.playing);
-                    if corner(ui, icon::MUSIC_NOTES.to_string(), st.watch_media_menu, playing, "Now playing") {
-                        st.watch_media_menu = !st.watch_media_menu;
-                        st.watch_history_menu = false;
-                        st.watch_layout_menu = false;
-                        st.sound_tab = true;
-                    }
-                }
+                let _ = &corner;
             });
         });
         // Clock + zones (or the layout picker) | quick buttons — each in its own
@@ -647,28 +629,58 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 // (the row width includes the card's own margins — keep it inside)
                 ui.set_width(if wide { row_w - 16.0 } else { 214.0 });
                 ui.set_min_height(120.0);
+                // Corner icons inside the clock card: music (toggles the player view)
+                // and the notification bell (toggles the history). Drawn at fixed
+                // rects so they never push the content around.
+                {
+                    let r = ui.max_rect();
+                    let mut x = r.right();
+                    let mut corner_btn = |ui: &mut egui::Ui, glyph: String, on: bool, hot: bool, tip: &str| -> bool {
+                        x -= 28.0;
+                        let rect = egui::Rect::from_min_size(egui::pos2(x, r.top() - 2.0), egui::vec2(26.0, 22.0));
+                        let fg = if on { egui::Color32::BLACK } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
+                        let fill = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgba_unmultiplied(150, 190, 255, 30) } else { egui::Color32::TRANSPARENT };
+                        ui.put(rect, egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(fill).corner_radius(8))
+                            .on_hover_text(tip)
+                            .clicked()
+                    };
+                    if st.media.is_some() {
+                        let playing = st.media.as_ref().is_some_and(|m| m.playing);
+                        if corner_btn(ui, icon::MUSIC_NOTES.to_string(), st.watch_media_menu, playing, "Now playing") {
+                            st.watch_media_menu = !st.watch_media_menu;
+                            st.watch_history_menu = false;
+                            st.watch_layout_menu = false;
+                            st.sound_tab = true;
+                        }
+                    } else {
+                        st.watch_media_menu = false;
+                    }
+                    if !st.notif_history.is_empty() {
+                        let label = if st.notif_unseen > 0 { format!("{}{}", icon::BELL_RINGING, st.notif_unseen) } else { icon::BELL.to_string() };
+                        if corner_btn(ui, label, st.watch_history_menu, st.notif_unseen > 0, "Recent notifications") {
+                            st.watch_history_menu = !st.watch_history_menu;
+                            st.watch_media_menu = false;
+                            st.watch_layout_menu = false;
+                            st.notif_unseen = 0;
+                            st.sound_tab = true;
+                        }
+                    }
+                }
                 if st.watch_media_menu {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("{}  Now playing", icon::MUSIC_NOTES)).size(14.0).strong().color(egui::Color32::WHITE));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(egui::RichText::new(icon::X).size(13.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
-                                st.watch_media_menu = false;
-                            }
-                        });
-                    });
                     match &st.media {
                         Some(m) => {
-                            let title: String = if m.title.chars().count() > 34 { format!("{}…", m.title.chars().take(33).collect::<String>()) } else { m.title.clone() };
-                            ui.label(egui::RichText::new(if title.is_empty() { m.player.clone() } else { title }).size(14.0).color(egui::Color32::WHITE));
-                            let sub = if m.artist.is_empty() { m.player.clone() } else { format!("{} · {}", m.artist, m.player) };
-                            let sub: String = if sub.chars().count() > 40 { format!("{}…", sub.chars().take(39).collect::<String>()) } else { sub };
-                            ui.label(egui::RichText::new(sub).size(11.0).color(theme::ON_SURFACE_VAR));
                             ui.add_space(4.0);
-                            let b = 40.0;
+                            let title: String = if m.title.chars().count() > 24 { format!("{}…", m.title.chars().take(23).collect::<String>()) } else { m.title.clone() };
+                            ui.label(egui::RichText::new(if title.is_empty() { m.player.clone() } else { title }).size(16.0).strong().color(egui::Color32::WHITE));
+                            let sub = if m.artist.is_empty() { m.player.clone() } else { format!("{} · {}", m.artist, m.player) };
+                            let sub: String = if sub.chars().count() > 34 { format!("{}…", sub.chars().take(33).collect::<String>()) } else { sub };
+                            ui.label(egui::RichText::new(sub).size(11.0).color(theme::ON_SURFACE_VAR));
+                            ui.add_space(6.0);
+                            let b = 44.0;
                             centered_row(ui, b * 3.0 + 12.0, |ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
                                 let tb = |ui: &mut egui::Ui, g: &str, tip: &str| -> bool {
-                                    ui.add(egui::Button::new(egui::RichText::new(g).size(18.0).color(theme::ON_SURFACE)).fill(theme::SURFACE_CONTAINER_HIGH).min_size(egui::vec2(b, 34.0)))
+                                    ui.add(egui::Button::new(egui::RichText::new(g).size(18.0).color(theme::ON_SURFACE)).fill(theme::SURFACE_CONTAINER_HIGH).min_size(egui::vec2(b, 36.0)))
                                         .on_hover_text(tip)
                                         .clicked()
                                 };
@@ -797,7 +809,8 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         });
         // Menu + screens (fixed numbering, same as the bottom bar), in a card.
         watch_card(ui, |ui| {
-            ui.set_width(ui.available_width() - 16.0);
+            // (inside the frame, available width already excludes the margins)
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let menu = egui::Button::new(egui::RichText::new(icon::LIST).size(22.0).color(theme::ON_SURFACE))
                     .fill(theme::SURFACE_CONTAINER_HIGH)
