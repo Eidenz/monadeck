@@ -501,7 +501,6 @@ fn run() -> Result<()> {
     let mut text_focus_last: Option<Instant> = None;
     // A second laser-coloured swapchain for the docking marker (filled once).
     let mut marker = make_laser(&session, format)?;
-    fill_laser(&mut marker, &device, cmd, queue, fence, 0.85)?;
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -1532,7 +1531,10 @@ fn run() -> Result<()> {
                 }
                 _ => None,
             };
-            let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
+            if let Some((_, _, _, _, near)) = &d_in.dock_hint {
+                fill_laser(&mut marker, &device, cmd, queue, fence, if *near { 0.95 } else { 0.35 })?;
+            }
+            let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
             let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
             let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
             let (toast_q, popup_q);
@@ -1852,7 +1854,10 @@ fn run() -> Result<()> {
             (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => Some(laser_quad(&laser, &space, &aim, t, &h)),
             _ => None,
         };
-        let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
+        if let Some((_, _, _, _, near)) = &d_in.dock_hint {
+            fill_laser(&mut marker, &device, cmd, queue, fence, if *near { 0.95 } else { 0.35 })?;
+        }
+        let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
         let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
         if let Some(s) = &sky_layer {

@@ -131,6 +131,7 @@ pub struct LibState {
     pub notif_history: Vec<(String, String, String)>,
     pub notif_unseen: usize,
     pub watch_history_menu: bool,
+    pub watch_media_menu: bool,
     pub notif_clear_request: bool,
     // Media (MPRIS).
     pub media: Option<crate::media::MediaState>,
@@ -334,6 +335,7 @@ impl LibState {
             notif_history: Vec::new(),
             notif_unseen: 0,
             watch_history_menu: false,
+            watch_media_menu: false,
             notif_clear_request: false,
             media: None,
             media_request: None,
@@ -589,22 +591,16 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     st.sound_tab = true;
                 }
             }
-            // Notification history: bell with the unseen count; tap to list the last few.
-            if !st.notif_history.is_empty() {
-                let label = if st.notif_unseen > 0 { format!("{} {}", icon::BELL_RINGING, st.notif_unseen) } else { icon::BELL.to_string() };
-                let on = st.watch_history_menu;
-                let fg = if on { egui::Color32::BLACK } else if st.notif_unseen > 0 { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
-                let btn = egui::Button::new(egui::RichText::new(label).size(13.0).color(fg))
-                    .fill(if on { theme::PRIMARY } else { egui::Color32::from_rgba_unmultiplied(150, 190, 255, if st.notif_unseen > 0 { 30 } else { 0 }) })
-                    .min_size(egui::vec2(0.0, 24.0));
-                if ui.add(btn).on_hover_text("Recent notifications").clicked() {
-                    st.watch_history_menu = !st.watch_history_menu;
-                    st.watch_layout_menu = false;
-                    st.notif_unseen = 0;
-                    st.sound_tab = true;
-                }
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Top-right: lock · media · notifications (the last two swap the
+                // clock card's content, so the watch never changes size).
+                let corner = |ui: &mut egui::Ui, glyph: String, on: bool, hot: bool, tip: &str| -> bool {
+                    let fg = if on { egui::Color32::BLACK } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
+                    let fill = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgba_unmultiplied(150, 190, 255, 30) } else { egui::Color32::TRANSPARENT };
+                    ui.add(egui::Button::new(egui::RichText::new(glyph).size(14.0).color(fg)).fill(fill).min_size(egui::vec2(28.0, 24.0)))
+                        .on_hover_text(tip)
+                        .clicked()
+                };
                 let (glyph, tip) = if st.watch_locked {
                     (icon::LOCK, "Position locked · tap to unlock, then grip the watch to move it")
                 } else {
@@ -621,18 +617,77 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 if !st.watch_locked {
                     ui.label(egui::RichText::new("grip to move").size(11.0).color(theme::ON_SURFACE_VAR));
                 }
+                if !st.notif_history.is_empty() {
+                    let label = if st.notif_unseen > 0 { format!("{} {}", icon::BELL_RINGING, st.notif_unseen) } else { icon::BELL.to_string() };
+                    if corner(ui, label, st.watch_history_menu, st.notif_unseen > 0, "Recent notifications") {
+                        st.watch_history_menu = !st.watch_history_menu;
+                        st.watch_media_menu = false;
+                        st.watch_layout_menu = false;
+                        st.notif_unseen = 0;
+                        st.sound_tab = true;
+                    }
+                }
+                if st.media.is_some() {
+                    let playing = st.media.as_ref().is_some_and(|m| m.playing);
+                    if corner(ui, icon::MUSIC_NOTES.to_string(), st.watch_media_menu, playing, "Now playing") {
+                        st.watch_media_menu = !st.watch_media_menu;
+                        st.watch_history_menu = false;
+                        st.watch_layout_menu = false;
+                        st.sound_tab = true;
+                    }
+                }
             });
         });
         // Clock + zones (or the layout picker) | quick buttons — each in its own
         // card. A queued screenshot takes the whole row (bigger preview).
-        let wide = st.wrist_shot.is_some() && !st.watch_layout_menu;
+        let wide = st.wrist_shot.is_some() && !st.watch_layout_menu && !st.watch_history_menu && !st.watch_media_menu;
         let row_w = ui.available_width();
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
                 // (the row width includes the card's own margins — keep it inside)
-                ui.set_width(if wide { row_w - 26.0 } else { 214.0 });
+                ui.set_width(if wide { row_w - 16.0 } else { 214.0 });
                 ui.set_min_height(120.0);
-                if st.watch_history_menu {
+                if st.watch_media_menu {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{}  Now playing", icon::MUSIC_NOTES)).size(14.0).strong().color(egui::Color32::WHITE));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(egui::RichText::new(icon::X).size(13.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
+                                st.watch_media_menu = false;
+                            }
+                        });
+                    });
+                    match &st.media {
+                        Some(m) => {
+                            let title: String = if m.title.chars().count() > 34 { format!("{}…", m.title.chars().take(33).collect::<String>()) } else { m.title.clone() };
+                            ui.label(egui::RichText::new(if title.is_empty() { m.player.clone() } else { title }).size(14.0).color(egui::Color32::WHITE));
+                            let sub = if m.artist.is_empty() { m.player.clone() } else { format!("{} · {}", m.artist, m.player) };
+                            let sub: String = if sub.chars().count() > 40 { format!("{}…", sub.chars().take(39).collect::<String>()) } else { sub };
+                            ui.label(egui::RichText::new(sub).size(11.0).color(theme::ON_SURFACE_VAR));
+                            ui.add_space(4.0);
+                            let b = 40.0;
+                            centered_row(ui, b * 3.0 + 12.0, |ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                let tb = |ui: &mut egui::Ui, g: &str, tip: &str| -> bool {
+                                    ui.add(egui::Button::new(egui::RichText::new(g).size(18.0).color(theme::ON_SURFACE)).fill(theme::SURFACE_CONTAINER_HIGH).min_size(egui::vec2(b, 34.0)))
+                                        .on_hover_text(tip)
+                                        .clicked()
+                                };
+                                if tb(ui, icon::SKIP_BACK, "Previous") {
+                                    st.media_request = Some(crate::media::MediaCmd::Previous);
+                                }
+                                if tb(ui, if m.playing { icon::PAUSE } else { icon::PLAY }, if m.playing { "Pause" } else { "Play" }) {
+                                    st.media_request = Some(crate::media::MediaCmd::PlayPause);
+                                }
+                                if tb(ui, icon::SKIP_FORWARD, "Next") {
+                                    st.media_request = Some(crate::media::MediaCmd::Next);
+                                }
+                            });
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("Nothing is playing").size(12.0).color(theme::ON_SURFACE_VAR));
+                        }
+                    }
+                } else if st.watch_history_menu {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{}  Recent", icon::BELL)).size(14.0).strong().color(egui::Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -716,35 +771,6 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                             });
                         }
                     });
-                    // Now playing (MPRIS): title · artist with transport buttons.
-                    if let Some(m) = &st.media {
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            let tb = |ui: &mut egui::Ui, g: &str, tip: &str| -> bool {
-                                ui.add(egui::Button::new(egui::RichText::new(g).size(13.0).color(theme::ON_SURFACE)).fill(theme::SURFACE_CONTAINER_HIGH).min_size(egui::vec2(26.0, 22.0)))
-                                    .on_hover_text(tip)
-                                    .clicked()
-                            };
-                            if tb(ui, icon::SKIP_BACK, "Previous") {
-                                st.media_request = Some(crate::media::MediaCmd::Previous);
-                            }
-                            if tb(ui, if m.playing { icon::PAUSE } else { icon::PLAY }, if m.playing { "Pause" } else { "Play" }) {
-                                st.media_request = Some(crate::media::MediaCmd::PlayPause);
-                            }
-                            if tb(ui, icon::SKIP_FORWARD, "Next") {
-                                st.media_request = Some(crate::media::MediaCmd::Next);
-                            }
-                            let mut line = m.title.clone();
-                            if !m.artist.is_empty() {
-                                line = format!("{line} · {}", m.artist);
-                            }
-                            if line.is_empty() {
-                                line = m.player.clone();
-                            }
-                            let line: String = if line.chars().count() > 26 { format!("{}…", line.chars().take(25).collect::<String>()) } else { line };
-                            ui.label(egui::RichText::new(line).size(11.0).color(theme::ON_SURFACE_VAR)).on_hover_text(format!("{} — {}\n{}", m.title, m.artist, m.player));
-                        });
-                    }
                 }
             });
             if !wide {
@@ -844,6 +870,7 @@ fn watch_quick_button(ui: &mut egui::Ui, st: &mut LibState, id: &str, quick: &dy
             if quick(ui, glyph, st.watch_layout_menu, tip) {
                 st.watch_layout_menu = !st.watch_layout_menu;
                 st.watch_history_menu = false;
+                st.watch_media_menu = false;
                 st.sound_tab = true;
             }
         }

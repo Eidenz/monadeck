@@ -42,6 +42,8 @@ const SCROLL_SPEED: f32 = 0.12;
 const PLACE_DIST: f32 = 1.6;
 /// Release a screen within this distance of another screen's side spot to dock.
 const SCREEN_DOCK_SNAP: f32 = 0.15;
+/// Show the docking indicator from this distance (dim until within snap range).
+const SCREEN_DOCK_HINT: f32 = 0.45;
 /// Gap between docked screens, metres.
 const SCREEN_DOCK_GAP: f32 = 0.02;
 /// Trigger-held cursor motion below this (desktop px) is ignored, so a click
@@ -107,8 +109,8 @@ pub struct InputOut {
     /// A screen is being gripped/resized: show its numbers.
     pub gesture: Option<GestureInfo>,
     /// A gripped screen would dock here on release: (marker pose at the target's
-    /// edge, marker height, target name, side).
-    pub dock_hint: Option<(xr::Posef, f32, String, i8)>,
+    /// edge, marker height, target name, side, within snap distance).
+    pub dock_hint: Option<(xr::Posef, f32, String, i8, bool)>,
 }
 
 enum PortalState {
@@ -182,6 +184,9 @@ pub struct DesktopViewer {
     keyboard_dock_pending: Option<usize>,
     /// Keyboard follows its docked screen's visibility (+ text-field pop-up).
     pub keyboard_auto: bool,
+    /// Hand driving the keyboard's egui pointer; sticky while it stays on the
+    /// keyboard so two hands over it don't fight for the pointer.
+    kb_primary: Option<usize>,
     /// The keyboard was auto-hidden with this screen; re-show when it returns.
     kb_auto_hidden_for: Option<usize>,
     /// A layout was applied and nothing has been touched since: a double-B
@@ -258,6 +263,7 @@ impl DesktopViewer {
             keyboard_dock_pending: None,
             keyboard_auto: false,
             kb_auto_hidden_for: None,
+            kb_primary: None,
             layout_untouched: false,
         }
     }
@@ -363,8 +369,8 @@ impl DesktopViewer {
     }
 
     /// Where free screen `s` would dock right now: (outermost screen on that
-    /// side, side, distance, dock pose), if within the snap zone.
-    fn dock_candidate(&self, s: usize) -> Option<(usize, i8, f32, xr::Posef)> {
+    /// side, side, distance, dock pose), if within `range`.
+    fn dock_candidate_within(&self, s: usize, range: f32) -> Option<(usize, i8, f32, xr::Posef)> {
         let own_group = self.group_of(s);
         let w = self.screens[s].size_m().0;
         let sp = self.screens[s].pose.position;
@@ -384,12 +390,16 @@ impl DesktopViewer {
                 }
                 let pose = Self::dock_pose_for(&self.screens[outer], side, w);
                 let d = dist2(&sp, &pose.position).sqrt();
-                if d < SCREEN_DOCK_SNAP && best.map_or(true, |b| d < b.2) {
+                if d < range && best.map_or(true, |b| d < b.2) {
                     best = Some((outer, side, d, pose));
                 }
             }
         }
         best
+    }
+
+    fn dock_candidate(&self, s: usize) -> Option<(usize, i8, f32, xr::Posef)> {
+        self.dock_candidate_within(s, SCREEN_DOCK_SNAP)
     }
 
     /// Try to dock free screen `s` next to any other shown screen it was
@@ -626,7 +636,9 @@ impl DesktopViewer {
                 self.keyboard.visible = k.visible;
                 self.keyboard.grab = None;
                 self.keyboard.pose = self.from_stage(&arr_to_pose(&k.pose));
-                self.keyboard.scale = k.scale.clamp(0.5, 2.0);
+                if (k.scale - 1.0).abs() > 1e-3 {
+                    self.keyboard.scale = k.scale.clamp(0.5, 2.0);
+                }
                 self.keyboard.placed = true;
                 self.keyboard_place = false;
                 let target = k.attached.as_ref().and_then(|n| self.screens.iter().position(|s| &s.name == n));
@@ -1196,11 +1208,11 @@ impl DesktopViewer {
         }
         // Docking preview while a lone screen is gripped.
         if let Some(si) = self.grab_screen.filter(|&si| self.grab_group.is_empty() && self.screens[si].grab.is_some()) {
-            if let Some((outer, side, _, _)) = self.dock_candidate(si) {
+            if let Some((outer, side, d, _)) = self.dock_candidate_within(si, SCREEN_DOCK_HINT) {
                 let t = &self.screens[outer];
                 let (tw, th) = t.size_m();
                 let marker = offset_pose(&t.pose, side as f32 * (tw / 2.0 + SCREEN_DOCK_GAP / 2.0), 0.0, 0.01);
-                out.dock_hint = Some((marker, th, t.name.clone(), side));
+                out.dock_hint = Some((marker, th, t.name.clone(), side, d < SCREEN_DOCK_SNAP));
             }
         }
         // Live numbers for the gripped screen.
@@ -1217,8 +1229,9 @@ impl DesktopViewer {
             } else {
                 body.push_str("  ·  flat");
             }
-            if let Some((_, _, name, side)) = &out.dock_hint {
-                body.push_str(&format!("  ·  release to dock {} of {name}", if *side < 0 { "left" } else { "right" }));
+            if let Some((_, _, name, side, near)) = &out.dock_hint {
+                let s = if *side < 0 { "left" } else { "right" };
+                body.push_str(&if *near { format!("  ·  release to dock {s} of {name}") } else { format!("  ·  closer to dock {s} of {name}") });
             }
             let above = xr::Posef {
                 orientation: s.pose.orientation,
@@ -1256,6 +1269,7 @@ impl DesktopViewer {
 
         // Closest hit across hands, screens and keyboard.
         let mut best: Option<(Target, usize, f32, f32, f32)> = None; // (target, hand, u, v, t)
+        let mut kb_hits: [Option<(f32, f32, f32)>; 2] = [None, None];
         if !grabbing {
             for (hi, h) in hands.iter().enumerate().filter(|(_, h)| h.active) {
                 let mut consider = |target: Target, hit: Option<(f32, f32, f32)>| {
@@ -1272,9 +1286,26 @@ impl DesktopViewer {
                     consider(Target::Screen(si), s.hit(&h.aim, curved_ok));
                 }
                 if self.keyboard.visible && self.keyboard.placed {
-                    consider(Target::Keyboard, raycast(&h.aim, &self.keyboard.pose, keyboard::size_m_scaled(self.keyboard.scale)));
+                    let hit = raycast(&h.aim, &self.keyboard.pose, keyboard::size_m_scaled(self.keyboard.scale));
+                    if hi < 2 {
+                        kb_hits[hi] = hit;
+                    }
+                    consider(Target::Keyboard, hit);
                 }
             }
+        }
+        // Keyboard pointer is sticky: keep the hand that had it while it's still
+        // on the keyboard (the other hand types through `key_at` below).
+        if let Some((Target::Keyboard, hi, _, _, _)) = best {
+            match self.kb_primary {
+                Some(p) if p != hi && p < 2 && kb_hits[p].is_some() => {
+                    let (u, v, t) = kb_hits[p].unwrap();
+                    best = Some((Target::Keyboard, p, u, v, t));
+                }
+                _ => self.kb_primary = Some(hi),
+            }
+        } else {
+            self.kb_primary = None;
         }
 
         // Grip while pointing grabs the thing (a grabbed keyboard undocks).
