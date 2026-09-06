@@ -605,10 +605,16 @@ fn run() -> Result<()> {
     if screencast_token.is_some() {
         desktop.setup_screens();
     }
+    desktop.scroll_speed = ov_cfg.scroll_speed.clamp(0.25, 4.0);
+    desktop.drag_threshold_px = ov_cfg.drag_threshold_px.clamp(0.0, 60.0) as f64;
     if ov_cfg.restore_layout {
         if let Some(l) = layouts.last_used.clone().and_then(|n| layouts.find(&n).cloned()) {
             log::info!("desktop: will restore layout '{}'", l.name);
-            desktop.apply(&l);
+            if ov_cfg.restore_layout_hidden {
+                desktop.apply_hidden(&l);
+            } else {
+                desktop.apply(&l);
+            }
         }
     }
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
@@ -624,7 +630,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto)),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px))),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -669,6 +675,9 @@ fn run() -> Result<()> {
     st.freeze_delay_secs = ov_cfg.freeze_delay_secs;
     st.screen_width_m = ov_cfg.screen_width_m;
     st.restore_layout = ov_cfg.restore_layout;
+    st.restore_layout_hidden = ov_cfg.restore_layout_hidden;
+    st.scroll_speed = ov_cfg.scroll_speed.clamp(0.25, 4.0);
+    st.drag_threshold_px = ov_cfg.drag_threshold_px.clamp(0.0, 60.0);
     st.gaze_pause = ov_cfg.gaze_pause;
     st.recenter_on_toggle = ov_cfg.recenter_on_toggle;
     st.screen_restore_tilt = ov_cfg.screen_restore_tilt;
@@ -2059,7 +2068,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto)),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px))),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -2069,6 +2078,8 @@ fn run() -> Result<()> {
             desktop.restore_tilt = st.screen_restore_tilt;
             desktop.set_capture_limits(st.capture_max_fps, st.capture_max_height);
             desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
+            desktop.scroll_speed = st.scroll_speed;
+            desktop.drag_threshold_px = st.drag_threshold_px as f64;
             settings_prev = settings_now;
             overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
@@ -2291,6 +2302,9 @@ fn overlay_config_from(
         screen_width_m: st.screen_width_m,
         screen_order: screen_order.to_vec(),
         restore_layout: st.restore_layout,
+        restore_layout_hidden: st.restore_layout_hidden,
+        scroll_speed: st.scroll_speed,
+        drag_threshold_px: st.drag_threshold_px,
         watch_enabled: st.watch_enabled,
         watch_timezones: watch_timezones.to_vec(),
         watch_24h: st.watch_24h,

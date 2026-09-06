@@ -38,6 +38,13 @@ pub struct OverlayConfig {
     pub screen_order: Vec<String>,
     /// Re-apply the last used desktop layout when the screens become available.
     pub restore_layout: bool,
+    /// Restore it out of sight: loaded, but hidden until a double-B brings it up.
+    pub restore_layout_hidden: bool,
+    /// Thumbstick scroll speed multiplier (1 = default).
+    pub scroll_speed: f32,
+    /// Trigger-held cursor motion below this many desktop px stays a click
+    /// (doesn't turn into a drag).
+    pub drag_threshold_px: f32,
     /// Show the wrist watch (left controller).
     pub watch_enabled: bool,
     /// Extra time zones on the watch (IANA names, e.g. "Asia/Tokyo").
@@ -115,6 +122,9 @@ impl Default for OverlayConfig {
             screen_width_m: 1.35,
             screen_order: Vec::new(),
             restore_layout: true,
+            restore_layout_hidden: true,
+            scroll_speed: 1.0,
+            drag_threshold_px: 14.0,
             watch_enabled: true,
             watch_timezones: vec!["America/New_York".into(), "Asia/Tokyo".into()],
             watch_24h: false,

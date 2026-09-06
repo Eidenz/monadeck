@@ -36,8 +36,8 @@ use screen::ScreenPanel;
 
 const GRAB_START: f32 = 0.40;
 const GRAB_RELEASE: f32 = 0.15;
-/// Wheel notches per frame at full thumbstick deflection.
-const SCROLL_SPEED: f32 = 0.12;
+/// Wheel notches per frame at full thumbstick deflection (× `scroll_speed`).
+const SCROLL_BASE: f32 = 0.12;
 /// Default distance a newly shown screen is placed at, metres.
 const PLACE_DIST: f32 = 1.6;
 /// Release a screen within this distance of another screen's side spot to dock.
@@ -46,9 +46,9 @@ const SCREEN_DOCK_SNAP: f32 = 0.15;
 const SCREEN_DOCK_HINT: f32 = 0.45;
 /// Gap between docked screens, metres.
 const SCREEN_DOCK_GAP: f32 = 0.02;
-/// Trigger-held cursor motion below this (desktop px) is ignored, so a click
-/// on a draggable thing doesn't turn into a drag; beyond it, dragging is live.
-const DRAG_THRESHOLD_PX: f64 = 14.0;
+// Trigger-held cursor motion below `drag_threshold_px` (desktop px) is
+// ignored, so a click on a draggable thing doesn't turn into a drag; beyond it,
+// dragging is live.
 /// Resize gesture: width multiplier per metre of hand travel toward/away.
 const RESIZE_PER_M: f32 = 3.0;
 /// Push/pull speed while gripping (metres per frame at full stick).
@@ -164,6 +164,12 @@ pub struct DesktopViewer {
     keyboard_place: bool,
     /// A layout to apply once the portal has produced the screens.
     pending_layout: Option<DesktopLayout>,
+    /// …and stash it right away (double-B brings it up).
+    pending_hidden: bool,
+    /// Thumbstick scroll speed multiplier.
+    pub scroll_speed: f32,
+    /// Trigger-held motion below this (desktop px) stays a click.
+    pub drag_threshold_px: f64,
     /// Screens hidden by "toggle all" (double-A), to bring back the same set.
     stash: Vec<usize>,
     stash_keyboard: bool,
@@ -252,6 +258,9 @@ impl DesktopViewer {
             width_m: screen::DEFAULT_WIDTH_M,
             keyboard_place: false,
             pending_layout: None,
+            pending_hidden: false,
+            scroll_speed: 1.0,
+            drag_threshold_px: 14.0,
             local_in_stage: None,
             stash: Vec::new(),
             stash_keyboard: false,
@@ -581,10 +590,22 @@ impl DesktopViewer {
         DesktopLayout { name, screens, keyboard, recenter_on_toggle: false }
     }
 
+    /// Apply an arrangement, then hide it straight away (as if double-B had
+    /// been pressed): it comes back exactly where it was on the next double-B.
+    /// Always deferred to `poll` (it needs the head pose).
+    pub fn apply_hidden(&mut self, layout: &DesktopLayout) {
+        self.pending_layout = Some(layout.clone());
+        self.pending_hidden = true;
+        if matches!(self.portal, PortalState::Idle | PortalState::Failed(_)) {
+            self.start_portal();
+        }
+    }
+
     /// Apply an arrangement. Screens the layout doesn't mention are hidden.
     /// Before the portal has answered, it's kept and applied when it does.
     pub fn apply(&mut self, layout: &DesktopLayout) {
         if self.screens.is_empty() || self.local_in_stage.is_none() {
+            self.pending_hidden = false;
             // Wait for the streams and for the STAGE relation (poll applies it).
             self.pending_layout = Some(layout.clone());
             if matches!(self.portal, PortalState::Idle | PortalState::Failed(_)) {
@@ -1032,8 +1053,14 @@ impl DesktopViewer {
         // A queued layout applies once the screens exist and STAGE is known.
         if self.pending_layout.is_some() && !self.screens.is_empty() && self.local_in_stage.is_some() {
             if let Some(l) = self.pending_layout.take() {
-                log::info!("desktop: applying layout '{}'", l.name);
+                let hidden = std::mem::take(&mut self.pending_hidden);
+                log::info!("desktop: applying layout '{}'{}", l.name, if hidden { " (hidden until double-B)" } else { "" });
                 self.apply(&l);
+                if hidden {
+                    if let ToggleAll::Hidden(n) = self.toggle_all(hmd, true) {
+                        log::info!("desktop: stashed {n} item(s) of the restored layout");
+                    }
+                }
             }
         }
         for s in &mut self.screens {
@@ -1400,7 +1427,7 @@ impl DesktopViewer {
                         if self.held.is_some() && !self.frozen && !self.dragging {
                             if let Some((px, py)) = self.held_press {
                                 let d = ((px - x).powi(2) + (py - y).powi(2)).sqrt();
-                                if d >= DRAG_THRESHOLD_PX {
+                                if d >= self.drag_threshold_px {
                                     self.dragging = true;
                                 } else {
                                     allow_move = false;
@@ -1435,7 +1462,8 @@ impl DesktopViewer {
                         // Thumbstick scroll.
                         let (sx, sy) = h.scroll;
                         if sx != 0.0 || sy != 0.0 {
-                            hid.wheel(sx * SCROLL_SPEED, sy * SCROLL_SPEED);
+                            let sp = SCROLL_BASE * self.scroll_speed;
+                            hid.wheel(sx * sp, sy * sp);
                         }
                     }
             }

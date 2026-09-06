@@ -90,6 +90,10 @@ pub struct LibState {
     pub layout_renamed: Option<(usize, String)>,
     pub layout_move: Option<(usize, i32)>,
     pub restore_layout: bool,
+    pub restore_layout_hidden: bool,
+    pub scroll_speed: f32,
+    pub drag_threshold_px: f32,
+    pub controls_open: bool, // Settings: gesture reference card expanded
     pub gaze_pause: bool,
     pub recenter_on_toggle: bool,
     pub screen_restore_tilt: bool,
@@ -297,6 +301,10 @@ impl LibState {
             layout_renamed: None,
             layout_move: None,
             restore_layout: true,
+            restore_layout_hidden: true,
+            scroll_speed: 1.0,
+            drag_threshold_px: 14.0,
+            controls_open: false,
             gaze_pause: true,
             recenter_on_toggle: true,
             screen_restore_tilt: false,
@@ -1975,6 +1983,85 @@ fn setting_row(ui: &mut egui::Ui, label: &str, sub: Option<&str>, control: impl 
     });
 }
 
+/// The gesture reference (Settings → Controllers → Help): one line per gesture,
+/// grouped by what the laser is on.
+fn controls_card(ui: &mut egui::Ui) {
+    const GROUPS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Anywhere",
+            &[
+                ("Left system button", "summon / dismiss the dashboard (it re-centres in front of you)"),
+                ("Double-B (left hand)", "hide every screen + the keyboard, or bring them back"),
+                ("Trigger", "click on the dashboard, the watch, the keyboard, photo windows"),
+            ],
+        ),
+        (
+            "On a screen",
+            &[
+                ("Point", "moves the mouse"),
+                ("Trigger", "left click · keep holding and move past the drag threshold to drag"),
+                ("A", "right click"),
+                ("B", "left click without moving the cursor (fiddly targets)"),
+                ("Thumbstick", "scroll (speed in Desktop → Behaviour)"),
+                ("Grip", "move the screen (a docked group moves as one)"),
+                ("Grip + trigger, push / pull", "resize"),
+                ("Grip + stick ▲▼", "push it away / pull it closer"),
+                ("Grip + trigger + stick ◀▶", "curve it"),
+                ("Release next to another screen", "dock to that edge (teal bar shows the spot)"),
+                ("B while gripping", "undock"),
+            ],
+        ),
+        (
+            "On the keyboard",
+            &[
+                ("Trigger", "type · hold to repeat"),
+                ("Tap a modifier", "one-shot latch · tap it again within 1.5 s to send it alone (Super opens the launcher)"),
+                ("Shift twice", "lock · a third tap clears"),
+                ("Other hand on a screen", "that hand keeps the mouse; both hands can type"),
+                ("Grip", "move · release under a screen's dock spot to attach it"),
+                ("Top bar", "layout · clipboard · latched modifiers · screen pills · dock / undock · close"),
+            ],
+        ),
+        (
+            "Watch (left wrist)",
+            &[
+                ("Point with the right hand", "it wins over whatever is behind it"),
+                ("Trigger", "tap a button · corner icons switch the card (media, bell)"),
+                ("Grip (right hand, unlocked)", "move it · the spot is remembered"),
+                ("Grip + trigger, push / pull", "resize it"),
+            ],
+        ),
+        (
+            "Photos",
+            &[
+                ("Finger frame (both hands)", "screenshot, if the gesture is enabled in Photos"),
+                ("Grip a photo window", "move it"),
+                ("Wrist card ‹ ›", "browse new shots · open puts one in a window"),
+            ],
+        ),
+    ];
+    ui.add_space(4.0);
+    for (i, (title, rows)) in GROUPS.iter().enumerate() {
+        if i > 0 {
+            ui.add_space(8.0);
+        }
+        ui.label(egui::RichText::new(*title).size(13.0).strong().color(theme::PRIMARY));
+        ui.add_space(3.0);
+        for (keys, what) in rows.iter() {
+            ui.horizontal(|ui| {
+                ui.add_space(2.0);
+                ui.add_sized(
+                    egui::vec2(230.0, 22.0),
+                    egui::Label::new(egui::RichText::new(*keys).size(14.0).color(theme::ON_SURFACE)).wrap_mode(egui::TextWrapMode::Truncate),
+                );
+                ui.add_space(6.0);
+                ui.add(egui::Label::new(egui::RichText::new(*what).size(13.0).color(theme::ON_SURFACE_VAR)).wrap());
+            });
+        }
+    }
+    ui.add_space(6.0);
+}
+
 /// A faint full-width separator between rows in a card.
 fn divider(ui: &mut egui::Ui) {
     ui.add_space(2.0);
@@ -2851,6 +2938,12 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
             setting_row(ui, "Restore last layout on start", Some("Bring the screens back where they were"), |ui| {
                 t = seg_toggle(ui, &mut st.restore_layout);
             });
+            if st.restore_layout {
+                divider(ui);
+                setting_row(ui, "Start hidden", Some("Loaded but out of sight: nothing on screen until a double-B (left hand) brings it up"), |ui| {
+                    t |= seg_toggle(ui, &mut st.restore_layout_hidden);
+                });
+            }
             if t {
                 st.sound_tab = true;
             }
@@ -2900,6 +2993,14 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
             divider(ui);
             setting_row(ui, "Keyboard size", Some("Also saved in layouts"), |ui| {
                 stepper_inline(ui, &mut st.keyboard_scale, 0.6, 1.6, 0.1, |v| format!("{:.0}%", v * 100.0));
+            });
+            divider(ui);
+            setting_row(ui, "Scroll speed", Some("Thumbstick scrolling on a screen"), |ui| {
+                modern_slider(ui, &mut st.scroll_speed, 0.25..=4.0, 300.0, |v| format!("{v:.2}×"));
+            });
+            divider(ui);
+            setting_row(ui, "Drag threshold", Some("Trigger-held cursor motion below this stays a click; beyond it, it's a drag"), |ui| {
+                modern_slider(ui, &mut st.drag_threshold_px, 0.0..=60.0, 300.0, |v| format!("{v:.0} px"));
             });
             if t {
                 st.sound_tab = true;
@@ -3111,6 +3212,17 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                     modern_slider(ui, &mut st.freeze_delay_secs, 0.0..=10.0, 360.0, |v| format!("{v:.0} s"));
                 },
             );
+            divider(ui);
+            setting_row(ui, "Controls", Some("Every gesture the overlay understands"), |ui| {
+                let (glyph, label) = if st.controls_open { (icon::CARET_UP, "Hide") } else { (icon::QUESTION, "Help") };
+                if action_button(ui, glyph, label).clicked() {
+                    st.controls_open = !st.controls_open;
+                    st.sound_tab = true;
+                }
+            });
+            if st.controls_open {
+                controls_card(ui);
+            }
         });
 
         let n = st.games.len();

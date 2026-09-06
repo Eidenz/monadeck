@@ -77,6 +77,14 @@ marked **done** are on the branch; everything else is a proposal.
   (last 3) behind a bell badge; the four quick buttons are configurable in
   Settings → Wrist watch (keyboard, recenter, layouts, freeze, timer,
   screenshot, screens, mute, photos).
+- Layout restore starts hidden by default (Desktop → Layouts → "Start hidden"):
+  the last layout is loaded and stashed, so nothing is on screen until a
+  double-B brings it up exactly where it was.
+- Scroll speed and drag threshold are sliders in Desktop → Behaviour.
+- Settings → Controllers → Help: an in-headset card listing every gesture
+  (dashboard, screens, keyboard, watch, photos).
+- monado-frame retired (README notice); LinuxWiki updated for the built-in
+  desktop viewer / watch / screenshots.
 
 ## Proposed next
 
