@@ -68,16 +68,19 @@ marked **done** are on the branch; everything else is a proposal.
   and XSOverlay-protocol messages on udp/42069 (VRCX etc.), queued as toasts
   with app icons. Settings → Notifications; `--notify-selftest` to check.
 
+- Keyboard follows screens & text fields (Desktop → Behaviour, off by default):
+  hides with its docked screen and returns with it; pops up under the last-used
+  screen when a text field gets focus (AT-SPI, `--a11y-selftest`).
+- Docking edge indicator: a teal bar on the target's edge while a gripped screen
+  is in the snap zone, plus "release to dock …" in the readout.
+- Watch: now-playing line with prev/play/next (MPRIS); notification history
+  (last 3) behind a bell badge; the four quick buttons are configurable in
+  Settings → Wrist watch (keyboard, recenter, layouts, freeze, timer,
+  screenshot, screens, mute, photos).
+
 ## Proposed next
 
-1. Auto-hide the keyboard when its docked screen is hidden; auto-show on a
-   focused text field (AT-SPI), as a toggle, off by default.
-2. Docking edge indicator while a gripped screen is within snap range.
-3. Media controls (MPRIS) on the watch.
-4. Notification history (last 3) behind a watch badge.
-5. Configurable watch quick buttons.
-
-Everything else: `docs/ideas-parked.md`.
+(empty — see `docs/ideas-parked.md` for the parked list)
 
 ## Known limitations
 

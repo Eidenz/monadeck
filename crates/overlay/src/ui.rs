@@ -127,6 +127,21 @@ pub struct LibState {
     pub notif_dbus_ok: bool,
     pub notif_udp_ok: bool,
     pub notif_test_request: bool,
+    /// Last few notifications (title, body, "3 min ago") + unseen count.
+    pub notif_history: Vec<(String, String, String)>,
+    pub notif_unseen: usize,
+    pub watch_history_menu: bool,
+    pub notif_clear_request: bool,
+    // Media (MPRIS).
+    pub media: Option<crate::media::MediaState>,
+    pub media_request: Option<crate::media::MediaCmd>,
+    // Configurable quick buttons (ids) + their requests.
+    pub watch_buttons: Vec<String>,
+    pub watch_button_cycle: Option<usize>, // settings: cycle slot N to the next option
+    pub screenshot_request: bool,
+    pub screens_toggle_request: bool,
+    pub watch_photos_request: bool,
+    pub keyboard_auto: bool,
     pub desktop_opacity_request: Option<(usize, f32)>,
     // Wrist watch.
     pub watch_enabled: bool,
@@ -316,6 +331,18 @@ impl LibState {
             notif_dbus_ok: false,
             notif_udp_ok: false,
             notif_test_request: false,
+            notif_history: Vec::new(),
+            notif_unseen: 0,
+            watch_history_menu: false,
+            notif_clear_request: false,
+            media: None,
+            media_request: None,
+            watch_buttons: vec!["keyboard".into(), "recenter".into(), "layouts".into(), "freeze".into()],
+            watch_button_cycle: None,
+            screenshot_request: false,
+            screens_toggle_request: false,
+            watch_photos_request: false,
+            keyboard_auto: false,
             desktop_opacity_request: None,
             watch_enabled: true,
             watch_24h: false,
@@ -562,6 +589,21 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     st.sound_tab = true;
                 }
             }
+            // Notification history: bell with the unseen count; tap to list the last few.
+            if !st.notif_history.is_empty() {
+                let label = if st.notif_unseen > 0 { format!("{} {}", icon::BELL_RINGING, st.notif_unseen) } else { icon::BELL.to_string() };
+                let on = st.watch_history_menu;
+                let fg = if on { egui::Color32::BLACK } else if st.notif_unseen > 0 { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
+                let btn = egui::Button::new(egui::RichText::new(label).size(13.0).color(fg))
+                    .fill(if on { theme::PRIMARY } else { egui::Color32::from_rgba_unmultiplied(150, 190, 255, if st.notif_unseen > 0 { 30 } else { 0 }) })
+                    .min_size(egui::vec2(0.0, 24.0));
+                if ui.add(btn).on_hover_text("Recent notifications").clicked() {
+                    st.watch_history_menu = !st.watch_history_menu;
+                    st.watch_layout_menu = false;
+                    st.notif_unseen = 0;
+                    st.sound_tab = true;
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (glyph, tip) = if st.watch_locked {
                     (icon::LOCK, "Position locked · tap to unlock, then grip the watch to move it")
@@ -590,7 +632,34 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 // (the row width includes the card's own margins — keep it inside)
                 ui.set_width(if wide { row_w - 26.0 } else { 214.0 });
                 ui.set_min_height(120.0);
-                if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
+                if st.watch_history_menu {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{}  Recent", icon::BELL)).size(14.0).strong().color(egui::Color32::WHITE));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(egui::RichText::new(icon::X).size(13.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
+                                st.watch_history_menu = false;
+                            }
+                            if ui.add(egui::Button::new(egui::RichText::new(icon::TRASH).size(13.0)).min_size(egui::vec2(26.0, 22.0))).on_hover_text("Clear").clicked() {
+                                st.notif_clear_request = true;
+                                st.watch_history_menu = false;
+                            }
+                        });
+                    });
+                    for (title, body, age) in &st.notif_history {
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            let t: String = title.chars().take(30).collect();
+                            ui.label(egui::RichText::new(t).size(12.0).strong().color(egui::Color32::WHITE));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(egui::RichText::new(age).size(10.0).color(theme::ON_SURFACE_VAR));
+                            });
+                        });
+                        if !body.is_empty() {
+                            let b: String = body.chars().take(48).collect();
+                            ui.label(egui::RichText::new(b).size(11.0).color(theme::ON_SURFACE_VAR));
+                        }
+                    }
+                } else if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
                     let req = crate::photos::wrist_card(ui, shot.thumb.as_ref(), shot.qr.as_deref(), &shot.when, shot.idx, shot.total);
                     if req.open || req.dismiss || req.older || req.newer {
                         st.wrist_req = req;
@@ -647,6 +716,35 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                             });
                         }
                     });
+                    // Now playing (MPRIS): title · artist with transport buttons.
+                    if let Some(m) = &st.media {
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            let tb = |ui: &mut egui::Ui, g: &str, tip: &str| -> bool {
+                                ui.add(egui::Button::new(egui::RichText::new(g).size(13.0).color(theme::ON_SURFACE)).fill(theme::SURFACE_CONTAINER_HIGH).min_size(egui::vec2(26.0, 22.0)))
+                                    .on_hover_text(tip)
+                                    .clicked()
+                            };
+                            if tb(ui, icon::SKIP_BACK, "Previous") {
+                                st.media_request = Some(crate::media::MediaCmd::Previous);
+                            }
+                            if tb(ui, if m.playing { icon::PAUSE } else { icon::PLAY }, if m.playing { "Pause" } else { "Play" }) {
+                                st.media_request = Some(crate::media::MediaCmd::PlayPause);
+                            }
+                            if tb(ui, icon::SKIP_FORWARD, "Next") {
+                                st.media_request = Some(crate::media::MediaCmd::Next);
+                            }
+                            let mut line = m.title.clone();
+                            if !m.artist.is_empty() {
+                                line = format!("{line} · {}", m.artist);
+                            }
+                            if line.is_empty() {
+                                line = m.player.clone();
+                            }
+                            let line: String = if line.chars().count() > 26 { format!("{}…", line.chars().take(25).collect::<String>()) } else { line };
+                            ui.label(egui::RichText::new(line).size(11.0).color(theme::ON_SURFACE_VAR)).on_hover_text(format!("{} — {}\n{}", m.title, m.artist, m.player));
+                        });
+                    }
                 }
             });
             if !wide {
@@ -660,34 +758,14 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         .min_size(egui::vec2(b, b));
                     ui.add(btn).on_hover_text(tip).clicked()
                 };
-                ui.horizontal(|ui| {
-                    if quick(ui, icon::KEYBOARD, st.keyboard_shown, "VR keyboard") {
-                        st.keyboard_toggle_request = true;
-                        st.sound_tab = true;
-                    }
-                    if quick(ui, icon::CROSSHAIR, false, "Recenter playspace") {
-                        st.recenter_playspace_request = true;
-                        st.sound_tab = true;
-                    }
-                });
-                ui.horizontal(|ui| {
-                    if quick(ui, icon::SQUARES_FOUR, st.watch_layout_menu, "Screen layouts") {
-                        st.watch_layout_menu = !st.watch_layout_menu;
-                        st.sound_tab = true;
-                    }
-                    let (frozen, enabled) = match st.watch_freeze_client {
-                        Some((_, f)) => (f, true),
-                        None => (false, false),
-                    };
-                    ui.add_enabled_ui(enabled, |ui| {
-                        if quick(ui, icon::SNOWFLAKE, frozen, "Freeze game controllers") {
-                            if let Some((id, _)) = st.watch_freeze_client {
-                                st.freeze_toggle_request = Some(id);
-                                st.sound_tab = true;
-                            }
+                let ids = st.watch_buttons.clone();
+                for row in ids.chunks(2) {
+                    ui.horizontal(|ui| {
+                        for id in row {
+                            watch_quick_button(ui, st, id, &quick);
                         }
                     });
-                });
+                }
             });
             }
         });
@@ -727,6 +805,95 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
             });
         });
     });
+}
+
+/// Everything a watch quick button can do, in cycle order.
+pub const WATCH_BUTTON_IDS: [&str; 9] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos"];
+
+pub fn watch_button_info(id: &str) -> (&'static str, &'static str) {
+    match id {
+        "keyboard" => (icon::KEYBOARD, "VR keyboard"),
+        "recenter" => (icon::CROSSHAIR, "Recenter playspace"),
+        "layouts" => (icon::SQUARES_FOUR, "Screen layouts"),
+        "freeze" => (icon::SNOWFLAKE, "Freeze game controllers"),
+        "timer" => (icon::TIMER, "Timer"),
+        "screenshot" => (icon::CAMERA, "Take a screenshot"),
+        "screens" => (icon::MONITOR, "Hide / restore all screens"),
+        "mute" => (icon::BELL_SLASH, "Mute notifications"),
+        "photos" => (icon::IMAGES, "Photos"),
+        _ => (icon::QUESTION, "Unassigned"),
+    }
+}
+
+fn watch_quick_button(ui: &mut egui::Ui, st: &mut LibState, id: &str, quick: &dyn Fn(&mut egui::Ui, &str, bool, &str) -> bool) {
+    let (glyph, tip) = watch_button_info(id);
+    match id {
+        "keyboard" => {
+            if quick(ui, glyph, st.keyboard_shown, tip) {
+                st.keyboard_toggle_request = true;
+                st.sound_tab = true;
+            }
+        }
+        "recenter" => {
+            if quick(ui, glyph, false, tip) {
+                st.recenter_playspace_request = true;
+                st.sound_tab = true;
+            }
+        }
+        "layouts" => {
+            if quick(ui, glyph, st.watch_layout_menu, tip) {
+                st.watch_layout_menu = !st.watch_layout_menu;
+                st.watch_history_menu = false;
+                st.sound_tab = true;
+            }
+        }
+        "freeze" => {
+            let (frozen, enabled) = match st.watch_freeze_client {
+                Some((_, f)) => (f, true),
+                None => (false, false),
+            };
+            ui.add_enabled_ui(enabled, |ui| {
+                if quick(ui, glyph, frozen, tip) {
+                    if let Some((id, _)) = st.watch_freeze_client {
+                        st.freeze_toggle_request = Some(id);
+                        st.sound_tab = true;
+                    }
+                }
+            });
+        }
+        "timer" => {
+            if quick(ui, glyph, st.timer_running, tip) {
+                st.watch_timer_request = true;
+                st.sound_tab = true;
+            }
+        }
+        "screenshot" => {
+            if quick(ui, glyph, false, tip) {
+                st.screenshot_request = true;
+                st.sound_tab = true;
+            }
+        }
+        "screens" => {
+            if quick(ui, glyph, st.desktop_shown > 0, tip) {
+                st.screens_toggle_request = true;
+            }
+        }
+        "mute" => {
+            if quick(ui, glyph, !st.notif_sound, tip) {
+                st.notif_sound = !st.notif_sound;
+                st.sound_tab = true;
+            }
+        }
+        "photos" => {
+            if quick(ui, glyph, false, tip) {
+                st.watch_photos_request = true;
+                st.sound_tab = true;
+            }
+        }
+        _ => {
+            quick(ui, glyph, false, tip);
+        }
+    }
 }
 
 /// A subtle inset card used to group the watch's areas.
@@ -2658,6 +2825,15 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
             divider(ui);
             setting_row(ui, "Docking", Some("Drop a screen next to another to dock them edge-to-edge (they then move as one) · B while gripping detaches it"), |_| {});
             divider(ui);
+            setting_row(
+                ui,
+                "Keyboard follows screens & text fields",
+                Some("Hides with its docked screen and returns with it; pops up under the last-used screen when a text field gets focus on the desktop (accessibility bus)"),
+                |ui| {
+                    t |= seg_toggle(ui, &mut st.keyboard_auto);
+                },
+            );
+            divider(ui);
             let mut fps = st.capture_max_fps as f32;
             setting_row(ui, "Capture frame-rate cap", Some("Frames above the headset rate are never seen; capping saves compositor GPU work (0 = unlimited)"), |ui| {
                 stepper_inline(ui, &mut fps, 0.0, 240.0, 30.0, |v| if v < 1.0 { "unlimited".into() } else { format!("{v:.0} fps") });
@@ -2732,6 +2908,18 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
             setting_row(ui, "Position locked", Some("Unlock, then grip the watch with the right hand to move it; the spot is remembered"), |ui| {
                 t |= seg_toggle(ui, &mut st.watch_locked);
             });
+            divider(ui);
+            for slot in 0..4 {
+                divider(ui);
+                let id = st.watch_buttons.get(slot).cloned().unwrap_or_default();
+                let (glyph, label) = watch_button_info(&id);
+                setting_row(ui, &format!("Quick button {}", slot + 1), Some("Tap to cycle through the available actions"), |ui| {
+                    if action_button(ui, glyph, label).clicked() {
+                        st.watch_button_cycle = Some(slot);
+                        st.sound_tab = true;
+                    }
+                });
+            }
             divider(ui);
             setting_row(ui, "Reset position", Some("Back to the default wrist spot"), |ui| {
                 if action_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Reset").clicked() {

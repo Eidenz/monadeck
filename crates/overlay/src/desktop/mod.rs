@@ -106,6 +106,9 @@ pub struct InputOut {
     pub keyboard_ptr: Option<(f32, f32, bool)>,
     /// A screen is being gripped/resized: show its numbers.
     pub gesture: Option<GestureInfo>,
+    /// A gripped screen would dock here on release: (marker pose at the target's
+    /// edge, marker height, target name, side).
+    pub dock_hint: Option<(xr::Posef, f32, String, i8)>,
 }
 
 enum PortalState {
@@ -177,6 +180,10 @@ pub struct DesktopViewer {
     /// A screen shown from the keyboard's pills: dock the (free) keyboard
     /// under it once it's placed.
     keyboard_dock_pending: Option<usize>,
+    /// Keyboard follows its docked screen's visibility (+ text-field pop-up).
+    pub keyboard_auto: bool,
+    /// The keyboard was auto-hidden with this screen; re-show when it returns.
+    kb_auto_hidden_for: Option<usize>,
     /// A layout was applied and nothing has been touched since: a double-B
     /// restore puts things back exactly instead of re-centring on the head.
     layout_untouched: bool,
@@ -249,6 +256,8 @@ impl DesktopViewer {
             grab_group: Vec::new(),
             grab_screen: None,
             keyboard_dock_pending: None,
+            keyboard_auto: false,
+            kb_auto_hidden_for: None,
             layout_untouched: false,
         }
     }
@@ -353,9 +362,9 @@ impl DesktopViewer {
         }
     }
 
-    /// Try to dock free screen `s` next to any other shown screen it was
-    /// released close to (outermost on that side).
-    fn try_snap_screen(&mut self, s: usize) {
+    /// Where free screen `s` would dock right now: (outermost screen on that
+    /// side, side, distance, dock pose), if within the snap zone.
+    fn dock_candidate(&self, s: usize) -> Option<(usize, i8, f32, xr::Posef)> {
         let own_group = self.group_of(s);
         let w = self.screens[s].size_m().0;
         let sp = self.screens[s].pose.position;
@@ -380,7 +389,13 @@ impl DesktopViewer {
                 }
             }
         }
-        if let Some((outer, side, _, pose)) = best {
+        best
+    }
+
+    /// Try to dock free screen `s` next to any other shown screen it was
+    /// released close to (outermost on that side).
+    fn try_snap_screen(&mut self, s: usize) {
+        if let Some((outer, side, _, pose)) = self.dock_candidate(s) {
             self.screens[s].dock_parent = Some((outer, side));
             self.screens[s].pose = pose;
             log::info!("desktop: {} docked {} of {}", self.screens[s].name, if side < 0 { "left" } else { "right" }, self.screens[outer].name);
@@ -706,9 +721,21 @@ impl DesktopViewer {
             self.screens[si].placed = false;
             if self.keyboard.attached == Some(si) {
                 self.keyboard.attached = None;
+                // Keyboard follows its screen away (and back).
+                if self.keyboard_auto && self.keyboard.visible {
+                    self.keyboard.visible = false;
+                    self.keyboard.grab = None;
+                    self.clipboard.set_active(false);
+                    self.kb_auto_hidden_for = Some(si);
+                }
             }
         } else {
             self.screens[si].show(&self.caps);
+            if self.kb_auto_hidden_for.take() == Some(si) && self.keyboard_auto {
+                self.keyboard.visible = true;
+                self.clipboard.set_active(true);
+                self.keyboard_dock_pending = Some(si);
+            }
         }
     }
 
@@ -834,6 +861,23 @@ impl DesktopViewer {
 
     pub fn keyboard_visible(&self) -> bool {
         self.keyboard.visible
+    }
+
+    /// A text field got focus on the desktop: pop the keyboard up under the
+    /// last-used shown screen (no-op when it's already up or nothing is shown).
+    pub fn keyboard_popup(&mut self) {
+        if self.keyboard.visible {
+            return;
+        }
+        let target = self
+            .last_screen
+            .filter(|&i| self.screens.get(i).is_some_and(|s| s.shown))
+            .or_else(|| self.screens.iter().position(|s| s.shown));
+        let Some(si) = target else { return };
+        self.keyboard.visible = true;
+        self.clipboard.set_active(true);
+        self.keyboard_dock_pending = Some(si);
+        self.kb_auto_hidden_for = None;
     }
 
     /// Dock the keyboard under `si` (or the nearest shown screen when None).
@@ -1150,6 +1194,15 @@ impl DesktopViewer {
                 }
             }
         }
+        // Docking preview while a lone screen is gripped.
+        if let Some(si) = self.grab_screen.filter(|&si| self.grab_group.is_empty() && self.screens[si].grab.is_some()) {
+            if let Some((outer, side, _, _)) = self.dock_candidate(si) {
+                let t = &self.screens[outer];
+                let (tw, th) = t.size_m();
+                let marker = offset_pose(&t.pose, side as f32 * (tw / 2.0 + SCREEN_DOCK_GAP / 2.0), 0.0, 0.01);
+                out.dock_hint = Some((marker, th, t.name.clone(), side));
+            }
+        }
         // Live numbers for the gripped screen.
         if let Some(s) = self.screens.iter().find(|s| s.grab.is_some()) {
             let (w, h) = s.size_m();
@@ -1163,6 +1216,9 @@ impl DesktopViewer {
                 body.push_str(&format!("  ·  curve {deg:.0}°"));
             } else {
                 body.push_str("  ·  flat");
+            }
+            if let Some((_, _, name, side)) = &out.dock_hint {
+                body.push_str(&format!("  ·  release to dock {} of {name}", if *side < 0 { "left" } else { "right" }));
             }
             let above = xr::Posef {
                 orientation: s.pose.orientation,

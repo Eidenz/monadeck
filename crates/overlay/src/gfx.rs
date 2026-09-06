@@ -483,6 +483,24 @@ pub fn fill_laser(
     Ok(())
 }
 
+/// A thin vertical bar (the laser texture) at `pose`, `height` tall — used as
+/// the docking-edge indicator.
+pub fn bar_quad<'a>(laser: &'a Laser, space: &'a xr::Space, pose: xr::Posef, height: f32) -> xr::CompositionLayerQuad<'a, xr::Vulkan> {
+    let sub = xr::SwapchainSubImage::new().swapchain(&laser.swapchain).image_array_index(0).image_rect(
+        xr::Rect2Di {
+            offset: xr::Offset2Di { x: 0, y: 0 },
+            extent: xr::Extent2Di { width: 8, height: 8 },
+        },
+    );
+    xr::CompositionLayerQuad::new()
+        .space(space)
+        .eye_visibility(xr::EyeVisibility::BOTH)
+        .sub_image(sub)
+        .pose(pose)
+        .size(xr::Extent2Df { width: 0.012, height })
+        .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+}
+
 /// A thin quad from the controller to the hit point, billboarded toward the HMD.
 /// Alpha-blended so a faded laser (see the desktop screens) shows through.
 pub fn laser_quad<'a>(

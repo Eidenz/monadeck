@@ -7,11 +7,13 @@
 //
 // The OpenXR/Vulkan/egui/laser plumbing is adapted from monado-frame.
 
+mod a11y;
 mod audio;
 mod desktop;
 mod games;
 mod gfx;
 mod mathx;
+mod media;
 mod monado;
 mod notifications;
 mod photos;
@@ -168,6 +170,19 @@ unsafe extern "system" fn get_instance_proc_addr(
 fn main() {
     // `monadeck-overlay --desktop-selftest`: exercise the desktop-viewer capture
     // path (portal → PipeWire → Vulkan import → PNG) with no headset/runtime.
+    if std::env::args().any(|a| a == "--a11y-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+        let a = a11y::A11y::start();
+        println!("a11y ok={} — click into text fields on the desktop for 25 s", a.ok);
+        let t = Instant::now();
+        while t.elapsed().as_secs() < 25 {
+            for ev in a.drain() {
+                println!("  focus: role={:?} editable={} app={:?}", ev.role, ev.editable, ev.app);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return;
+    }
     if std::env::args().any(|a| a == "--notify-selftest") {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
         let n = notifications::Notifications::start(true, true);
@@ -479,6 +494,14 @@ fn run() -> Result<()> {
     // Desktop + XSOverlay notifications → toasts (queued, one at a time).
     let notifications = notifications::Notifications::start(ov_cfg.notifications_enabled, ov_cfg.notifications_xso);
     let mut toast_queue: std::collections::VecDeque<(ToastState, f32)> = std::collections::VecDeque::new();
+    let mut notif_history: std::collections::VecDeque<(String, String, Instant)> = std::collections::VecDeque::new();
+    let media = media::Media::start();
+    // Text-field focus (AT-SPI) for the keyboard pop-up; only started when wanted.
+    let mut a11y: Option<a11y::A11y> = if ov_cfg.keyboard_auto { Some(a11y::A11y::start()) } else { None };
+    let mut text_focus_last: Option<Instant> = None;
+    // A second laser-coloured swapchain for the docking marker (filled once).
+    let mut marker = make_laser(&session, format)?;
+    fill_laser(&mut marker, &device, cmd, queue, fence, 0.85)?;
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -596,7 +619,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume)),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto)),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -665,6 +688,10 @@ fn run() -> Result<()> {
     st.notif_xso = ov_cfg.notifications_xso;
     st.notif_sound = ov_cfg.notifications_sound;
     st.notif_volume = ov_cfg.notifications_volume;
+    st.watch_buttons = ov_cfg.watch_buttons.clone();
+    st.keyboard_auto = ov_cfg.keyboard_auto;
+    desktop.keyboard_auto = ov_cfg.keyboard_auto;
+    st.watch_buttons.resize(4, "keyboard".into());
     st.notif_dbus_ok = notifications.dbus_ok;
     st.notif_udp_ok = notifications.udp_ok;
     let mut nav_prev = st.nav;
@@ -947,6 +974,9 @@ fn run() -> Result<()> {
                 continue;
             }
             let title = if n.app.is_empty() || n.app == n.title { n.title.clone() } else { format!("{} · {}", n.app, n.title) };
+            notif_history.push_front((title.clone(), n.body.clone(), now));
+            notif_history.truncate(3);
+            st.notif_unseen = (st.notif_unseen + 1).min(3);
             toast_queue.push_back((
                 ToastState { title, body: n.body, kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: n.icon, icon_tex: None },
                 n.timeout,
@@ -1199,6 +1229,81 @@ fn run() -> Result<()> {
         let show_sky = st.skybox_enabled && running.is_none();
         let sky_layer = if show_sky { sky.as_ref().and_then(|s| s.layer(&space)) } else { None };
 
+        // Text-field focus → keyboard pop-up (debounced; starts the listener on demand).
+        if st.keyboard_auto && a11y.is_none() {
+            a11y = Some(a11y::A11y::start());
+        }
+        if let Some(a) = &a11y {
+            for ev in a.drain() {
+                if ev.editable && st.keyboard_auto {
+                    let recent = text_focus_last.is_some_and(|t| t.elapsed().as_millis() < 800);
+                    text_focus_last = Some(Instant::now());
+                    if !recent {
+                        log::info!("a11y: text field focused ({} / {}) → keyboard", ev.role, ev.app);
+                        desktop.keyboard_popup();
+                    }
+                }
+            }
+        }
+        desktop.keyboard_auto = st.keyboard_auto;
+        // History ages + media state for the watch.
+        if st.notif_clear_request {
+            st.notif_clear_request = false;
+            notif_history.clear();
+            st.notif_unseen = 0;
+        }
+        st.notif_history = notif_history
+            .iter()
+            .map(|(t, b, at)| {
+                let s = at.elapsed().as_secs();
+                let age = if s < 60 { "now".to_string() } else if s < 3600 { format!("{} min", s / 60) } else { format!("{} h", s / 3600) };
+                (t.clone(), b.clone(), age)
+            })
+            .collect();
+        st.media = media.state();
+        if let Some(cmd) = st.media_request.take() {
+            media.send(cmd);
+        }
+        if st.screenshot_request {
+            st.screenshot_request = false;
+            // The fork's compositor takes a screenshot on SIGUSR1.
+            match std::process::Command::new("pkill").args(["-USR1", "-x", "monado-service"]).status() {
+                Ok(s) if s.success() => log::info!("screenshot requested (SIGUSR1)"),
+                Ok(_) => log::warn!("screenshot: monado-service not found"),
+                Err(e) => log::warn!("screenshot: pkill: {e}"),
+            }
+        }
+        if st.screens_toggle_request {
+            st.screens_toggle_request = false;
+            match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
+                desktop::ToggleAll::Nothing => {
+                    if let Some(h) = hmd {
+                        let mut t = make_toast("No screen selected", "Show screens from the watch or the bottom bar", ui::ToastKind::Info, &h);
+                        t.until = Instant::now() + std::time::Duration::from_millis(1500);
+                        toast = Some(t);
+                    }
+                }
+                _ => audio.tab(),
+            }
+        }
+        if let Some(slot) = st.watch_button_cycle.take() {
+            if let Some(cur) = st.watch_buttons.get_mut(slot) {
+                let i = ui::WATCH_BUTTON_IDS.iter().position(|id| id == cur).unwrap_or(0);
+                *cur = ui::WATCH_BUTTON_IDS[(i + 1) % ui::WATCH_BUTTON_IDS.len()].to_string();
+            }
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path).save();
+        }
+        if st.watch_photos_request {
+            st.watch_photos_request = false;
+            st.nav = ui::Nav::Photos;
+            st.show_splash = false;
+            if !visible {
+                visible = true;
+                recenter = true;
+                summon_at = Some(Instant::now());
+            }
+        }
+
         // --- Wrist watch (left controller; runs hidden or not) ------------------
         let tfmt = if st.watch_24h { "%H:%M" } else { "%-I:%M %p" };
         st.clock = chrono::Local::now().format(tfmt).to_string();
@@ -1427,6 +1532,7 @@ fn run() -> Result<()> {
                 }
                 _ => None,
             };
+            let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
             let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
             let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
             let (toast_q, popup_q);
@@ -1439,6 +1545,9 @@ fn run() -> Result<()> {
             }
             for c in &screen_cyls {
                 layers.push(c);
+            }
+            if let Some(q) = &dock_q {
+                layers.push(q);
             }
             if let Some(q) = &kb_q {
                 layers.push(q);
@@ -1743,6 +1852,7 @@ fn run() -> Result<()> {
             (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => Some(laser_quad(&laser, &space, &aim, t, &h)),
             _ => None,
         };
+        let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
         let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
         if let Some(s) = &sky_layer {
@@ -1754,6 +1864,9 @@ fn run() -> Result<()> {
         }
         for c in &screen_cyls {
             layers.push(c);
+        }
+        if let Some(q) = &dock_q {
+            layers.push(q);
         }
         if let Some(q) = &kb_q {
             layers.push(q);
@@ -1895,7 +2008,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume)),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto)),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -2150,6 +2263,8 @@ fn overlay_config_from(
         notifications_xso: st.notif_xso,
         notifications_sound: st.notif_sound,
         notifications_volume: st.notif_volume,
+        watch_buttons: st.watch_buttons.clone(),
+        keyboard_auto: st.keyboard_auto,
     }
 }
 
