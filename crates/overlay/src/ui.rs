@@ -627,7 +627,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
                 // (the row width includes the card's own margins — keep it inside)
-                ui.set_width(if wide { row_w - 16.0 } else { 214.0 });
+                ui.set_width(if wide { row_w - 24.0 } else { 214.0 });
                 ui.set_min_height(120.0);
                 // Corner icons inside the clock card: music (toggles the player view)
                 // and the notification bell (toggles the history). Drawn at fixed
@@ -635,11 +635,18 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 {
                     let r = ui.max_rect();
                     let mut x = r.right();
-                    let mut corner_btn = |ui: &mut egui::Ui, glyph: String, on: bool, hot: bool, tip: &str| -> bool {
+                    // `minimal`: tint the glyph only (no fill) — for the music icon.
+                    let mut corner_btn = |ui: &mut egui::Ui, glyph: String, on: bool, hot: bool, tip: &str, minimal: bool| -> bool {
                         x -= 28.0;
                         let rect = egui::Rect::from_min_size(egui::pos2(x, r.top() - 2.0), egui::vec2(26.0, 22.0));
-                        let fg = if on { egui::Color32::BLACK } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
-                        let fill = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgba_unmultiplied(150, 190, 255, 30) } else { egui::Color32::TRANSPARENT };
+                        let (fg, fill) = if minimal {
+                            let fg = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
+                            (fg, egui::Color32::TRANSPARENT)
+                        } else {
+                            let fg = if on { egui::Color32::BLACK } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
+                            let fill = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgba_unmultiplied(150, 190, 255, 30) } else { egui::Color32::TRANSPARENT };
+                            (fg, fill)
+                        };
                         // A child ui at a fixed rect: nothing is allocated in the
                         // card's own layout, so the clock doesn't move.
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -650,7 +657,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     };
                     if st.media.is_some() {
                         let playing = st.media.as_ref().is_some_and(|m| m.playing);
-                        if corner_btn(ui, icon::MUSIC_NOTES.to_string(), st.watch_media_menu, playing, "Now playing") {
+                        if corner_btn(ui, icon::MUSIC_NOTES.to_string(), st.watch_media_menu, playing, "Now playing", true) {
                             st.watch_media_menu = !st.watch_media_menu;
                             st.watch_history_menu = false;
                             st.watch_layout_menu = false;
@@ -661,7 +668,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     }
                     if !st.notif_history.is_empty() {
                         let label = if st.notif_unseen > 0 { format!("{}{}", icon::BELL_RINGING, st.notif_unseen) } else { icon::BELL.to_string() };
-                        if corner_btn(ui, label, st.watch_history_menu, st.notif_unseen > 0, "Recent notifications") {
+                        if corner_btn(ui, label, st.watch_history_menu, st.notif_unseen > 0, "Recent notifications", false) {
                             st.watch_history_menu = !st.watch_history_menu;
                             st.watch_media_menu = false;
                             st.watch_layout_menu = false;
@@ -813,8 +820,9 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         });
         // Menu + screens (fixed numbering, same as the bottom bar), in a card.
         watch_card(ui, |ui| {
-            // (inside the frame, available width already excludes the margins)
-            ui.set_width(ui.available_width());
+            // (inside the frame, available width already excludes the margins;
+            // a hair narrower still, so the stroke never touches the panel edge)
+            ui.set_width(ui.available_width() - 8.0);
             ui.horizontal(|ui| {
                 let menu = egui::Button::new(egui::RichText::new(icon::LIST).size(22.0).color(theme::ON_SURFACE))
                     .fill(theme::SURFACE_CONTAINER_HIGH)
