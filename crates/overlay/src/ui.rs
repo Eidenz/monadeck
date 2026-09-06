@@ -627,7 +627,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
                 // (the row width includes the card's own margins — keep it inside)
-                ui.set_width(if wide { row_w - 24.0 } else { 214.0 });
+                ui.set_width(if wide { row_w - 30.0 } else { 214.0 });
                 ui.set_min_height(120.0);
                 // Corner icons inside the clock card: music (toggles the player view)
                 // and the notification bell (toggles the history). Drawn at fixed
@@ -822,7 +822,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         watch_card(ui, |ui| {
             // (inside the frame, available width already excludes the margins;
             // a hair narrower still, so the stroke never touches the panel edge)
-            ui.set_width(ui.available_width() - 8.0);
+            ui.set_width(ui.available_width() - 4.0);
             ui.horizontal(|ui| {
                 let menu = egui::Button::new(egui::RichText::new(icon::LIST).size(22.0).color(theme::ON_SURFACE))
                     .fill(theme::SURFACE_CONTAINER_HIGH)
