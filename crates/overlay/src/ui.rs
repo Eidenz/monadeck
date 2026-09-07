@@ -153,6 +153,13 @@ pub struct LibState {
     pub watch_24h: bool,
     pub watch_locked: bool,
     pub watch_reset_request: bool,
+    /// Extra time zones (IANA ids) mirrored from the config, edited in Settings.
+    pub watch_zone_ids: Vec<String>,
+    pub watch_zone_cycle: Option<(usize, i32)>, // (slot, ±1 through ZONE_PRESETS)
+    pub watch_zone_remove: Option<usize>,
+    pub watch_zone_add: bool,
+    pub skybox_reload_request: bool,
+    pub skybox_custom_hint: String, // where a custom panorama is picked up from
     pub watch_date: String,
     pub watch_times: Vec<(String, String)>, // (label, HH:MM)
     pub watch_menu_request: bool,
@@ -376,6 +383,12 @@ impl LibState {
             watch_24h: false,
             watch_locked: true,
             watch_reset_request: false,
+            watch_zone_ids: Vec::new(),
+            watch_zone_cycle: None,
+            watch_zone_remove: None,
+            watch_zone_add: false,
+            skybox_reload_request: false,
+            skybox_custom_hint: String::new(),
             watch_date: String::new(),
             watch_times: Vec::new(),
             watch_menu_request: false,
@@ -973,6 +986,40 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         });
     });
 }
+
+/// Time zones offered by the watch's zone picker (◀ ▶ cycles through these;
+/// a zone set by hand in the config that isn't listed still works).
+pub const ZONE_PRESETS: &[&str] = &[
+    "Pacific/Honolulu",
+    "America/Anchorage",
+    "America/Los_Angeles",
+    "America/Denver",
+    "America/Chicago",
+    "America/New_York",
+    "America/Toronto",
+    "America/Sao_Paulo",
+    "Atlantic/Reykjavik",
+    "Europe/London",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Europe/Madrid",
+    "Europe/Rome",
+    "Europe/Warsaw",
+    "Europe/Helsinki",
+    "Europe/Moscow",
+    "Asia/Dubai",
+    "Asia/Kolkata",
+    "Asia/Bangkok",
+    "Asia/Singapore",
+    "Asia/Hong_Kong",
+    "Asia/Shanghai",
+    "Asia/Seoul",
+    "Asia/Tokyo",
+    "Australia/Perth",
+    "Australia/Sydney",
+    "Pacific/Auckland",
+    "UTC",
+];
 
 /// Everything a watch quick button can do, in cycle order.
 pub const WATCH_BUTTON_IDS: [&str; 9] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos"];
@@ -3280,10 +3327,33 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                     st.sound_tab = true;
                 }
             });
-            divider(ui);
-            let zones: Vec<String> = st.watch_times.iter().map(|(l, _)| l.clone()).collect();
-            let zl = if zones.is_empty() { "none".to_string() } else { zones.join(" · ") };
-            setting_row(ui, "Extra time zones", Some(&format!("{zl} — edit `watch_timezones` in overlay.json (IANA names)")), |_| {});
+            // Extra time zones: up to two, cycled through a preset list.
+            let zones = st.watch_zone_ids.clone();
+            for (slot, id) in zones.iter().enumerate() {
+                divider(ui);
+                let now = st.watch_times.get(slot).map(|(_, t)| t.clone()).unwrap_or_default();
+                let sub = if now.is_empty() { id.clone() } else { format!("{id} · {now} now") };
+                setting_row(ui, &format!("Time zone {}", slot + 1), Some(&sub), |ui| {
+                    if icon_button(ui, icon::TRASH, "Remove this zone", false).clicked() {
+                        st.watch_zone_remove = Some(slot);
+                    }
+                    ui.add_space(6.0);
+                    if icon_button(ui, icon::CARET_RIGHT, "Next zone", false).clicked() {
+                        st.watch_zone_cycle = Some((slot, 1));
+                    }
+                    if icon_button(ui, icon::CARET_LEFT, "Previous zone", false).clicked() {
+                        st.watch_zone_cycle = Some((slot, -1));
+                    }
+                });
+            }
+            if zones.len() < 2 {
+                divider(ui);
+                setting_row(ui, "Extra time zone", Some("Shown under the clock on the watch · up to two"), |ui| {
+                    if action_button(ui, icon::PLUS, "Add zone").clicked() {
+                        st.watch_zone_add = true;
+                    }
+                });
+            }
             if t {
                 st.sound_tab = true;
             }
@@ -3323,7 +3393,16 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                 t |= seg_toggle(ui, &mut st.skybox_enabled);
             });
             divider(ui);
-            setting_row(ui, "Custom panorama", Some("Set `skybox_path` in overlay.json to an equirectangular JPEG/PNG (2:1), restart the overlay"), |_| {});
+            setting_row(
+                ui,
+                "Custom panorama",
+                Some(&format!("Drop an equirectangular JPEG/PNG (2:1) at {} and reload", st.skybox_custom_hint)),
+                |ui| {
+                    if action_button(ui, icon::ARROW_CLOCKWISE, "Reload").clicked() {
+                        st.skybox_reload_request = true;
+                    }
+                },
+            );
             if t {
                 st.sound_tab = true;
             }

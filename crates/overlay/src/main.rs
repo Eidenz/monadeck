@@ -585,22 +585,12 @@ fn run() -> Result<()> {
     let mut watch_offset = ov_cfg.watch_offset.map(arr_to_pose).unwrap_or(watch_default);
     watch_scale = ov_cfg.watch_scale.clamp(0.5, 2.0);
     // Watch time zones (bad names are skipped with a warning).
-    let watch_zones: Vec<(String, chrono_tz::Tz)> = ov_cfg
-        .watch_timezones
-        .iter()
-        .filter_map(|n| match n.parse::<chrono_tz::Tz>() {
-            Ok(tz) => Some((n.rsplit('/').next().unwrap_or(n).replace('_', " "), tz)),
-            Err(_) => {
-                log::warn!("watch: unknown time zone '{n}'");
-                None
-            }
-        })
-        .collect();
+    let mut watch_zones = parse_zones(&ov_cfg.watch_timezones);
     desktop.keyboard.scale = ov_cfg.keyboard_scale.clamp(0.5, 2.0);
     log::info!("desktop: curved={curved} opacity={color_scale}");
     let mut screencast_token = ov_cfg.screencast_token.clone();
     let mut sky = if equirect {
-        Some(sky::Sky::load(ov_cfg.skybox_path.clone()))
+        Some(sky::Sky::load(sky::resolve_path(ov_cfg.skybox_path.clone())))
     } else {
         log::warn!("runtime lacks XR_KHR_composition_layer_equirect2; no 360° background");
         None
@@ -694,6 +684,8 @@ fn run() -> Result<()> {
     st.capture_max_height = ov_cfg.capture_max_height;
     st.skybox_enabled = ov_cfg.skybox_enabled;
     st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
+    st.skybox_custom_hint = sky::custom_path_hint();
+    st.watch_zone_ids = ov_cfg.watch_timezones.clone();
     st.gesture_enabled = gestures.enabled;
     st.gesture_hold_ms = gestures.hold_ms as f32;
     st.gesture_feedback = gestures.frame_feedback;
@@ -1426,6 +1418,16 @@ fn run() -> Result<()> {
         }
 
         // --- 360° background: upload once, show only while no game runs ------
+        if st.skybox_reload_request {
+            st.skybox_reload_request = false;
+            if equirect {
+                let path = sky::resolve_path(ov_cfg.skybox_path.clone());
+                let custom = path.is_some();
+                sky = Some(sky::Sky::load(path));
+                st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_default();
+                st.flash(if custom { "Panorama reloaded" } else { "No custom panorama found · using the built-in one" });
+            }
+        }
         if let Some(s) = &mut sky {
             if let Err(e) = s.poll(&session, &device, &allocator, format, cmd, queue, fence) {
                 log::error!("sky: {e}");
@@ -1522,6 +1524,40 @@ fn run() -> Result<()> {
         let utc = chrono::Utc::now();
         let zfmt = if st.watch_24h { "%H:%M" } else { "%-I:%M %p" };
         st.watch_times = watch_zones.iter().map(|(l, tz)| (l.clone(), utc.with_timezone(tz).format(zfmt).to_string())).collect();
+        // Time zone edits from Settings → Wrist watch.
+        {
+            let mut zones_dirty = false;
+            if let Some((slot, dir)) = st.watch_zone_cycle.take() {
+                if let Some(cur) = ov_cfg.watch_timezones.get_mut(slot) {
+                    let n = ui::ZONE_PRESETS.len() as i32;
+                    let i = ui::ZONE_PRESETS.iter().position(|z| z == cur).map(|i| i as i32).unwrap_or(if dir > 0 { -1 } else { 0 });
+                    *cur = ui::ZONE_PRESETS[((i + dir).rem_euclid(n)) as usize].to_string();
+                    zones_dirty = true;
+                }
+            }
+            if let Some(slot) = st.watch_zone_remove.take() {
+                if slot < ov_cfg.watch_timezones.len() {
+                    let z = ov_cfg.watch_timezones.remove(slot);
+                    st.flash(format!("{} removed from the watch", z.rsplit('/').next().unwrap_or(&z).replace('_', " ")));
+                    zones_dirty = true;
+                }
+            }
+            if st.watch_zone_add {
+                st.watch_zone_add = false;
+                if ov_cfg.watch_timezones.len() < 2 {
+                    // First preset not already shown.
+                    let pick = ui::ZONE_PRESETS.iter().find(|z| !ov_cfg.watch_timezones.iter().any(|c| c == *z)).unwrap_or(&"UTC");
+                    ov_cfg.watch_timezones.push(pick.to_string());
+                    zones_dirty = true;
+                }
+            }
+            if zones_dirty {
+                watch_zones = parse_zones(&ov_cfg.watch_timezones);
+                st.watch_zone_ids = ov_cfg.watch_timezones.clone();
+                st.sound_tab = true;
+                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+            }
+        }
         if st.watch_reset_request {
             st.watch_reset_request = false;
             watch_offset = watch_default;
@@ -2567,6 +2603,21 @@ fn overlay_config_from(
         ps_drag_vertical: st.ps_drag_vertical,
         ps_drag_follow: st.ps_drag_follow,
     }
+}
+
+/// Parse the watch's extra time zones (IANA ids) into (short label, zone);
+/// bad names are skipped with a warning.
+fn parse_zones(names: &[String]) -> Vec<(String, chrono_tz::Tz)> {
+    names
+        .iter()
+        .filter_map(|n| match n.parse::<chrono_tz::Tz>() {
+            Ok(tz) => Some((n.rsplit('/').next().unwrap_or(n).replace('_', " "), tz)),
+            Err(_) => {
+                log::warn!("watch: unknown time zone '{n}'");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Play the sounds the UI asked for this frame. A confirmation chime or a
