@@ -661,7 +661,9 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     // `on` = its view is open (tap again to close); `badge` = a
                     // small count bubble on the glyph's shoulder.
                     let corner_btn = |ui: &mut egui::Ui, left: bool, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
-                        let x = if left { r.left() + 2.0 } else { r.right() - 28.0 };
+                        // The left edge sits a little into the margin so both glyphs
+                        // end up the same distance from their card edge.
+                        let x = if left { r.left() - 8.0 } else { r.right() - 28.0 };
                         let rect = egui::Rect::from_min_size(egui::pos2(x, r.top() - 2.0), egui::vec2(26.0, 22.0));
                         let fg = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
                         // A child ui at a fixed rect: nothing is allocated in the
@@ -736,7 +738,10 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     }
                 } else if st.watch_history_menu {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("{}  Recent", icon::BELL)).size(14.0).strong().color(egui::Color32::WHITE));
+                        // The corner bell (top-left, lit) is the header's icon; the
+                        // title starts to its right.
+                        ui.add_space(22.0);
+                        ui.label(egui::RichText::new("Recent").size(14.0).strong().color(egui::Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.add(egui::Button::new(egui::RichText::new(icon::TRASH).size(13.0)).min_size(egui::vec2(26.0, 22.0))).on_hover_text("Clear").clicked() {
                                 st.notif_clear_request = true;
