@@ -531,6 +531,6 @@ pub fn laser_quad<'a>(
         .eye_visibility(xr::EyeVisibility::BOTH)
         .sub_image(sub)
         .pose(xr::Posef { orientation: quatf(q), position: vec3f(mid) })
-        .size(xr::Extent2Df { width: 0.006, height: dist })
+        .size(xr::Extent2Df { width: 0.003, height: dist })
         .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
 }
