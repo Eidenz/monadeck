@@ -188,6 +188,9 @@ pub struct LibState {
     pub flash_sound: bool,
     /// Two-tap confirmation for destructive buttons: (key, armed at).
     pub confirm_arm: Option<(String, std::time::Instant)>,
+    /// Widgets that opt out of the hover glow this frame (rects), e.g. the
+    /// watch's corner icons which sit on the card's edge.
+    pub no_glow: Vec<egui::Rect>,
     /// Settings (mirrored to/from the persisted overlay config by the loop).
     pub audio_enabled: bool,
     pub audio_volume: f32,
@@ -406,6 +409,7 @@ impl LibState {
             flash: None,
             flash_sound: false,
             confirm_arm: None,
+            no_glow: Vec::new(),
             audio_enabled: true,
             audio_volume: 0.55,
             uevr_delay: 30,
@@ -526,13 +530,14 @@ pub fn interaction_pass(ctx: &egui::Context, st: &mut LibState) {
         let r = resp.rect;
         // Buttons, pills, chips, steppers — not tiles, sliders' wide tracks or the
         // search field (those have their own hover treatment or none by design).
-        if r.height() > 80.0 || r.width() > 420.0 {
+        if r.height() > 80.0 || r.width() > 420.0 || st.no_glow.iter().any(|n| n.contains(r.center())) {
             continue;
         }
         let down = resp.is_pointer_button_down_on();
         let alpha = if down { 52 } else { 18 };
         painter.rect_filled(r, egui::CornerRadius::same(10), egui::Color32::from_white_alpha(alpha));
     }
+    st.no_glow.clear();
 }
 
 const TILE_W: f32 = 168.0;
@@ -748,7 +753,8 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         });
         // Clock + zones (or the layout picker) | quick buttons — each in its own
         // card. A queued screenshot takes the whole row (bigger preview).
-        let wide = st.wrist_shot.is_some() && !st.watch_layout_menu && !st.watch_history_menu && !st.watch_media_menu;
+        // A queued screenshot or the notification history takes the whole row.
+        let wide = (st.wrist_shot.is_some() || st.watch_history_menu) && !st.watch_layout_menu && !st.watch_media_menu;
         let row_w = ui.available_width();
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
@@ -760,10 +766,11 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 // rects so they never push the content around.
                 {
                     let r = ui.max_rect();
+                    let mut no_glow: Vec<egui::Rect> = Vec::new();
                     // Tinted glyphs only (no fill): music top-right, bell top-left.
                     // `on` = its view is open (tap again to close); `badge` = a
                     // small count bubble on the glyph's shoulder.
-                    let corner_btn = |ui: &mut egui::Ui, left: bool, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
+                    let mut corner_btn = |ui: &mut egui::Ui, left: bool, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
                         // The left edge sits a little into the margin so both glyphs
                         // end up the same distance from their card edge.
                         let x = if left { r.left() - 8.0 } else { r.right() - 28.0 };
@@ -775,6 +782,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         let resp = child
                             .add(egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(egui::Color32::TRANSPARENT).corner_radius(8).min_size(rect.size()))
                             .on_hover_text(tip);
+                        no_glow.push(rect);
                         if badge > 0 {
                             // Beside the glyph (outside the button's rect), not over it.
                             let c = if left { egui::pos2(rect.right() + 6.0, rect.center().y) } else { egui::pos2(rect.left() - 6.0, rect.center().y) };
@@ -805,6 +813,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                             st.sound_tab = true;
                         }
                     }
+                    st.no_glow.extend(no_glow);
                 }
                 if st.watch_media_menu {
                     match &st.media {
@@ -852,19 +861,26 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                             }
                         });
                     });
+                    // One line per notification (the card is full-width here):
+                    // title · body, age on the right; the body truncates to fit.
                     for (title, body, age) in &st.notif_history {
-                        ui.add_space(2.0);
+                        ui.add_space(3.0);
                         ui.horizontal(|ui| {
-                            let t: String = title.chars().take(30).collect();
+                            let t: String = if title.chars().count() > 24 { format!("{}…", title.chars().take(23).collect::<String>()) } else { title.clone() };
                             ui.label(egui::RichText::new(t).size(12.0).strong().color(egui::Color32::WHITE));
+                            let age_w = 58.0;
+                            let body_w = (ui.available_width() - age_w).max(40.0);
+                            if !body.is_empty() {
+                                let b: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+                                ui.add_sized(
+                                    egui::vec2(body_w, 16.0),
+                                    egui::Label::new(egui::RichText::new(b).size(11.0).color(theme::ON_SURFACE_VAR)).truncate(),
+                                );
+                            }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(egui::RichText::new(age).size(10.0).color(theme::ON_SURFACE_VAR));
                             });
                         });
-                        if !body.is_empty() {
-                            let b: String = body.chars().take(48).collect();
-                            ui.label(egui::RichText::new(b).size(11.0).color(theme::ON_SURFACE_VAR));
-                        }
                     }
                 } else if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
                     let req = crate::photos::wrist_card(ui, shot.thumb.as_ref(), shot.qr.as_deref(), &shot.when, shot.idx, shot.total);
