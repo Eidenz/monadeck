@@ -295,7 +295,6 @@ fn mapped_labels(labels: &KeyLabels, code: u16, latched: u8) -> (String, String)
 
 /// Draw the keyboard; presses are queued in `st.pending`.
 pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
-    st.clicked = false;
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgb(16, 20, 26))
         .corner_radius(16)

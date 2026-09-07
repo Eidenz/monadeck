@@ -28,6 +28,26 @@ pub struct Sky {
     pub source: String,
 }
 
+/// Where a custom panorama is picked up without any config editing:
+/// `~/.config/monadeck/skybox.{jpg,jpeg,png}`.
+pub fn custom_path_hint() -> String {
+    monadeck_core::paths::monadeck_config_dir().join("skybox.jpg").display().to_string()
+}
+
+/// The panorama to show: the configured `skybox_path` if set, else a file
+/// dropped at the fixed spot, else the built-in image.
+pub fn resolve_path(configured: Option<String>) -> Option<String> {
+    if configured.is_some() {
+        return configured;
+    }
+    let dir = monadeck_core::paths::monadeck_config_dir();
+    ["skybox.jpg", "skybox.jpeg", "skybox.png"]
+        .iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+}
+
 impl Sky {
     /// Start decoding `path` (or the built-in panorama when None / unreadable).
     pub fn load(path: Option<String>) -> Self {

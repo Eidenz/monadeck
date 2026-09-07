@@ -76,6 +76,9 @@ struct ToastState {
     /// Optional app icon (uploaded to the toast panel on first draw).
     icon: Option<egui::ColorImage>,
     icon_tex: Option<egui::TextureHandle>,
+    /// Re-place in front of the head every frame (the boot greeting, which
+    /// must find you even if you put the headset on late).
+    follow: bool,
 }
 
 /// The SteamVR-style game-launch popup: its own composition layer (so it
@@ -123,6 +126,7 @@ fn make_toast(
         until: Instant::now() + std::time::Duration::from_secs(5),
         icon: None,
         icon_tex: None,
+        follow: false,
     }
 }
 
@@ -435,7 +439,7 @@ fn run() -> Result<()> {
     // of the dashboard, even over a running game.
     let mut toast_panel = make_panel(
         &session, &device, allocator.clone(), render_pass, format, srgb,
-        (720, 168), (0.44, 0.44 * 168.0 / 720.0), anchor,
+        (960, 176), (0.56, 0.56 * 176.0 / 960.0), anchor,
     )?;
     // The game-launch popup ("now starting" card). Its own layer, so it persists
     // after the dashboard auto-closes on launch (SteamVR-style); shows hero art.
@@ -573,6 +577,14 @@ fn run() -> Result<()> {
         &session, &device, allocator.clone(), render_pass, format, srgb,
         kb_px, desktop::keyboard::size_m(), anchor,
     )?;
+    // Screen-swap islands: one small panel per approved screen, made on demand.
+    let mut island_panels: Vec<Option<gfx::PanelGfx>> = Vec::new();
+    let mk_island = || {
+        make_panel(
+            &session, &device, allocator.clone(), render_pass, format, srgb,
+            desktop::island::PANEL_PX, desktop::island::size_m(), xr::Posef::IDENTITY,
+        )
+    };
     desktop.set_width(ov_cfg.screen_width_m);
     desktop.caps.curved = curved;
     desktop.caps.color_scale = color_scale;
@@ -581,22 +593,12 @@ fn run() -> Result<()> {
     let mut watch_offset = ov_cfg.watch_offset.map(arr_to_pose).unwrap_or(watch_default);
     watch_scale = ov_cfg.watch_scale.clamp(0.5, 2.0);
     // Watch time zones (bad names are skipped with a warning).
-    let watch_zones: Vec<(String, chrono_tz::Tz)> = ov_cfg
-        .watch_timezones
-        .iter()
-        .filter_map(|n| match n.parse::<chrono_tz::Tz>() {
-            Ok(tz) => Some((n.rsplit('/').next().unwrap_or(n).replace('_', " "), tz)),
-            Err(_) => {
-                log::warn!("watch: unknown time zone '{n}'");
-                None
-            }
-        })
-        .collect();
+    let mut watch_zones = parse_zones(&ov_cfg.watch_timezones);
     desktop.keyboard.scale = ov_cfg.keyboard_scale.clamp(0.5, 2.0);
     log::info!("desktop: curved={curved} opacity={color_scale}");
     let mut screencast_token = ov_cfg.screencast_token.clone();
     let mut sky = if equirect {
-        Some(sky::Sky::load(ov_cfg.skybox_path.clone()))
+        Some(sky::Sky::load(sky::resolve_path(ov_cfg.skybox_path.clone())))
     } else {
         log::warn!("runtime lacks XR_KHR_composition_layer_equirect2; no 360° background");
         None
@@ -690,6 +692,8 @@ fn run() -> Result<()> {
     st.capture_max_height = ov_cfg.capture_max_height;
     st.skybox_enabled = ov_cfg.skybox_enabled;
     st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
+    st.skybox_custom_hint = sky::custom_path_hint();
+    st.watch_zone_ids = ov_cfg.watch_timezones.clone();
     st.gesture_enabled = gestures.enabled;
     st.gesture_hold_ms = gestures.hold_ms as f32;
     st.gesture_feedback = gestures.frame_feedback;
@@ -756,6 +760,11 @@ fn run() -> Result<()> {
     // A freeze counting down before it applies: (client id, deadline).
     let mut pending_freeze: Option<(u32, Instant)> = None;
     let mut click_prev = false; // haptic click edge
+    // Boot greeting: armed at the first head pose, fired once the head actually
+    // moves (headset picked up / already worn), so it isn't wasted on a headset
+    // sitting on the desk. Gives up quietly after a couple of minutes.
+    let mut welcome_armed: Option<(xr::Posef, Instant)> = None;
+    let mut welcomed = false;
     // Laser fade over mirrored screens: (screen index, when the ray entered it).
     let mut screen_laser_since: Option<(usize, Instant)> = None;
     // Double-tap B on the LEFT controller toggles all screens (+ keyboard).
@@ -848,6 +857,7 @@ fn run() -> Result<()> {
                     last_used.clear();
                     refresh_rx = None;
                     manual_refresh = false;
+                    st.flash(format!("Library refreshed · {} games", st.games.len()));
                 }
             }
         }
@@ -1009,16 +1019,48 @@ fn run() -> Result<()> {
             notif_history.truncate(3);
             st.notif_unseen = (st.notif_unseen + 1).min(3);
             toast_queue.push_back((
-                ToastState { title, body: n.body, kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: n.icon, icon_tex: None },
+                ToastState { title, body: n.body, kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: n.icon, icon_tex: None, follow: false },
                 n.timeout,
             ));
         }
         if st.notif_test_request {
             st.notif_test_request = false;
             toast_queue.push_back((
-                ToastState { title: "Monadeck · Test".into(), body: "This is how a desktop or XSOverlay notification looks.".into(), kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: None, icon_tex: None },
+                ToastState { title: "Monadeck · Test".into(), body: "This is how a desktop or XSOverlay notification looks.".into(), kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: None, icon_tex: None, follow: false },
                 5.0,
             ));
+        }
+        if !welcomed {
+            if let Some(h) = hmd {
+                match welcome_armed {
+                    None => welcome_armed = Some((h, Instant::now())),
+                    Some((h0, t0)) => {
+                        let d = [h.position.x - h0.position.x, h.position.y - h0.position.y, h.position.z - h0.position.z];
+                        let moved = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() > 0.04;
+                        let (a, b) = (qf(&h.orientation), qf(&h0.orientation));
+                        let turned = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs() < 0.9976; // ~8°
+                        if moved || turned {
+                            welcomed = true;
+                            toast_queue.push_front((
+                                ToastState {
+                                    title: "Monadeck is ready".into(),
+                                    body: "Left system button opens the dashboard · Settings → Controllers → Help lists every gesture".into(),
+                                    kind: ui::ToastKind::Welcome,
+                                    pose: xr::Posef::IDENTITY,
+                                    until: now,
+                                    icon: None,
+                                    icon_tex: None,
+                                    follow: true,
+                                },
+                                6.0,
+                            ));
+                            audio.confirm();
+                        } else if t0.elapsed().as_secs() > 150 {
+                            welcomed = true;
+                        }
+                    }
+                }
+            }
         }
         // Expire + render the toast on its own layer (shows even over a game).
         if toast.as_ref().map_or(false, |t| now >= t.until) {
@@ -1042,6 +1084,17 @@ fn run() -> Result<()> {
         if let Some(t) = &mut toast {
             if let Some(img) = t.icon.take() {
                 t.icon_tex = Some(toast_panel.ctx.load_texture("toast-icon", img, egui::TextureOptions::LINEAR));
+            }
+            if t.follow {
+                if let Some(h) = hmd {
+                    // Ease toward the spot in front of the head rather than sticking to it.
+                    let target = mathx::toast_pose(&h, 1.3, 0.42);
+                    let k = 0.08;
+                    t.pose.position.x += (target.position.x - t.pose.position.x) * k;
+                    t.pose.position.y += (target.position.y - t.pose.position.y) * k;
+                    t.pose.position.z += (target.position.z - t.pose.position.z) * k;
+                    t.pose.orientation = target.orientation;
+                }
             }
             toast_panel.pose = t.pose;
             let (title, body, kind, icon_tex) = (t.title.clone(), t.body.clone(), t.kind, t.icon_tex.clone());
@@ -1293,7 +1346,7 @@ fn run() -> Result<()> {
                     drag_ps = [0.0; 3];
                     applied_ps_prev = base_ps;
                     monado.set_origin(base_ps.0, base_ps.1, base_ps.2, base_ps.3.to_radians());
-                    audio.tab();
+                    st.flash("Playspace snapped back");
                     for h in hands.iter().take(2) {
                         pulse(&session, &haptic_action, h.path, 0.5, 40);
                     }
@@ -1373,6 +1426,16 @@ fn run() -> Result<()> {
         }
 
         // --- 360° background: upload once, show only while no game runs ------
+        if st.skybox_reload_request {
+            st.skybox_reload_request = false;
+            if equirect {
+                let path = sky::resolve_path(ov_cfg.skybox_path.clone());
+                let custom = path.is_some();
+                sky = Some(sky::Sky::load(path));
+                st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_default();
+                st.flash(if custom { "Panorama reloaded" } else { "No custom panorama found · using the built-in one" });
+            }
+        }
         if let Some(s) = &mut sky {
             if let Err(e) = s.poll(&session, &device, &allocator, format, cmd, queue, fence) {
                 log::error!("sky: {e}");
@@ -1422,7 +1485,10 @@ fn run() -> Result<()> {
             // The fork's compositor takes a screenshot on SIGUSR1.
             match std::process::Command::new("pkill").args(["-USR1", "-x", "monado-service"]).status() {
                 Ok(s) if s.success() => log::info!("screenshot requested (SIGUSR1)"),
-                Ok(_) => log::warn!("screenshot: monado-service not found"),
+                Ok(_) => {
+                    log::warn!("screenshot: monado-service not found");
+                    st.flash("No monado-service to take the screenshot");
+                }
                 Err(e) => log::warn!("screenshot: pkill: {e}"),
             }
         }
@@ -1443,6 +1509,8 @@ fn run() -> Result<()> {
             if let Some(cur) = st.watch_buttons.get_mut(slot) {
                 let i = ui::WATCH_BUTTON_IDS.iter().position(|id| id == cur).unwrap_or(0);
                 *cur = ui::WATCH_BUTTON_IDS[(i + 1) % ui::WATCH_BUTTON_IDS.len()].to_string();
+                let label = ui::watch_button_info(cur).1;
+                st.flash(format!("Button {} → {label}", slot + 1));
             }
             overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
@@ -1464,9 +1532,44 @@ fn run() -> Result<()> {
         let utc = chrono::Utc::now();
         let zfmt = if st.watch_24h { "%H:%M" } else { "%-I:%M %p" };
         st.watch_times = watch_zones.iter().map(|(l, tz)| (l.clone(), utc.with_timezone(tz).format(zfmt).to_string())).collect();
+        // Time zone edits from Settings → Wrist watch.
+        {
+            let mut zones_dirty = false;
+            if let Some((slot, dir)) = st.watch_zone_cycle.take() {
+                if let Some(cur) = ov_cfg.watch_timezones.get_mut(slot) {
+                    let n = ui::ZONE_PRESETS.len() as i32;
+                    let i = ui::ZONE_PRESETS.iter().position(|z| z == cur).map(|i| i as i32).unwrap_or(if dir > 0 { -1 } else { 0 });
+                    *cur = ui::ZONE_PRESETS[((i + dir).rem_euclid(n)) as usize].to_string();
+                    zones_dirty = true;
+                }
+            }
+            if let Some(slot) = st.watch_zone_remove.take() {
+                if slot < ov_cfg.watch_timezones.len() {
+                    let z = ov_cfg.watch_timezones.remove(slot);
+                    st.flash(format!("{} removed from the watch", z.rsplit('/').next().unwrap_or(&z).replace('_', " ")));
+                    zones_dirty = true;
+                }
+            }
+            if st.watch_zone_add {
+                st.watch_zone_add = false;
+                if ov_cfg.watch_timezones.len() < 2 {
+                    // First preset not already shown.
+                    let pick = ui::ZONE_PRESETS.iter().find(|z| !ov_cfg.watch_timezones.iter().any(|c| c == *z)).unwrap_or(&"UTC");
+                    ov_cfg.watch_timezones.push(pick.to_string());
+                    zones_dirty = true;
+                }
+            }
+            if zones_dirty {
+                watch_zones = parse_zones(&ov_cfg.watch_timezones);
+                st.watch_zone_ids = ov_cfg.watch_timezones.clone();
+                st.sound_tab = true;
+                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+            }
+        }
         if st.watch_reset_request {
             st.watch_reset_request = false;
             watch_offset = watch_default;
+            st.flash("Watch back at its default spot");
             overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
         st.watch_freeze_client = running.as_ref().and_then(|app| {
@@ -1537,7 +1640,10 @@ fn run() -> Result<()> {
             render_panel(
                 &mut watch_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
                 true, ptr, (0.0, 0.0), start.elapsed().as_secs_f64(),
-                |ctx| ui::build_watch(ctx, &mut st),
+                |ctx| {
+                    ui::build_watch(ctx, &mut st);
+                    ui::interaction_pass(ctx, &mut st);
+                },
             )?;
         }
         let wr = std::mem::take(&mut st.wrist_req);
@@ -1605,19 +1711,14 @@ fn run() -> Result<()> {
         if st.recenter_playspace_request {
             st.recenter_playspace_request = false;
             monado.recenter();
+            st.flash("Playspace recentred");
         }
-        if st.sound_tab {
-            st.sound_tab = false;
-            audio.tab();
-        }
-        if st.sound_select {
-            st.sound_select = false;
-            audio.select();
-        }
+        drain_sounds(&mut st, &audio);
         // Desktop layouts: create / overwrite / apply / delete.
         let mut layouts_dirty = false;
         if let Some(name) = st.layout_create.take() {
             layouts.upsert(desktop.snapshot(name.clone(), hmd.as_ref()));
+            st.flash(format!("Layout “{name}” saved"));
             layouts.last_used = Some(name);
             layouts_dirty = true;
         }
@@ -1627,22 +1728,28 @@ fn run() -> Result<()> {
                 let mut snap = desktop.snapshot(name.clone(), hmd.as_ref());
                 snap.recenter_on_toggle = follow;
                 layouts.upsert(snap);
+                st.flash(format!("Saved over “{name}”"));
                 layouts.last_used = Some(name);
                 layouts_dirty = true;
             }
         }
         if let Some(i) = st.layout_apply.take() {
             if let Some(l) = layouts.layouts.get(i).cloned() {
+                st.flash(format!("Layout “{}” applied", l.name));
                 desktop.apply(&l);
                 layouts.last_used = Some(l.name);
                 layouts_dirty = true;
             }
         }
         if let Some(i) = st.layout_delete.take() {
+            if let Some(l) = layouts.layouts.get(i) {
+                st.flash(format!("Layout “{}” deleted", l.name));
+            }
             layouts.remove(i);
             layouts_dirty = true;
         }
         if let Some((i, name)) = st.layout_renamed.take() {
+            st.flash(format!("Renamed to “{name}”"));
             layouts.rename(i, name);
             layouts_dirty = true;
         }
@@ -1653,6 +1760,8 @@ fn run() -> Result<()> {
             if let Some(l) = layouts.layouts.get_mut(i) {
                 l.recenter_on_toggle = f;
                 layouts_dirty = true;
+                let msg = if f { format!("“{}” follows your head", l.name) } else { format!("“{}” keeps its place", l.name) };
+                st.flash(msg);
             }
         }
         if st.layout_cycle_request {
@@ -1661,6 +1770,7 @@ fn run() -> Result<()> {
                 let cur = layouts.last_used.as_ref().and_then(|n| layouts.layouts.iter().position(|l| &l.name == n));
                 let next = cur.map_or(0, |c| (c + 1) % layouts.layouts.len());
                 let l = layouts.layouts[next].clone();
+                st.flash(format!("Layout “{}”", l.name));
                 desktop.apply(&l);
                 layouts.last_used = Some(l.name);
                 monadeck_core::desktop_layouts::save(&layouts);
@@ -1671,6 +1781,13 @@ fn run() -> Result<()> {
         // Hidden: apply any finished refresh (rebuild while out of sight, so the
         // order is fresh on the next summon), drop input block, render only toasts.
         if !visible {
+            // A confirmation raised while the dashboard is away becomes a short toast.
+            if let Some((msg, _)) = st.flash.take() {
+                toast_queue.push_front((
+                    ToastState { title: msg, body: String::new(), kind: ui::ToastKind::Confirm, pose: xr::Posef::IDENTITY, until: now, icon: None, icon_tex: None, follow: false },
+                    2.2,
+                ));
+            }
             if let Some(rx) = &refresh_rx {
                 if let Ok(rows) = rx.try_recv() {
                     st.games = games::to_games(rows);
@@ -1678,6 +1795,10 @@ fn run() -> Result<()> {
                     st.selected = (!st.games.is_empty()).then_some(0);
                     last_used.clear();
                     refresh_rx = None;
+                    if manual_refresh {
+                        manual_refresh = false;
+                        st.flash(format!("Library refreshed · {} games", st.games.len()));
+                    }
                 }
             }
             // Mirrored screens stay interactive while the dashboard is away.
@@ -1686,7 +1807,7 @@ fn run() -> Result<()> {
             photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
             let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
             if let Some(g) = d_in.gesture {
-                toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None });
+                toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None, follow: false });
             }
             let want_block = desktop.pointing() || p_in.ray.is_some();
             if want_block != blocked_prev {
@@ -1695,7 +1816,13 @@ fn run() -> Result<()> {
             }
             let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
             if desktop.keyboard.clicked {
+                desktop.keyboard.clicked = false;
                 audio.key();
+            }
+            let (island_qs, island_swap) = render_islands(&mut desktop, &mut island_panels, d_in.island_ptr, &mk_island, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+            if let Some((from, to)) = island_swap {
+                desktop.swap_screen(from, to);
+                audio.tab();
             }
             let laser_alpha = screen_laser_alpha(desktop.pointing_screen(), &mut screen_laser_since);
             let laser_q = match (d_ray, hmd) {
@@ -1728,6 +1855,9 @@ fn run() -> Result<()> {
             }
             for c in &screen_cyls {
                 layers.push(c);
+            }
+            for q in &island_qs {
+                layers.push(q);
             }
             if let Some(q) = &dock_q {
                 layers.push(q);
@@ -1898,7 +2028,7 @@ fn run() -> Result<()> {
         photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
         let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
         if let Some(g) = d_in.gesture {
-            toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None });
+            toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None, follow: false });
         }
         if d_ray.is_some() {
             best = None;
@@ -1906,7 +2036,13 @@ fn run() -> Result<()> {
         }
         let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
         if desktop.keyboard.clicked {
+            desktop.keyboard.clicked = false;
             audio.key();
+        }
+        let (island_qs, island_swap) = render_islands(&mut desktop, &mut island_panels, d_in.island_ptr, &mk_island, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+        if let Some((from, to)) = island_swap {
+            desktop.swap_screen(from, to);
+            audio.tab();
         }
         // Feed the Desktop page.
         st.desktop_rows = desktop.rows();
@@ -1933,13 +2069,16 @@ fn run() -> Result<()> {
         // --- Render the three panels ----------------------------------------
         let elapsed = start.elapsed().as_secs_f64();
         render_panel(&mut main_panel, &device, render_pass, cmd, cmd_pool, queue, fence, false, main_ptr, scroll, elapsed, |ctx| {
-            ui::build_main(ctx, &mut st)
+            ui::build_main(ctx, &mut st);
+            ui::interaction_pass(ctx, &mut st);
         })?;
         render_panel(&mut rail_panel, &device, render_pass, cmd, cmd_pool, queue, fence, true, rail_ptr, (0.0, 0.0), elapsed, |ctx| {
-            ui::build_rail(ctx, &mut st)
+            ui::build_rail(ctx, &mut st);
+            ui::interaction_pass(ctx, &mut st);
         })?;
         render_panel(&mut bottom_panel, &device, render_pass, cmd, cmd_pool, queue, fence, true, bottom_ptr, (0.0, 0.0), elapsed, |ctx| {
-            ui::build_bottom(ctx, &mut st)
+            ui::build_bottom(ctx, &mut st);
+            ui::interaction_pass(ctx, &mut st);
         })?;
 
         // --- Lazy art: upload finished decodes, request on-screen/selected --
@@ -2061,6 +2200,9 @@ fn run() -> Result<()> {
         for c in &screen_cyls {
             layers.push(c);
         }
+        for q in &island_qs {
+            layers.push(q);
+        }
         if let Some(q) = &dock_q {
             layers.push(q);
         }
@@ -2140,6 +2282,7 @@ fn run() -> Result<()> {
                         launch_game(g);
                     }
                     audio.launch();
+                    st.click_pulse = false; // the launch chime is the click
                     // Hand off to the standalone launch popup (SteamVR-style): close
                     // the dashboard and put a "now starting" card in front of the
                     // head. Assigning `launch_popup` below replaces any popup already
@@ -2186,14 +2329,7 @@ fn run() -> Result<()> {
                 last_used.clear();
             }
         }
-        if st.sound_select {
-            st.sound_select = false;
-            audio.select();
-        }
-        if st.sound_tab {
-            st.sound_tab = false;
-            audio.tab();
-        }
+        drain_sounds(&mut st, &audio);
         // Settings changed in the Settings tab — apply live + persist.
         let settings_now = (
             st.audio_enabled,
@@ -2252,11 +2388,15 @@ fn run() -> Result<()> {
         if st.stop_request.take().is_some() {
             if let Some(app) = monado.running_app() {
                 stop_game(&app);
+                st.flash(format!("Stopping {app}…"));
             }
         }
         if let Some(i) = st.favorite_toggle_request.take() {
             if let Some(g) = st.games.get_mut(i) {
                 g.is_favorite = !g.is_favorite;
+                let msg = if g.is_favorite { "Added to favorites" } else { "Removed from favorites" };
+                st.flash(msg);
+                let g = &mut st.games[i];
                 if let Some(id) = &g.cover_id {
                     if g.is_favorite {
                         favorites.insert(id.clone());
@@ -2270,6 +2410,9 @@ fn run() -> Result<()> {
         if let Some(i) = st.uevr_toggle_request.take() {
             if let Some(g) = st.games.get_mut(i) {
                 g.uevr = !g.uevr;
+                let msg = if g.uevr { format!("VR Mod on for {}", g.name) } else { format!("VR Mod off for {}", g.name) };
+                st.flash(msg);
+                let g = &mut st.games[i];
                 if let Some(id) = &g.cover_id {
                     if g.uevr {
                         uevr_games.insert(id.clone());
@@ -2283,18 +2426,25 @@ fn run() -> Result<()> {
         // Collections: create / toggle the selected game's membership / delete.
         let mut cols_dirty = false;
         if let Some(name) = st.collection_create.take() {
+            st.flash(format!("Collection “{name}” created"));
             collections.push(monadeck_core::collections::Collection { name, members: Vec::new() });
             cols_dirty = true;
         }
         if let Some(ci) = st.collection_toggle.take() {
             if let Some(id) = st.selected.and_then(|i| st.games.get(i)).and_then(|g| g.cover_id.clone()) {
+                let was_in = collections.get(ci).is_some_and(|c| c.members.contains(&id));
                 monadeck_core::collections::toggle_member(&mut collections, ci, &id);
+                if let Some(c) = collections.get(ci) {
+                    let msg = if was_in { format!("Removed from “{}”", c.name) } else { format!("Added to “{}”", c.name) };
+                    st.flash(msg);
+                }
                 cols_dirty = true;
             }
         }
         if let Some(ci) = st.collection_delete.take() {
             if ci < collections.len() {
-                collections.remove(ci);
+                let c = collections.remove(ci);
+                st.flash(format!("Collection “{}” deleted", c.name));
                 cols_dirty = true;
             }
         }
@@ -2308,6 +2458,7 @@ fn run() -> Result<()> {
             if refresh_rx.is_none() {
                 refresh_rx = Some(games::spawn_scan());
                 manual_refresh = true;
+                st.flash("Refreshing library…");
             }
         }
         if st.recenter_request {
@@ -2340,6 +2491,9 @@ fn run() -> Result<()> {
         }
         if let Some(id) = st.set_active_request.take() {
             monado.set_primary(id);
+            if let Some(c) = st.monado_clients.iter().find(|c| c.id == id) {
+                st.flash(format!("Now showing {}", c.name));
+            }
         }
         if let Some(name) = st.kill_request.take() {
             stop_game(&name);
@@ -2401,6 +2555,57 @@ fn render_keyboard<'a>(
         return Ok(None);
     }
     Ok(Some(quad_layer(panel, space, true)))
+}
+
+/// Draw every visible screen-swap island (one panel per screen, created on
+/// first use) and return their quads plus a requested swap (from, to).
+#[allow(clippy::too_many_arguments)]
+fn render_islands<'a>(
+    desktop: &mut desktop::DesktopViewer,
+    panels: &'a mut Vec<Option<gfx::PanelGfx>>,
+    ptr: Option<(usize, f32, f32, bool)>,
+    mk: &dyn Fn() -> Result<gfx::PanelGfx>,
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    cmd: vk::CommandBuffer,
+    cmd_pool: vk::CommandPool,
+    queue: vk::Queue,
+    fence: vk::Fence,
+    elapsed: f64,
+    space: &'a xr::Space,
+) -> Result<(Vec<xr::CompositionLayerQuad<'a, xr::Vulkan>>, Option<(usize, usize)>)> {
+    let n = desktop.screen_count();
+    if panels.len() < n {
+        panels.resize_with(n, || None);
+    }
+    let items = desktop.island_items();
+    let mut active = Vec::new();
+    let mut swap = None;
+    for si in 0..n {
+        let alpha = desktop.island_alpha(si);
+        if alpha <= 0.0 {
+            continue;
+        }
+        if panels[si].is_none() {
+            panels[si] = Some(mk()?);
+        }
+        let p = panels[si].as_mut().expect("island panel");
+        let (pose, size) = desktop.island_pose(si);
+        p.pose = pose;
+        p.size_m = size;
+        let pointer = ptr.filter(|(s, _, _, _)| *s == si).map(|(_, u, v, d)| (u, v, d));
+        let mut picked = None;
+        render_panel(p, device, render_pass, cmd, cmd_pool, queue, fence, true, pointer, (0.0, 0.0), elapsed, |ctx| {
+            picked = desktop::island::build(ctx, &items, si, alpha);
+        })?;
+        if let Some(t) = picked {
+            swap = Some((si, t));
+        }
+        active.push(si);
+    }
+    let panels: &'a Vec<Option<gfx::PanelGfx>> = panels;
+    let quads = active.iter().map(|&si| quad_layer(panels[si].as_ref().expect("island panel"), space, true)).collect();
+    Ok((quads, swap))
 }
 
 /// The persisted overlay preferences, from live UI state.
@@ -2475,6 +2680,51 @@ fn overlay_config_from(
         ps_drag_button: st.ps_drag_button.clone(),
         ps_drag_vertical: st.ps_drag_vertical,
         ps_drag_follow: st.ps_drag_follow,
+    }
+}
+
+/// Parse the watch's extra time zones (IANA ids) into (short label, zone);
+/// bad names are skipped with a warning.
+fn parse_zones(names: &[String]) -> Vec<(String, chrono_tz::Tz)> {
+    names
+        .iter()
+        .filter_map(|n| match n.parse::<chrono_tz::Tz>() {
+            Ok(tz) => Some((n.rsplit('/').next().unwrap_or(n).replace('_', " "), tz)),
+            Err(_) => {
+                log::warn!("watch: unknown time zone '{n}'");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Play the sounds the UI asked for this frame. A confirmation chime or a
+/// specific sound wins; otherwise any widget click gets the generic click, so
+/// no button is ever silent.
+fn drain_sounds(st: &mut ui::LibState, audio: &audio::Audio) {
+    let mut played = false;
+    if st.flash_sound {
+        st.flash_sound = false;
+        audio.confirm();
+        played = true;
+    }
+    if st.sound_select {
+        st.sound_select = false;
+        audio.select();
+        played = true;
+    }
+    if st.sound_tab {
+        st.sound_tab = false;
+        if !played {
+            audio.tab();
+        }
+        played = true;
+    }
+    if st.click_pulse {
+        st.click_pulse = false;
+        if !played {
+            audio.tab();
+        }
     }
 }
 

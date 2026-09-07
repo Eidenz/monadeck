@@ -153,6 +153,13 @@ pub struct LibState {
     pub watch_24h: bool,
     pub watch_locked: bool,
     pub watch_reset_request: bool,
+    /// Extra time zones (IANA ids) mirrored from the config, edited in Settings.
+    pub watch_zone_ids: Vec<String>,
+    pub watch_zone_cycle: Option<(usize, i32)>, // (slot, ±1 through ZONE_PRESETS)
+    pub watch_zone_remove: Option<usize>,
+    pub watch_zone_add: bool,
+    pub skybox_reload_request: bool,
+    pub skybox_custom_hint: String, // where a custom panorama is picked up from
     pub watch_date: String,
     pub watch_times: Vec<(String, String)>, // (label, HH:MM)
     pub watch_menu_request: bool,
@@ -171,6 +178,19 @@ pub struct LibState {
     /// One-shot UI-sound requests, drained by the loop.
     pub sound_select: bool,
     pub sound_tab: bool,
+    /// Some widget was clicked this frame (set by `interaction_pass`): the loop
+    /// plays the generic click unless a more specific sound was requested.
+    pub click_pulse: bool,
+    /// An in-panel confirmation ("Layout saved"): text + when it appeared. Shown
+    /// as a pill at the bottom of the main panel, or as a short toast while the
+    /// dashboard is hidden. `flash_sound` asks the loop for the confirm chime.
+    pub flash: Option<(String, std::time::Instant)>,
+    pub flash_sound: bool,
+    /// Two-tap confirmation for destructive buttons: (key, armed at).
+    pub confirm_arm: Option<(String, std::time::Instant)>,
+    /// Widgets that opt out of the hover glow this frame (rects), e.g. the
+    /// watch's corner icons which sit on the card's edge.
+    pub no_glow: Vec<egui::Rect>,
     /// Settings (mirrored to/from the persisted overlay config by the loop).
     pub audio_enabled: bool,
     pub audio_volume: f32,
@@ -366,6 +386,12 @@ impl LibState {
             watch_24h: false,
             watch_locked: true,
             watch_reset_request: false,
+            watch_zone_ids: Vec::new(),
+            watch_zone_cycle: None,
+            watch_zone_remove: None,
+            watch_zone_add: false,
+            skybox_reload_request: false,
+            skybox_custom_hint: String::new(),
             watch_date: String::new(),
             watch_times: Vec::new(),
             watch_menu_request: false,
@@ -379,6 +405,11 @@ impl LibState {
             fade_in: 0.0,
             sound_select: false,
             sound_tab: false,
+            click_pulse: false,
+            flash: None,
+            flash_sound: false,
+            confirm_arm: None,
+            no_glow: Vec::new(),
             audio_enabled: true,
             audio_volume: 0.55,
             uevr_delay: 30,
@@ -451,6 +482,64 @@ impl LibState {
     }
 }
 
+impl LibState {
+    /// Show a short confirmation ("Layout “Standing” saved") with the confirm
+    /// chime — in the panel when the dashboard is up, as a toast otherwise.
+    pub fn flash(&mut self, msg: impl Into<String>) {
+        self.flash = Some((msg.into(), std::time::Instant::now()));
+        self.flash_sound = true;
+    }
+
+    /// Two-tap guard for destructive buttons. First tap arms `key` for 3 s and
+    /// returns false (the caller shows "tap again"); a second tap within that
+    /// window returns true and clears the arm.
+    pub fn confirm_tap(&mut self, key: &str) -> bool {
+        if self.is_armed(key) {
+            self.confirm_arm = None;
+            true
+        } else {
+            self.confirm_arm = Some((key.to_string(), std::time::Instant::now()));
+            self.sound_tab = true;
+            false
+        }
+    }
+
+    pub fn is_armed(&self, key: &str) -> bool {
+        self.confirm_arm.as_ref().is_some_and(|(k, t)| k == key && t.elapsed().as_secs_f32() < 3.0)
+    }
+}
+
+/// How long the confirmation pill stays up.
+const FLASH_SECS: f32 = 1.9;
+
+/// After a panel's UI is built: universal interaction feedback. Hovered
+/// clickable widgets get a faint highlight (stronger while pressed) whatever
+/// their fill colour, and any click sets `click_pulse` so the loop can play the
+/// generic click when nothing more specific asked for a sound.
+pub fn interaction_pass(ctx: &egui::Context, st: &mut LibState) {
+    let snap = ctx.viewport(|v| v.interact_widgets.clone());
+    if snap.clicked.is_some() {
+        st.click_pulse = true;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("hover-glow")));
+    for id in snap.hovered.iter() {
+        let Some(resp) = ctx.read_response(*id) else { continue };
+        if !resp.sense.senses_click() {
+            continue;
+        }
+        let r = resp.rect;
+        // Buttons, pills, chips, steppers — not tiles, sliders' wide tracks or the
+        // search field (those have their own hover treatment or none by design).
+        if r.height() > 80.0 || r.width() > 420.0 || st.no_glow.iter().any(|n| n.contains(r.center())) {
+            continue;
+        }
+        let down = resp.is_pointer_button_down_on();
+        let alpha = if down { 52 } else { 18 };
+        painter.rect_filled(r, egui::CornerRadius::same(10), egui::Color32::from_white_alpha(alpha));
+    }
+    st.no_glow.clear();
+}
+
 const TILE_W: f32 = 168.0;
 const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
 
@@ -468,10 +557,28 @@ pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
     overlays(ctx, st);
 }
 
-/// Foreground overlay: the summon fade-in. (The launch/loading card is now a
-/// standalone composition layer — see `build_launch_popup` — so it survives the
-/// dashboard closing.)
-fn overlays(ctx: &egui::Context, st: &LibState) {
+/// Foreground overlay: the confirmation pill and the summon fade-in. (The
+/// launch/loading card is a standalone composition layer — see
+/// `build_launch_popup` — so it survives the dashboard closing.)
+fn overlays(ctx: &egui::Context, st: &mut LibState) {
+    if st.flash.as_ref().is_some_and(|(_, t)| t.elapsed().as_secs_f32() > FLASH_SECS) {
+        st.flash = None;
+    }
+    if let Some((msg, since)) = &st.flash {
+        let age = since.elapsed().as_secs_f32();
+        let a = if age < 0.12 { age / 0.12 } else if age > FLASH_SECS - 0.35 { ((FLASH_SECS - age) / 0.35).clamp(0.0, 1.0) } else { 1.0 };
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("flash-pill")));
+        let avail = ctx.available_rect(); // above the on-panel keyboard when it's open
+        let galley = ctx.fonts(|f| f.layout_no_wrap(format!("{}  {msg}", icon::CHECK), egui::FontId::proportional(16.0), egui::Color32::WHITE));
+        let size = galley.size() + egui::vec2(38.0, 18.0);
+        // Slides up a touch as it fades in.
+        let center = egui::pos2(avail.center().x, avail.bottom() - 36.0 + (1.0 - a) * 8.0);
+        let rect = egui::Rect::from_center_size(center, size);
+        painter.rect_filled(rect.translate(egui::vec2(0.0, 2.0)), egui::CornerRadius::same(16), egui::Color32::from_black_alpha((a * 90.0) as u8));
+        painter.rect_filled(rect, egui::CornerRadius::same(16), egui::Color32::from_rgba_unmultiplied(22, 96, 90, (a * 240.0) as u8));
+        painter.rect_stroke(rect, egui::CornerRadius::same(16), egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(64, 224, 208, (a * 120.0) as u8)), egui::StrokeKind::Inside);
+        painter.galley(rect.min + egui::vec2(19.0, 9.0), galley, egui::Color32::from_white_alpha((a * 255.0) as u8));
+    }
     if st.fade_in > 0.001 {
         let screen = ctx.screen_rect();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("overlay-dim")));
@@ -562,6 +669,7 @@ fn top_bar(ctx: &egui::Context, st: &mut LibState) {
                 .fill(if st.keyboard_open { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH });
             if ui.add(kbd).clicked() {
                 st.keyboard_open = !st.keyboard_open;
+                st.sound_tab = true;
             }
         });
     });
@@ -645,7 +753,8 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         });
         // Clock + zones (or the layout picker) | quick buttons — each in its own
         // card. A queued screenshot takes the whole row (bigger preview).
-        let wide = st.wrist_shot.is_some() && !st.watch_layout_menu && !st.watch_history_menu && !st.watch_media_menu;
+        // A queued screenshot or the notification history takes the whole row.
+        let wide = (st.wrist_shot.is_some() || st.watch_history_menu) && !st.watch_layout_menu && !st.watch_media_menu;
         let row_w = ui.available_width();
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
@@ -657,13 +766,20 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 // rects so they never push the content around.
                 {
                     let r = ui.max_rect();
+                    let mut no_glow: Vec<egui::Rect> = Vec::new();
                     // Tinted glyphs only (no fill): music top-right, bell top-left.
                     // `on` = its view is open (tap again to close); `badge` = a
                     // small count bubble on the glyph's shoulder.
-                    let corner_btn = |ui: &mut egui::Ui, left: bool, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
+                    // `slot`: 0 = leftmost, 1 = rightmost, 2 = second from the right.
+                    let mut corner_btn = |ui: &mut egui::Ui, slot: u8, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
                         // The left edge sits a little into the margin so both glyphs
                         // end up the same distance from their card edge.
-                        let x = if left { r.left() - 8.0 } else { r.right() - 28.0 };
+                        let left = slot == 0;
+                        let x = match slot {
+                            0 => r.left() - 8.0,
+                            1 => r.right() - 28.0,
+                            _ => r.right() - 56.0,
+                        };
                         let rect = egui::Rect::from_min_size(egui::pos2(x, r.top() - 2.0), egui::vec2(26.0, 22.0));
                         let fg = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
                         // A child ui at a fixed rect: nothing is allocated in the
@@ -672,6 +788,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         let resp = child
                             .add(egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(egui::Color32::TRANSPARENT).corner_radius(8).min_size(rect.size()))
                             .on_hover_text(tip);
+                        no_glow.push(rect);
                         if badge > 0 {
                             // Beside the glyph (outside the button's rect), not over it.
                             let c = if left { egui::pos2(rect.right() + 6.0, rect.center().y) } else { egui::pos2(rect.left() - 6.0, rect.center().y) };
@@ -683,7 +800,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     };
                     if st.media.is_some() {
                         let playing = st.media.as_ref().is_some_and(|m| m.playing);
-                        if corner_btn(ui, false, icon::MUSIC_NOTES, st.watch_media_menu, playing, 0, "Now playing") {
+                        if corner_btn(ui, 1, icon::MUSIC_NOTES, st.watch_media_menu, playing, 0, "Now playing") {
                             st.watch_media_menu = !st.watch_media_menu;
                             st.watch_history_menu = false;
                             st.watch_layout_menu = false;
@@ -694,14 +811,25 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     }
                     if !st.notif_history.is_empty() {
                         let glyph = if st.notif_unseen > 0 { icon::BELL_RINGING } else { icon::BELL };
-                        if corner_btn(ui, true, glyph, st.watch_history_menu, st.notif_unseen > 0, st.notif_unseen, "Recent notifications") {
+                        if corner_btn(ui, 0, glyph, st.watch_history_menu, st.notif_unseen > 0, st.notif_unseen, "Recent notifications") {
                             st.watch_history_menu = !st.watch_history_menu;
                             st.watch_media_menu = false;
                             st.watch_layout_menu = false;
                             st.notif_unseen = 0;
                             st.sound_tab = true;
                         }
+                        // Clear lives in the corner too while the history is open,
+                        // so the list itself needs no header row.
+                        if st.watch_history_menu {
+                            let slot = if st.media.is_some() { 2 } else { 1 };
+                            if corner_btn(ui, slot, icon::TRASH, false, false, 0, "Clear notifications") {
+                                st.notif_clear_request = true;
+                                st.watch_history_menu = false;
+                                st.sound_tab = true;
+                            }
+                        }
                     }
+                    st.no_glow.extend(no_glow);
                 }
                 if st.watch_media_menu {
                     match &st.media {
@@ -737,31 +865,27 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         }
                     }
                 } else if st.watch_history_menu {
-                    ui.horizontal(|ui| {
-                        // The corner bell (top-left, lit) is the header's icon; the
-                        // title starts to its right.
-                        ui.add_space(22.0);
-                        ui.label(egui::RichText::new("Recent").size(14.0).strong().color(egui::Color32::WHITE));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(egui::RichText::new(icon::TRASH).size(13.0)).min_size(egui::vec2(26.0, 22.0))).on_hover_text("Clear").clicked() {
-                                st.notif_clear_request = true;
-                                st.watch_history_menu = false;
-                            }
-                        });
-                    });
+                    // No header: the lit bell (top-left) and the trash (top-right)
+                    // are in the corners. One line per notification, full width:
+                    // title · body, age on the right; the body truncates to fit.
+                    ui.add_space(24.0);
                     for (title, body, age) in &st.notif_history {
-                        ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            let t: String = title.chars().take(30).collect();
+                            let t: String = if title.chars().count() > 24 { format!("{}…", title.chars().take(23).collect::<String>()) } else { title.clone() };
                             ui.label(egui::RichText::new(t).size(12.0).strong().color(egui::Color32::WHITE));
+                            let age_w = 58.0;
+                            let body_w = (ui.available_width() - age_w).max(40.0);
+                            if !body.is_empty() {
+                                let b: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+                                ui.add_sized(
+                                    egui::vec2(body_w, 16.0),
+                                    egui::Label::new(egui::RichText::new(b).size(11.0).color(theme::ON_SURFACE_VAR)).truncate(),
+                                );
+                            }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(egui::RichText::new(age).size(10.0).color(theme::ON_SURFACE_VAR));
                             });
                         });
-                        if !body.is_empty() {
-                            let b: String = body.chars().take(48).collect();
-                            ui.label(egui::RichText::new(b).size(11.0).color(theme::ON_SURFACE_VAR));
-                        }
                     }
                 } else if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
                     let req = crate::photos::wrist_card(ui, shot.thumb.as_ref(), shot.qr.as_deref(), &shot.when, shot.idx, shot.total);
@@ -883,6 +1007,40 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         });
     });
 }
+
+/// Time zones offered by the watch's zone picker (◀ ▶ cycles through these;
+/// a zone set by hand in the config that isn't listed still works).
+pub const ZONE_PRESETS: &[&str] = &[
+    "Pacific/Honolulu",
+    "America/Anchorage",
+    "America/Los_Angeles",
+    "America/Denver",
+    "America/Chicago",
+    "America/New_York",
+    "America/Toronto",
+    "America/Sao_Paulo",
+    "Atlantic/Reykjavik",
+    "Europe/London",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Europe/Madrid",
+    "Europe/Rome",
+    "Europe/Warsaw",
+    "Europe/Helsinki",
+    "Europe/Moscow",
+    "Asia/Dubai",
+    "Asia/Kolkata",
+    "Asia/Bangkok",
+    "Asia/Singapore",
+    "Asia/Hong_Kong",
+    "Asia/Shanghai",
+    "Asia/Seoul",
+    "Asia/Tokyo",
+    "Australia/Perth",
+    "Australia/Sydney",
+    "Pacific/Auckland",
+    "UTC",
+];
 
 /// Everything a watch quick button can do, in cycle order.
 pub const WATCH_BUTTON_IDS: [&str; 9] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos"];
@@ -1212,8 +1370,18 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
             if fkey(ui, "Clear", 96.0, false).clicked() {
                 if naming { st.name_buf.clear(); } else { st.search.clear(); }
             }
-            let commit = if naming { "Create" } else { "Done" };
-            if fkey(ui, commit, 130.0, true).clicked() {
+            let commit = if !naming {
+                "Done"
+            } else if st.layout_rename.is_some() {
+                "Rename"
+            } else {
+                "Create"
+            };
+            let can_commit = !naming || !st.name_buf.trim().is_empty();
+            let commit_resp = ui.add_enabled_ui(can_commit, |ui| fkey(ui, commit, 130.0, true)).inner;
+            if !can_commit {
+                commit_resp.on_hover_text("Type a name first");
+            } else if commit_resp.clicked() {
                 if naming {
                     let name = st.name_buf.trim().to_string();
                     if !name.is_empty() {
@@ -1392,6 +1560,7 @@ fn collection_chips(ui: &mut egui::Ui, st: &mut LibState) {
             st.naming = true;
             st.name_buf.clear();
             st.keyboard_open = true;
+            st.sound_tab = true;
         }
     });
 }
@@ -1597,6 +1766,7 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
         st.naming = true;
         st.name_buf.clear();
         st.keyboard_open = true;
+        st.sound_tab = true;
     }
     ui.add_space(10.0);
 
@@ -1627,10 +1797,17 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
                         .color(theme::ON_SURFACE_VAR),
                 );
                 ui.add_space(6.0);
-                let del = egui::Button::new(egui::RichText::new(icon::TRASH).size(13.0).color(STOP_RED))
-                    .fill(egui::Color32::TRANSPARENT)
-                    .min_size(egui::vec2(28.0, 24.0));
-                if ui.add(del).on_hover_text("Delete collection").clicked() {
+                let key = format!("col-del:{ci}");
+                let armed = st.is_armed(&key);
+                let del = egui::Button::new(
+                    egui::RichText::new(if armed { format!("{}  Tap again to delete", icon::TRASH) } else { icon::TRASH.to_string() })
+                        .size(13.0)
+                        .color(if armed { egui::Color32::BLACK } else { STOP_RED }),
+                )
+                .fill(if armed { STOP_RED } else { egui::Color32::TRANSPARENT })
+                .corner_radius(8)
+                .min_size(egui::vec2(28.0, 24.0));
+                if ui.add(del).on_hover_text("Delete collection").clicked() && st.confirm_tap(&key) {
                     delete = Some(ci);
                 }
             });
@@ -1753,6 +1930,7 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
             .min_size(egui::vec2(280.0, 66.0));
             if ui.add(stop).clicked() {
                 st.stop_request = Some(i);
+                st.sound_tab = true;
             }
         });
     });
@@ -2028,6 +2206,7 @@ fn controls_card(ui: &mut egui::Ui) {
                 ("Grip + stick ▲▼", "push it away / pull it closer"),
                 ("Grip + trigger + stick ◀▶", "curve it"),
                 ("Release next to another screen", "dock to that edge (teal bar shows the spot)"),
+                ("Aim just above the top edge", "shows the swap island (also for 2 s when a screen appears) · tap another number to put that screen here"),
                 ("B while gripping", "undock"),
             ],
         ),
@@ -2267,6 +2446,10 @@ pub enum ToastKind {
     Info,
     /// A desktop / XSOverlay notification.
     Notification,
+    /// "Done" feedback for an action taken while the dashboard was hidden.
+    Confirm,
+    /// The boot greeting.
+    Welcome,
 }
 
 impl ToastKind {
@@ -2276,6 +2459,8 @@ impl ToastKind {
             ToastKind::Battery => (icon::BATTERY_WARNING, FAV_GOLD),
             ToastKind::Info => (icon::BELL_RINGING, theme::PRIMARY),
             ToastKind::Notification => (icon::BELL, egui::Color32::from_rgb(150, 190, 255)),
+            ToastKind::Confirm => (icon::CHECK_CIRCLE, theme::PRIMARY),
+            ToastKind::Welcome => (icon::HAND_WAVING, theme::PRIMARY),
         }
     }
 }
@@ -2319,7 +2504,7 @@ pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind
                     }
                     ui.add_space(16.0);
                     ui.vertical(|ui| {
-                        const TEXT_W: f32 = 560.0;
+                        const TEXT_W: f32 = 780.0;
                         ui.set_max_width(TEXT_W);
                         // Hard row caps + break-anywhere so a long title, a
                         // multi-line body or an unbroken URL can't spill past the
@@ -2514,13 +2699,14 @@ fn playspace_view(ui: &mut egui::Ui, st: &mut LibState) {
                     st.ps_game_yaw = 0.0;
                     st.ps_game_override = false;
                     st.ps_game_clear_request = true;
+                    st.flash(format!("{} uses the global offset", st.ps_game_name));
                 } else {
                     st.playspace_x = 0.0;
                     st.playspace_y = 0.0;
                     st.playspace_z = 0.0;
                     st.playspace_yaw = 0.0;
+                    st.flash("Playspace offset reset");
                 }
-                st.sound_tab = true;
             }
             ui.add_space(10.0);
             let rec = egui::Button::new(
@@ -2715,15 +2901,19 @@ fn monado_view(ui: &mut egui::Ui, st: &mut LibState) {
                 // Laid out right-to-left, so add Kill, then Freeze, then Set active
                 // to read [Set active] [Freeze] [Kill] left-to-right.
                 setting_row(ui, &label, sub, |ui| {
+                    let key = format!("kill:{}", c.id);
+                    let armed = st.is_armed(&key);
                     let kill = egui::Button::new(
-                        egui::RichText::new(format!("{}  Kill", icon::X)).size(16.0).color(egui::Color32::WHITE),
+                        egui::RichText::new(if armed { format!("{}  Sure?", icon::WARNING) } else { format!("{}  Kill", icon::X) })
+                            .size(16.0)
+                            .color(if armed { egui::Color32::BLACK } else { egui::Color32::WHITE }),
                     )
-                    .fill(egui::Color32::from_rgb(176, 64, 64))
+                    .fill(if armed { STOP_RED } else { egui::Color32::from_rgb(176, 64, 64) })
                     .corner_radius(10)
                     .min_size(egui::vec2(78.0, 42.0));
-                    if ui.add(kill).clicked() {
+                    if ui.add(kill).on_hover_text(if armed { "Tap again to close it" } else { "Close this app (two taps)" }).clicked() && st.confirm_tap(&key) {
                         st.kill_request = Some(c.name.clone());
-                        st.sound_tab = true;
+                        st.flash(format!("Closing {}…", c.name));
                     }
 
                     // Freeze only shows on a fork that supports it (stock Monado lacks
@@ -2906,9 +3096,10 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
         if st.desktop_ready {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if reset_button(ui, "Re-pick screens").clicked() {
+                    let armed = st.is_armed("repick");
+                    if reset_button(ui, if armed { "Tap again to re-pick" } else { "Re-pick screens" }).clicked() && st.confirm_tap("repick") {
                         st.desktop_reselect_request = true;
-                        st.sound_tab = true;
+                        st.flash("Pick your screens in the desktop dialog");
                     }
                 });
             });
@@ -3158,10 +3349,33 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                     st.sound_tab = true;
                 }
             });
-            divider(ui);
-            let zones: Vec<String> = st.watch_times.iter().map(|(l, _)| l.clone()).collect();
-            let zl = if zones.is_empty() { "none".to_string() } else { zones.join(" · ") };
-            setting_row(ui, "Extra time zones", Some(&format!("{zl} — edit `watch_timezones` in overlay.json (IANA names)")), |_| {});
+            // Extra time zones: up to two, cycled through a preset list.
+            let zones = st.watch_zone_ids.clone();
+            for (slot, id) in zones.iter().enumerate() {
+                divider(ui);
+                let now = st.watch_times.get(slot).map(|(_, t)| t.clone()).unwrap_or_default();
+                let sub = if now.is_empty() { id.clone() } else { format!("{id} · {now} now") };
+                setting_row(ui, &format!("Time zone {}", slot + 1), Some(&sub), |ui| {
+                    if icon_button(ui, icon::TRASH, "Remove this zone", false).clicked() {
+                        st.watch_zone_remove = Some(slot);
+                    }
+                    ui.add_space(6.0);
+                    if icon_button(ui, icon::CARET_RIGHT, "Next zone", false).clicked() {
+                        st.watch_zone_cycle = Some((slot, 1));
+                    }
+                    if icon_button(ui, icon::CARET_LEFT, "Previous zone", false).clicked() {
+                        st.watch_zone_cycle = Some((slot, -1));
+                    }
+                });
+            }
+            if zones.len() < 2 {
+                divider(ui);
+                setting_row(ui, "Extra time zone", Some("Shown under the clock on the watch · up to two"), |ui| {
+                    if action_button(ui, icon::PLUS, "Add zone").clicked() {
+                        st.watch_zone_add = true;
+                    }
+                });
+            }
             if t {
                 st.sound_tab = true;
             }
@@ -3201,7 +3415,16 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                 t |= seg_toggle(ui, &mut st.skybox_enabled);
             });
             divider(ui);
-            setting_row(ui, "Custom panorama", Some("Set `skybox_path` in overlay.json to an equirectangular JPEG/PNG (2:1), restart the overlay"), |_| {});
+            setting_row(
+                ui,
+                "Custom panorama",
+                Some(&format!("Drop an equirectangular JPEG/PNG (2:1) at {} and reload", st.skybox_custom_hint)),
+                |ui| {
+                    if action_button(ui, icon::ARROW_CLOCKWISE, "Reload").clicked() {
+                        st.skybox_reload_request = true;
+                    }
+                },
+            );
             if t {
                 st.sound_tab = true;
             }
@@ -3242,7 +3465,7 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                     st.panel_dist = 1.5;
                     st.panel_scale = 1.0;
                     st.panel_curve = 1.0;
-                    st.sound_tab = true;
+                    st.flash("Panel placement reset");
                 }
             });
         });
