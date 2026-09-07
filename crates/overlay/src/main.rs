@@ -17,8 +17,10 @@ mod media;
 mod monado;
 mod notifications;
 mod photos;
+mod preview;
 mod shots;
 mod sky;
+mod toast;
 mod ui;
 
 use std::collections::{HashMap, HashSet};
@@ -65,22 +67,6 @@ struct Hit {
     path: xr::Path,
 }
 
-/// An active notification: shown on its own floating layer (over a game too),
-/// auto-dismissed at `until`.
-struct ToastState {
-    title: String,
-    body: String,
-    kind: ui::ToastKind,
-    pose: xr::Posef,
-    until: Instant,
-    /// Optional app icon (uploaded to the toast panel on first draw).
-    icon: Option<egui::ColorImage>,
-    icon_tex: Option<egui::TextureHandle>,
-    /// Re-place in front of the head every frame (the boot greeting, which
-    /// must find you even if you put the headset on late).
-    follow: bool,
-}
-
 /// The SteamVR-style game-launch popup: its own composition layer (so it
 /// survives the dashboard closing), placed in front of the head when the game is
 /// launched. Lives until the game is detected running, or `deadline` passes. The
@@ -107,26 +93,6 @@ impl LaunchPopup {
         } else {
             "Starting…"
         }
-    }
-}
-
-/// A toast tucked into the lower view (~1.3 m ahead, dropped below the gaze) so
-/// it's read at a glance without blocking what you're looking at.
-fn make_toast(
-    title: impl Into<String>,
-    body: impl Into<String>,
-    kind: ui::ToastKind,
-    hmd: &xr::Posef,
-) -> ToastState {
-    ToastState {
-        title: title.into(),
-        body: body.into(),
-        kind,
-        pose: mathx::toast_pose(hmd, 1.3, 0.42),
-        until: Instant::now() + std::time::Duration::from_secs(5),
-        icon: None,
-        icon_tex: None,
-        follow: false,
     }
 }
 
@@ -197,6 +163,15 @@ fn main() {
                 println!("  [{:?}] app={:?} title={:?} body={:?} timeout={} icon={}", i.source, i.app, i.title, i.body, i.timeout, i.icon.is_some());
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return;
+    }
+    if let Some(i) = std::env::args().position(|a| a == "--toast-preview") {
+        // Render every toast kind (and the unfold animation) to PNGs, no VR needed.
+        let dir = std::env::args().nth(i + 1).unwrap_or_else(|| "toast-preview".into());
+        if let Err(e) = preview::run(std::path::Path::new(&dir)) {
+            eprintln!("toast preview FAILED: {e:#}");
+            std::process::exit(1);
         }
         return;
     }
@@ -435,12 +410,16 @@ fn run() -> Result<()> {
         &session, &device, allocator.clone(), render_pass, format, srgb,
         (1640, 151), (BOTTOM_W, BOTTOM_H), anchor,
     )?;
-    // A small notification panel (timer alarm, low battery) — shows independently
-    // of the dashboard, even over a running game.
+    // The notification card (toasts: desktop/XSO notifications, alarms, feedback)
+    // — shows independently of the dashboard, even over a running game.
     let mut toast_panel = make_panel(
         &session, &device, allocator.clone(), render_pass, format, srgb,
-        (960, 176), (0.56, 0.56 * 176.0 / 960.0), anchor,
+        (960, 280), (0.56, 0.56 * 280.0 / 960.0), anchor,
     )?;
+    // egui applies the pixel scale on its first pass (laid out on a default
+    // 10000-point screen) and ships the font atlas with it: render one empty
+    // frame now, so the first card's first frame isn't off-panel or textless.
+    render_panel(&mut toast_panel, &device, render_pass, cmd, cmd_pool, queue, fence, true, None, (0.0, 0.0), 0.0, |_| {})?;
     // The game-launch popup ("now starting" card). Its own layer, so it persists
     // after the dashboard auto-closes on launch (SteamVR-style); shows hero art.
     const LAUNCH_W: f32 = 0.58;
@@ -500,9 +479,9 @@ fn run() -> Result<()> {
     let mut photos = photos::Photos::new(&session, &device, allocator.clone(), render_pass, format, srgb, &photo_cfg)?;
     let mut gestures = shots::gestures::load();
     let mut gestures_prev = gestures.clone();
-    // Desktop + XSOverlay notifications → toasts (queued, one at a time).
+    // Desktop + XSOverlay notifications → toasts (queued, one card at a time).
     let notifications = notifications::Notifications::start(ov_cfg.notifications_enabled, ov_cfg.notifications_xso);
-    let mut toast_queue: std::collections::VecDeque<(ToastState, f32)> = std::collections::VecDeque::new();
+    let mut toasts = toast::Toasts::new();
     let mut notif_history: std::collections::VecDeque<(String, String, Instant)> = std::collections::VecDeque::new();
     let media = media::Media::start();
     // Text-field focus (AT-SPI) for the keyboard pop-up; only started when wanted.
@@ -785,7 +764,6 @@ fn run() -> Result<()> {
     let mut refresh_rx: Option<std::sync::mpsc::Receiver<Vec<monadeck_core::steam::LibraryGame>>> = None;
     let mut manual_refresh = false; // a user-requested "Refresh library" is pending
     // Notifications + timer (run even while the dashboard is hidden).
-    let mut toast: Option<ToastState> = None;
     let mut timer_end: Option<Instant> = None;
     let mut timer_paused: Option<u32> = None;
     let mut battery_low_warned = false;
@@ -951,9 +929,7 @@ fn run() -> Result<()> {
             let rem = end.saturating_duration_since(now).as_secs() as u32;
             if rem == 0 {
                 timer_end = None;
-                if let Some(h) = hmd {
-                    toast = Some(make_toast("Timer finished", "", ui::ToastKind::Timer, &h));
-                }
+                toasts.push(toast::Toast::new(toast::Kind::Timer, "Timer finished", "The countdown is over"));
                 audio.alarm();
                 pulse(&session, &haptic_action, left_path, 0.7, 60);
                 pulse(&session, &haptic_action, right_path, 0.7, 60);
@@ -984,20 +960,13 @@ fn run() -> Result<()> {
         {
             if low.charge < 0.15 && !battery_low_warned {
                 battery_low_warned = true;
-                if let Some(h) = hmd {
-                    let kind = match low.kind {
-                        monado::BatteryKind::Glove => "Glove",
-                        monado::BatteryKind::Controller => "Controller",
-                        monado::BatteryKind::Tracker => "Tracker",
-                        monado::BatteryKind::Other => "Device",
-                    };
-                    toast = Some(make_toast(
-                        "Low battery",
-                        format!("{kind} at {}%", (low.charge * 100.0).round() as i32),
-                        ui::ToastKind::Battery,
-                        &h,
-                    ));
-                }
+                let kind = match low.kind {
+                    monado::BatteryKind::Glove => "Glove",
+                    monado::BatteryKind::Controller => "Controller",
+                    monado::BatteryKind::Tracker => "Tracker",
+                    monado::BatteryKind::Other => "Device",
+                };
+                toasts.push(toast::Toast::new(toast::Kind::Battery, "Low battery", format!("{kind} at {}%", (low.charge * 100.0).round() as i32)));
                 audio.alarm();
             }
         }
@@ -1014,21 +983,25 @@ fn run() -> Result<()> {
             if !allowed {
                 continue;
             }
-            let title = if n.app.is_empty() || n.app == n.title { n.title.clone() } else { format!("{} · {}", n.app, n.title) };
-            notif_history.push_front((title.clone(), n.body.clone(), now));
+            let app = if n.app.is_empty() || n.app == n.title { String::new() } else { n.app.clone() };
+            let history_title = if app.is_empty() { n.title.clone() } else { format!("{app} · {}", n.title) };
+            notif_history.push_front((history_title, n.body.clone(), now));
             notif_history.truncate(3);
             st.notif_unseen = (st.notif_unseen + 1).min(3);
-            toast_queue.push_back((
-                ToastState { title, body: n.body, kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: n.icon, icon_tex: None, follow: false },
-                n.timeout,
-            ));
+            let source = match n.source {
+                notifications::Source::Desktop => toast::Source::Desktop,
+                notifications::Source::XsOverlay => toast::Source::XsOverlay,
+            };
+            toasts.push(toast::Toast::new(toast::Kind::Notification, n.title, n.body).app(app).source(source).secs(n.timeout).icon(n.icon));
         }
         if st.notif_test_request {
             st.notif_test_request = false;
-            toast_queue.push_back((
-                ToastState { title: "Monadeck · Test".into(), body: "This is how a desktop or XSOverlay notification looks.".into(), kind: ui::ToastKind::Notification, pose: xr::Posef::IDENTITY, until: now, icon: None, icon_tex: None, follow: false },
-                5.0,
-            ));
+            toasts.push(
+                toast::Toast::new(toast::Kind::Notification, "Sample notification", "This is how a desktop or XSOverlay notification looks. Apps bring their icon and colour along.")
+                    .app("Monadeck")
+                    .source(toast::Source::Desktop)
+                    .secs(5.0),
+            );
         }
         if !welcomed {
             if let Some(h) = hmd {
@@ -1041,19 +1014,7 @@ fn run() -> Result<()> {
                         let turned = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs() < 0.9976; // ~8°
                         if moved || turned {
                             welcomed = true;
-                            toast_queue.push_front((
-                                ToastState {
-                                    title: "Monadeck is ready".into(),
-                                    body: "Left system button opens the dashboard · Settings → Controllers → Help lists every gesture".into(),
-                                    kind: ui::ToastKind::Welcome,
-                                    pose: xr::Posef::IDENTITY,
-                                    until: now,
-                                    icon: None,
-                                    icon_tex: None,
-                                    follow: true,
-                                },
-                                6.0,
-                            ));
+                            toasts.push(toast::Toast::new(toast::Kind::Welcome, "Monadeck is ready", "Left system button opens the dashboard · Settings › Controllers › Help lists every gesture").follow());
                             audio.confirm();
                         } else if t0.elapsed().as_secs() > 150 {
                             welcomed = true;
@@ -1062,46 +1023,20 @@ fn run() -> Result<()> {
                 }
             }
         }
-        // Expire + render the toast on its own layer (shows even over a game).
-        if toast.as_ref().map_or(false, |t| now >= t.until) {
-            toast = None;
-        }
-        if toast.is_none() {
-            if let Some((mut t, secs)) = toast_queue.pop_front() {
-                if let Some(h) = hmd {
-                    t.pose = mathx::toast_pose(&h, 1.3, 0.42);
-                    t.until = now + std::time::Duration::from_secs_f32(secs);
-                    if st.notif_sound && t.kind == ui::ToastKind::Notification {
-                        audio.notify(st.notif_volume);
-                    }
-                    toast = Some(t);
-                } else {
-                    toast_queue.push_front((t, secs));
-                }
+        // Advance the toast queue and render the showing card on its own layer
+        // (it shows even over a game). Cards wait for a head pose to be placed.
+        if let Some(kind) = toasts.tick(now, hmd.as_ref()) {
+            if kind == toast::Kind::Notification && st.notif_sound {
+                audio.notify(st.notif_volume);
             }
         }
-        let toast_active = toast.is_some();
-        if let Some(t) = &mut toast {
-            if let Some(img) = t.icon.take() {
-                t.icon_tex = Some(toast_panel.ctx.load_texture("toast-icon", img, egui::TextureOptions::LINEAR));
-            }
-            if t.follow {
-                if let Some(h) = hmd {
-                    // Ease toward the spot in front of the head rather than sticking to it.
-                    let target = mathx::toast_pose(&h, 1.3, 0.42);
-                    let k = 0.08;
-                    t.pose.position.x += (target.position.x - t.pose.position.x) * k;
-                    t.pose.position.y += (target.position.y - t.pose.position.y) * k;
-                    t.pose.position.z += (target.position.z - t.pose.position.z) * k;
-                    t.pose.orientation = target.orientation;
-                }
-            }
-            toast_panel.pose = t.pose;
-            let (title, body, kind, icon_tex) = (t.title.clone(), t.body.clone(), t.kind, t.icon_tex.clone());
+        let toast_active = toasts.active();
+        if let Some((pose, queued)) = toasts.update(&toast_panel.ctx, hmd.as_ref()) {
+            toast_panel.pose = pose;
             render_panel(
                 &mut toast_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
                 true, None, (0.0, 0.0), start.elapsed().as_secs_f64(),
-                |ctx| ui::build_toast(ctx, &title, &body, kind, icon_tex.as_ref()),
+                |ctx| toasts.draw(ctx, now, queued),
             )?;
         }
 
@@ -1496,11 +1431,7 @@ fn run() -> Result<()> {
             st.screens_toggle_request = false;
             match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
                 desktop::ToggleAll::Nothing => {
-                    if let Some(h) = hmd {
-                        let mut t = make_toast("No screen selected", "Show screens from the watch or the bottom bar", ui::ToastKind::Info, &h);
-                        t.until = Instant::now() + std::time::Duration::from_millis(1500);
-                        toast = Some(t);
-                    }
+                    toasts.push(toast::Toast::new(toast::Kind::Info, "No screen selected", "Show screens from the watch or the bottom bar").secs(2.5));
                 }
                 _ => audio.tab(),
             }
@@ -1510,7 +1441,7 @@ fn run() -> Result<()> {
                 let i = ui::WATCH_BUTTON_IDS.iter().position(|id| id == cur).unwrap_or(0);
                 *cur = ui::WATCH_BUTTON_IDS[(i + 1) % ui::WATCH_BUTTON_IDS.len()].to_string();
                 let label = ui::watch_button_info(cur).1;
-                st.flash(format!("Button {} → {label}", slot + 1));
+                st.flash(format!("Button {} › {label}", slot + 1));
             }
             overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
         }
@@ -1686,11 +1617,7 @@ fn run() -> Result<()> {
                         audio.tab();
                     }
                     desktop::ToggleAll::Nothing => {
-                        if let Some(h) = hmd {
-                            let mut t = make_toast("No screen selected", "Show screens from the watch or the bottom bar", ui::ToastKind::Info, &h);
-                            t.until = Instant::now() + std::time::Duration::from_millis(1500);
-                            toast = Some(t);
-                        }
+                        toasts.push(toast::Toast::new(toast::Kind::Info, "No screen selected", "Show screens from the watch or the bottom bar").secs(2.5));
                     }
                 }
             } else {
@@ -1783,10 +1710,7 @@ fn run() -> Result<()> {
         if !visible {
             // A confirmation raised while the dashboard is away becomes a short toast.
             if let Some((msg, _)) = st.flash.take() {
-                toast_queue.push_front((
-                    ToastState { title: msg, body: String::new(), kind: ui::ToastKind::Confirm, pose: xr::Posef::IDENTITY, until: now, icon: None, icon_tex: None, follow: false },
-                    2.2,
-                ));
+                toasts.push(toast::Toast::new(toast::Kind::Confirm, msg, ""));
             }
             if let Some(rx) = &refresh_rx {
                 if let Ok(rows) = rx.try_recv() {
@@ -1807,7 +1731,7 @@ fn run() -> Result<()> {
             photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
             let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
             if let Some(g) = d_in.gesture {
-                toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None, follow: false });
+                toasts.readout(g.title, g.body, g.pose);
             }
             let want_block = desktop.pointing() || p_in.ray.is_some();
             if want_block != blocked_prev {
@@ -2028,7 +1952,7 @@ fn run() -> Result<()> {
         photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
         let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
         if let Some(g) = d_in.gesture {
-            toast = Some(ToastState { title: g.title, body: g.body, kind: ui::ToastKind::Info, pose: g.pose, until: Instant::now() + std::time::Duration::from_millis(700), icon: None, icon_tex: None, follow: false });
+            toasts.readout(g.title, g.body, g.pose);
         }
         if d_ray.is_some() {
             best = None;
@@ -2262,18 +2186,15 @@ fn run() -> Result<()> {
                     !appid.is_some_and(monadeck_core::steam::has_proton_prefix)
                 };
                 if uevr_blocked {
-                    if let Some(h) = hmd {
-                        toast = Some(make_toast(
-                            "Launch it in Steam first",
-                            format!(
-                                "{} has no Proton prefix yet. Force Proton in its Steam properties and run \
-                                 it once, then VR Mod will work.",
-                                g.name
-                            ),
-                            ui::ToastKind::Info,
-                            &h,
-                        ));
-                    }
+                    toasts.push(toast::Toast::new(
+                        toast::Kind::Warning,
+                        "Launch it in Steam first",
+                        format!(
+                            "{} has no Proton prefix yet. Force Proton in its Steam properties and run \
+                             it once, then VR Mod will work.",
+                            g.name
+                        ),
+                    ));
                     st.sound_tab = true;
                 } else {
                     if g.uevr {

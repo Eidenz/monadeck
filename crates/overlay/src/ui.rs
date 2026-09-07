@@ -2188,7 +2188,7 @@ fn controls_card(ui: &mut egui::Ui) {
             &[
                 ("Left system button", "summon / dismiss the dashboard (it re-centres in front of you)"),
                 ("Double-B (left hand)", "hide every screen + the keyboard, or bring them back"),
-                ("Hold trackpad, move hand", "drag the playspace (A + B on a UdCap glove) · System → Playspace → Drag"),
+                ("Hold trackpad, move hand", "drag the playspace (A + B on a UdCap glove) · System › Playspace › Drag"),
                 ("Trackpad twice", "snap the playspace back (A + B twice on a glove)"),
                 ("Trigger", "click on the dashboard, the watch, the keyboard, photo windows"),
             ],
@@ -2200,7 +2200,7 @@ fn controls_card(ui: &mut egui::Ui) {
                 ("Trigger", "left click · keep holding and move past the drag threshold to drag"),
                 ("A", "right click"),
                 ("B", "left click without moving the cursor (fiddly targets)"),
-                ("Thumbstick", "scroll (speed in Desktop → Behaviour)"),
+                ("Thumbstick", "scroll (speed in Desktop › Behaviour)"),
                 ("Grip", "move the screen (a docked group moves as one)"),
                 ("Grip + trigger, push / pull", "resize"),
                 ("Grip + stick ▲▼", "push it away / pull it closer"),
@@ -2435,95 +2435,6 @@ fn reset_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         .corner_radius(10)
         .min_size(egui::vec2(200.0, 42.0)),
     )
-}
-
-/// Per-notification icon + accent colour.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // `Info` is the generic fallback for future toasts.
-pub enum ToastKind {
-    Timer,
-    Battery,
-    Info,
-    /// A desktop / XSOverlay notification.
-    Notification,
-    /// "Done" feedback for an action taken while the dashboard was hidden.
-    Confirm,
-    /// The boot greeting.
-    Welcome,
-}
-
-impl ToastKind {
-    fn style(self) -> (&'static str, egui::Color32) {
-        match self {
-            ToastKind::Timer => (icon::TIMER, theme::PRIMARY),
-            ToastKind::Battery => (icon::BATTERY_WARNING, FAV_GOLD),
-            ToastKind::Info => (icon::BELL_RINGING, theme::PRIMARY),
-            ToastKind::Notification => (icon::BELL, egui::Color32::from_rgb(150, 190, 255)),
-            ToastKind::Confirm => (icon::CHECK_CIRCLE, theme::PRIMARY),
-            ToastKind::Welcome => (icon::HAND_WAVING, theme::PRIMARY),
-        }
-    }
-}
-
-/// The floating notification card (its own layer; shows over a game too). The
-/// quad is cleared transparent, so the card hugs its content and floats centred.
-pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind, icon_tex: Option<&egui::TextureHandle>) {
-    let (glyph, accent) = kind.style();
-    let card = egui::Frame::default()
-        .fill(egui::Color32::from_rgb(24, 28, 35))
-        .corner_radius(20)
-        .inner_margin(egui::Margin::symmetric(20, 16))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(46, 54, 64)));
-    egui::Area::new(egui::Id::new("toast-card"))
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
-            card.show(ui, |ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    // Tinted icon chip.
-                    let (chip, _) = ui.allocate_exact_size(egui::vec2(52.0, 52.0), egui::Sense::hover());
-                    ui.painter().rect_filled(
-                        chip,
-                        egui::CornerRadius::same(14),
-                        egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38),
-                    );
-                    match icon_tex {
-                        Some(t) => {
-                            egui::Image::new(egui::load::SizedTexture::new(t.id(), egui::vec2(44.0, 44.0)))
-                                .corner_radius(10)
-                                .paint_at(ui, egui::Rect::from_center_size(chip.center(), egui::vec2(44.0, 44.0)));
-                        }
-                        None => {
-                            ui.painter().text(
-                                chip.center(),
-                                egui::Align2::CENTER_CENTER,
-                                glyph,
-                                egui::FontId::proportional(27.0),
-                                accent,
-                            );
-                        }
-                    }
-                    ui.add_space(16.0);
-                    ui.vertical(|ui| {
-                        const TEXT_W: f32 = 780.0;
-                        ui.set_max_width(TEXT_W);
-                        // Hard row caps + break-anywhere so a long title, a
-                        // multi-line body or an unbroken URL can't spill past the
-                        // panel's edges (Discord loves all three).
-                        let clamp = |text: &str, size: f32, color: egui::Color32, rows: usize| {
-                            let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                            let mut job = egui::text::LayoutJob::simple(one_line, egui::FontId::proportional(size), color, TEXT_W);
-                            job.wrap = egui::text::TextWrapping { max_width: TEXT_W, max_rows: rows, break_anywhere: true, overflow_character: Some('…') };
-                            job
-                        };
-                        ui.add(egui::Label::new(clamp(title, 21.0, egui::Color32::WHITE, 1)));
-                        if !body.is_empty() {
-                            ui.add_space(3.0);
-                            ui.add(egui::Label::new(clamp(body, 15.0, theme::ON_SURFACE_VAR, 2)));
-                        }
-                    });
-                });
-            });
-        });
 }
 
 /// The game-launch popup (its own composition layer, SteamVR-style): the game's

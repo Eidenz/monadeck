@@ -76,7 +76,7 @@ cargo run -p monadeck-overlay
 
 A Rust workspace: `crates/core` (runtime orchestration, library and artwork scanning, shared config) and `crates/overlay` (the OpenXR overlay), plus `desktop/`, a Tauri 2 + SvelteKit (Svelte 5) app kept out of the root workspace so its webkit dependencies stay out of the core build. Config lives under `~/.config/monadeck/`.
 
-Optional: `crates/overlay/translate.env` and `picsur.env` (see the `.example` files) bake in a translation endpoint and a Picsur share target for screenshots. The overlay has self-tests for the capture path, keyboard, notifications and text-field focus (`--desktop-selftest`, `--keyboard-selftest`, `--notify-selftest`, `--a11y-selftest`), and `MONADECK_OVERLAY_FLAT` forces flat panels on runtimes without cylinder layers.
+Optional: `crates/overlay/translate.env` and `picsur.env` (see the `.example` files) bake in a translation endpoint and a Picsur share target for screenshots. The overlay has self-tests for the capture path, keyboard, notifications and text-field focus (`--desktop-selftest`, `--keyboard-selftest`, `--notify-selftest`, `--a11y-selftest`), `--toast-preview [dir]` renders every notification card to PNGs without a headset, and `MONADECK_OVERLAY_FLAT` forces flat panels on runtimes without cylinder layers.
 
 libmonado is loaded through the `wayvr-org/libmonado-rs` pin, which `dlopen`s whatever `libmonado.so` the active runtime points at.
 
