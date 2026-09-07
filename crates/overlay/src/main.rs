@@ -1617,14 +1617,14 @@ fn run() -> Result<()> {
         // Desktop layouts: create / overwrite / apply / delete.
         let mut layouts_dirty = false;
         if let Some(name) = st.layout_create.take() {
-            layouts.upsert(desktop.snapshot(name.clone()));
+            layouts.upsert(desktop.snapshot(name.clone(), hmd.as_ref()));
             layouts.last_used = Some(name);
             layouts_dirty = true;
         }
         if let Some(i) = st.layout_overwrite.take() {
             if let Some(name) = layouts.layouts.get(i).map(|l| l.name.clone()) {
                 let follow = layouts.layouts[i].recenter_on_toggle;
-                let mut snap = desktop.snapshot(name.clone());
+                let mut snap = desktop.snapshot(name.clone(), hmd.as_ref());
                 snap.recenter_on_toggle = follow;
                 layouts.upsert(snap);
                 layouts.last_used = Some(name);

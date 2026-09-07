@@ -50,6 +50,11 @@ pub struct DesktopLayout {
     /// arrangement) instead of restoring it exactly.
     #[serde(default)]
     pub recenter_on_toggle: bool,
+    /// Where the head was when the layout was saved (STAGE space). A
+    /// "follows head" layout restored at start uses this to come back at the
+    /// same distance it was saved at, wherever you happen to be standing.
+    #[serde(default)]
+    pub head: Option<Pose>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

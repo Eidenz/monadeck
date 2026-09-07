@@ -561,7 +561,7 @@ impl DesktopViewer {
 
     /// The current arrangement: every approved screen (shown or not), placed
     /// ones with their pose/size/curve, plus the keyboard.
-    pub fn snapshot(&self, name: String) -> DesktopLayout {
+    pub fn snapshot(&self, name: String, hmd: Option<&xr::Posef>) -> DesktopLayout {
         if self.local_in_stage.is_none() {
             log::warn!("desktop: no STAGE space; layout saved in LOCAL space (may drift between sessions)");
         }
@@ -587,7 +587,8 @@ impl DesktopViewer {
             pose: pose_to_arr(&self.to_stage(&kb.pose)),
             scale: kb.scale,
         });
-        DesktopLayout { name, screens, keyboard, recenter_on_toggle: false }
+        let head = hmd.map(|h| pose_to_arr(&self.to_stage(h)));
+        DesktopLayout { name, screens, keyboard, recenter_on_toggle: false, head }
     }
 
     /// Apply an arrangement, then hide it straight away (as if double-B had
@@ -1071,7 +1072,11 @@ impl DesktopViewer {
                 log::info!("desktop: applying layout '{}'{}", l.name, if hidden { " (hidden until double-B)" } else { "" });
                 self.apply(&l);
                 if hidden {
-                    if let ToggleAll::Hidden(n) = self.toggle_all(hmd, true) {
+                    // Stash relative to the head the layout was saved with, so a
+                    // "follows head" layout comes back at its saved distance
+                    // rather than measured from wherever you are at launch.
+                    let saved_head = l.head.map(|a| self.from_stage(&arr_to_pose(&a)));
+                    if let ToggleAll::Hidden(n) = self.toggle_all(saved_head.as_ref().or(hmd), true) {
                         log::info!("desktop: stashed {n} item(s) of the restored layout");
                     }
                 }

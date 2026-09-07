@@ -2319,16 +2319,21 @@ pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind
                     }
                     ui.add_space(16.0);
                     ui.vertical(|ui| {
-                        ui.set_max_width(560.0);
-                        ui.label(egui::RichText::new(title).size(21.0).strong().color(egui::Color32::WHITE));
+                        const TEXT_W: f32 = 560.0;
+                        ui.set_max_width(TEXT_W);
+                        // Hard row caps + break-anywhere so a long title, a
+                        // multi-line body or an unbroken URL can't spill past the
+                        // panel's edges (Discord loves all three).
+                        let clamp = |text: &str, size: f32, color: egui::Color32, rows: usize| {
+                            let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                            let mut job = egui::text::LayoutJob::simple(one_line, egui::FontId::proportional(size), color, TEXT_W);
+                            job.wrap = egui::text::TextWrapping { max_width: TEXT_W, max_rows: rows, break_anywhere: true, overflow_character: Some('…') };
+                            job
+                        };
+                        ui.add(egui::Label::new(clamp(title, 21.0, egui::Color32::WHITE, 1)));
                         if !body.is_empty() {
                             ui.add_space(3.0);
-                            let short: String = if body.chars().count() > 140 {
-                                format!("{}…", body.chars().take(140).collect::<String>())
-                            } else {
-                                body.to_string()
-                            };
-                            ui.add(egui::Label::new(egui::RichText::new(short).size(15.0).color(theme::ON_SURFACE_VAR)).wrap());
+                            ui.add(egui::Label::new(clamp(body, 15.0, theme::ON_SURFACE_VAR, 2)));
                         }
                     });
                 });
