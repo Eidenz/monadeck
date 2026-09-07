@@ -770,10 +770,16 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     // Tinted glyphs only (no fill): music top-right, bell top-left.
                     // `on` = its view is open (tap again to close); `badge` = a
                     // small count bubble on the glyph's shoulder.
-                    let mut corner_btn = |ui: &mut egui::Ui, left: bool, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
+                    // `slot`: 0 = leftmost, 1 = rightmost, 2 = second from the right.
+                    let mut corner_btn = |ui: &mut egui::Ui, slot: u8, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
                         // The left edge sits a little into the margin so both glyphs
                         // end up the same distance from their card edge.
-                        let x = if left { r.left() - 8.0 } else { r.right() - 28.0 };
+                        let left = slot == 0;
+                        let x = match slot {
+                            0 => r.left() - 8.0,
+                            1 => r.right() - 28.0,
+                            _ => r.right() - 56.0,
+                        };
                         let rect = egui::Rect::from_min_size(egui::pos2(x, r.top() - 2.0), egui::vec2(26.0, 22.0));
                         let fg = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
                         // A child ui at a fixed rect: nothing is allocated in the
@@ -794,7 +800,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     };
                     if st.media.is_some() {
                         let playing = st.media.as_ref().is_some_and(|m| m.playing);
-                        if corner_btn(ui, false, icon::MUSIC_NOTES, st.watch_media_menu, playing, 0, "Now playing") {
+                        if corner_btn(ui, 1, icon::MUSIC_NOTES, st.watch_media_menu, playing, 0, "Now playing") {
                             st.watch_media_menu = !st.watch_media_menu;
                             st.watch_history_menu = false;
                             st.watch_layout_menu = false;
@@ -805,12 +811,22 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     }
                     if !st.notif_history.is_empty() {
                         let glyph = if st.notif_unseen > 0 { icon::BELL_RINGING } else { icon::BELL };
-                        if corner_btn(ui, true, glyph, st.watch_history_menu, st.notif_unseen > 0, st.notif_unseen, "Recent notifications") {
+                        if corner_btn(ui, 0, glyph, st.watch_history_menu, st.notif_unseen > 0, st.notif_unseen, "Recent notifications") {
                             st.watch_history_menu = !st.watch_history_menu;
                             st.watch_media_menu = false;
                             st.watch_layout_menu = false;
                             st.notif_unseen = 0;
                             st.sound_tab = true;
+                        }
+                        // Clear lives in the corner too while the history is open,
+                        // so the list itself needs no header row.
+                        if st.watch_history_menu {
+                            let slot = if st.media.is_some() { 2 } else { 1 };
+                            if corner_btn(ui, slot, icon::TRASH, false, false, 0, "Clear notifications") {
+                                st.notif_clear_request = true;
+                                st.watch_history_menu = false;
+                                st.sound_tab = true;
+                            }
                         }
                     }
                     st.no_glow.extend(no_glow);
@@ -849,22 +865,11 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         }
                     }
                 } else if st.watch_history_menu {
-                    ui.horizontal(|ui| {
-                        // The corner bell (top-left, lit) is the header's icon; the
-                        // title starts to its right.
-                        ui.add_space(22.0);
-                        ui.label(egui::RichText::new("Recent").size(14.0).strong().color(egui::Color32::WHITE));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(egui::RichText::new(icon::TRASH).size(13.0)).min_size(egui::vec2(26.0, 22.0))).on_hover_text("Clear").clicked() {
-                                st.notif_clear_request = true;
-                                st.watch_history_menu = false;
-                            }
-                        });
-                    });
-                    // One line per notification (the card is full-width here):
+                    // No header: the lit bell (top-left) and the trash (top-right)
+                    // are in the corners. One line per notification, full width:
                     // title · body, age on the right; the body truncates to fit.
+                    ui.add_space(24.0);
                     for (title, body, age) in &st.notif_history {
-                        ui.add_space(3.0);
                         ui.horizontal(|ui| {
                             let t: String = if title.chars().count() > 24 { format!("{}…", title.chars().take(23).collect::<String>()) } else { title.clone() };
                             ui.label(egui::RichText::new(t).size(12.0).strong().color(egui::Color32::WHITE));
