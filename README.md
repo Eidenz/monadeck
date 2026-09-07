@@ -1,10 +1,10 @@
 <div align="center">
 
-# Monadeck
+# 🎮 Monadeck
 
 **A SteamVR-style launcher, dashboard and desktop overlay for Monado on Linux**
 
-Built for a Monado + xrizer workflow, where Envision's design didn't fit.
+Built for a Monado + xrizer workflow.
 
 <table>
 <tr>
@@ -78,6 +78,10 @@ A Rust workspace: `crates/core` (runtime orchestration, library and artwork scan
 Optional: `crates/overlay/translate.env` and `picsur.env` (see the `.example` files) bake in a translation endpoint and a Picsur share target for screenshots. The overlay has self-tests for the capture path, keyboard, notifications and text-field focus (`--desktop-selftest`, `--keyboard-selftest`, `--notify-selftest`, `--a11y-selftest`), and `MONADECK_OVERLAY_FLAT` forces flat panels on runtimes without cylinder layers.
 
 libmonado is loaded through the `wayvr-org/libmonado-rs` pin, which `dlopen`s whatever `libmonado.so` the active runtime points at.
+
+## Credits
+
+**Monado** (OpenXR runtime) and **xrizer** by Supreeeme (OpenVR on OpenXR); **WayVR** by galister and the wlx team, whose desktop overlay, watch and playspace drag this borrows from, plus the `libmonado-rs` pin; **UEVR** by praydog and the **chihuahua** injector by keton, run through **protontricks**; **go-bsb-cams** by Red-M (Beyond eye cameras); **Envision** for the ground it covered first. Default background: "Table Mountain 2" by Greg Zaal, Poly Haven (CC0). Icons: Phosphor.
 
 ## License
 
