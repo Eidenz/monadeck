@@ -3,6 +3,7 @@
 //! (terminating the service, waiting for readiness, the pkexec prompt) without
 //! holding the Tauri `State` borrow across an await.
 
+use crate::wivrn_watch::WivrnSessionWatch;
 use monadeck_core::cmd_runner::CmdRunner;
 use monadeck_core::kwin_freeze::KwinFreezeWatch;
 use monadeck_core::monado_conn::MonadoConn;
@@ -26,17 +27,24 @@ pub struct AppState {
     /// Short-lived watch for the kwin cold-start HMD-adoption freeze, armed
     /// around each service launch. See core::kwin_freeze.
     pub freeze_watch: Arc<Mutex<KwinFreezeWatch>>,
+    /// WiVRn backend only: tracks the server's headset session and launches /
+    /// stops the plugins + overlay per session. See `wivrn_watch`.
+    pub wivrn_watch: Arc<Mutex<WivrnSessionWatch>>,
 }
 
 impl AppState {
     pub fn load() -> Self {
+        let config = MonadeckConfig::load();
+        // The socket helpers (and every child we spawn) dispatch on this.
+        monadeck_core::devices::set_backend(config.backend);
         Self {
-            config: Arc::new(Mutex::new(MonadeckConfig::load())),
+            config: Arc::new(Mutex::new(config)),
             runner: Arc::new(Mutex::new(CmdRunner::new())),
             eye_runner: Arc::new(Mutex::new(CmdRunner::new())),
             plugin_children: Arc::new(Mutex::new(Vec::new())),
             monado: Arc::new(MonadoConn::new()),
             freeze_watch: Arc::new(Mutex::new(KwinFreezeWatch::default())),
+            wivrn_watch: Arc::new(Mutex::new(WivrnSessionWatch::default())),
         }
     }
 }

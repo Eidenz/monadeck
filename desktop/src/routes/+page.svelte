@@ -38,12 +38,15 @@
   const showPreflight = $derived(
     app.preflight !== null && !app.preflight.all_ok && !preflightDismissed,
   );
-  // No valid Monado prefix (service binary missing) → offer setup.
+  // Selected runtime's service binary missing → offer setup.
   const showNoRuntime = $derived(app.caps === "no_binary" && !noRuntimeDismissed);
+  const isWivrn = $derived(app.service.backend === "wivrn");
+  const wivrn = $derived(app.service.wivrn);
   // steamvr_lh driver selected, vrcmd present, but no chaperone set → nudge to
   // calibrate the floor (only when we can actually offer the fix).
   const showFloorCal = $derived(
-    app.config?.lighthouse_driver === "steamvr" &&
+    !isWivrn &&
+      app.config?.lighthouse_driver === "steamvr" &&
       !!app.floorCal?.available &&
       app.floorCal?.calibrated === false &&
       !floorCalDismissed,
@@ -58,9 +61,10 @@
   // actually has the headset ready — a truer "ready" signal than the raw IPC
   // connection, which flips well before the headset is up. Same check DeviceStrip
   // uses for the head slot.
-  const headsetReady = $derived(
-    app.devices.some((d) => d.role === "head" || d.kind === "hmd"),
+  const headset = $derived(
+    app.devices.find((d) => d.role === "head" || d.kind === "hmd") ?? null,
   );
+  const headsetReady = $derived(headset !== null);
 
   // The detected "game": the primary app (fall back to a focused non-overlay).
   const game = $derived(
@@ -72,15 +76,50 @@
   );
 
   // Stopped → Warming up… (headset not ready) → Ready (headset up, idle) →
-  // Now Playing (a game is running).
+  // Now Playing (a game is running). WiVRn idles until a headset connects over
+  // the network, so it gets a "Waiting for headset" stage (and "Running
+  // elsewhere" when a server we didn't start owns the bus).
   const heading = $derived(
     !app.service.running
-      ? "Stopped"
-      : !headsetReady
-        ? "Warming up…"
-        : game
-          ? "Now Playing"
-          : "Ready",
+      ? isWivrn && app.service.external
+        ? "Running elsewhere"
+        : "Stopped"
+      : isWivrn && !wivrn?.session_running
+        ? wivrn?.headset_connected
+          ? "Connecting…"
+          : "Waiting for headset"
+        : !headsetReady
+          ? "Warming up…"
+          : game
+            ? "Now Playing"
+            : "Ready",
+  );
+  // Subline under the heading: the game, WiVRn's pairing PIN, or the headset's
+  // name once it's up (WiVRn's reported model, else the HMD device monado sees).
+  const subline = $derived(
+    game
+      ? game.name
+      : isWivrn && wivrn?.pairing_enabled && wivrn.pin
+        ? `Pairing PIN ${wivrn.pin}`
+        : isWivrn && wivrn?.session_running && wivrn.system_name
+          ? wivrn.system_name
+          : headsetReady
+            ? (headset?.name ?? "")
+            : "",
+  );
+  const canStart = $derived(
+    app.service.available && !(isWivrn && app.service.external),
+  );
+  const startTitle = $derived(
+    isWivrn
+      ? app.service.external
+        ? "WiVRn is already running outside Monadeck (dashboard or systemd) — stop it there first"
+        : app.service.available
+          ? "Start wivrn-server"
+          : "Install WiVRn (or set its path in Settings) first"
+      : app.config?.monado_prefix
+        ? "Start monado-service"
+        : "Set the Monado prefix in Settings first",
   );
 
   // The window auto-sizes to the deck's measured content — compact by default,
@@ -137,8 +176,9 @@
       // Auto-start the service on launch when enabled (and not already up).
       if (
         app.config?.auto_start &&
-        app.config?.monado_prefix &&
-        !app.service.running
+        app.service.available &&
+        !app.service.running &&
+        !app.service.external
       ) {
         start();
       }
@@ -172,7 +212,7 @@
         <div class="status-row">
           <div class="heading-wrap">
             <div class="heading">{heading}</div>
-            {#if game}<div class="game" title={game.name}>{game.name}</div>{/if}
+            {#if subline}<div class="game" title={subline}>{subline}</div>{/if}
           </div>
           {#if app.service.running}
             <button class="pwr stop" onclick={stop} disabled={app.busy}>Stop</button>
@@ -180,10 +220,8 @@
             <button
               class="pwr start"
               onclick={start}
-              disabled={app.busy || !app.config?.monado_prefix}
-              title={app.config?.monado_prefix
-                ? "Start monado-service"
-                : "Set the Monado prefix in Settings first"}
+              disabled={app.busy || !canStart}
+              title={startTitle}
             >
               {app.busy ? "…" : "Start"}
             </button>

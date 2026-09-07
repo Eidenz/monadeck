@@ -8,6 +8,7 @@ mod bindings;
 mod commands;
 mod overlay;
 mod state;
+mod wivrn_watch;
 
 use state::AppState;
 use tauri::menu::{Menu, MenuItem};
@@ -18,6 +19,7 @@ use tauri::Manager;
 /// the HMD/DRM lease), hand the runtime files back, then exit.
 fn cleanup_and_exit(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
+        state.wivrn_watch.lock().unwrap().stop_watch();
         state.runner.lock().unwrap().terminate();
     }
     let _ = monadeck_core::active_runtime::restore_backup();
@@ -107,6 +109,14 @@ pub fn run() {
             commands::set_config,
             commands::autodetect_prefix,
             commands::autodetect_xrizer,
+            commands::autodetect_wivrn,
+            commands::wivrn_enable_pairing,
+            commands::wivrn_disable_pairing,
+            commands::wivrn_disconnect,
+            commands::wivrn_revoke_key,
+            commands::wivrn_rename_key,
+            commands::wivrn_get_config,
+            commands::wivrn_set_config,
             commands::service_status,
             commands::runtime_status,
             commands::capabilities_status,

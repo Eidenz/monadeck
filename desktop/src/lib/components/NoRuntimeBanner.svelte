@@ -3,8 +3,10 @@
   // isn't found). The actual install happens in Settings, where there's room for
   // progress/feedback — this is just the first-run nudge. Dismissable.
   import { openSettings } from "$lib/windows";
+  import { app } from "$lib/state.svelte";
 
   let { dismissed = $bindable(false) }: { dismissed?: boolean } = $props();
+  const isWivrn = $derived(app.config?.backend === "wivrn");
 
   async function setup() {
     await openSettings("general");
@@ -13,10 +15,15 @@
 </script>
 
 <div class="toast" role="alert">
-  <div class="title">No Monado runtime</div>
+  <div class="title">{isWivrn ? "WiVRn not found" : "No Monado runtime"}</div>
   <div class="desc">
-    Monadeck couldn't find <code>monado-service</code>. Install the built-in build
-    or point it at your own, both are in Settings.
+    {#if isWivrn}
+      Monadeck couldn't find <code>wivrn-server</code>. Install WiVRn from your
+      distro, or point Settings at it (or switch back to Monado).
+    {:else}
+      Monadeck couldn't find <code>monado-service</code>. Install the built-in build
+      or point it at your own, both are in Settings.
+    {/if}
   </div>
   <div class="acts">
     <button class="btn ghost" onclick={() => (dismissed = true)}>Dismiss</button>

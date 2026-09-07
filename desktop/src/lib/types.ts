@@ -1,6 +1,7 @@
 // Mirrors the serde shapes returned by the Rust commands in src-tauri.
 
 export type OvrRuntime = "xrizer" | "none";
+export type Backend = "monado" | "wivrn";
 export type ExecWhen = "after-start" | "after-stop";
 
 export interface Plugin {
@@ -18,6 +19,8 @@ export interface InstalledApp {
 
 export interface MonadeckConfig {
   monado_prefix: string;
+  backend: Backend;
+  wivrn_server_path: string | null;
   xrizer_path: string | null;
   ovr_runtime: OvrRuntime;
   minimize_to_tray: boolean;
@@ -79,13 +82,46 @@ export interface Snapshot {
   clients: ClientInfo[];
 }
 
-export type CapStatus = "set" | "needs_setcap" | "no_binary" | "no_tooling";
-export type ActiveRuntimeKind = "monado" | "steam_vr" | "other" | "none";
+// "not_needed": the WiVRn backend — its server runs fine without CAP_SYS_NICE.
+export type CapStatus =
+  | "set"
+  | "needs_setcap"
+  | "no_binary"
+  | "no_tooling"
+  | "not_needed";
+export type ActiveRuntimeKind = "monado" | "wivrn" | "steam_vr" | "other" | "none";
 export type OvrPathsKind = "xrizer" | "steam_vr" | "other" | "none";
 
+export interface KnownHeadset {
+  name: string;
+  public_key: string;
+  last_connection: number; // seconds since epoch, 0 = never
+}
+
+// Snapshot of the WiVRn server's D-Bus properties (io.github.wivrn.Server).
+export interface WivrnStatus {
+  headset_connected: boolean;
+  session_running: boolean;
+  pairing_enabled: boolean;
+  encryption_enabled: boolean;
+  pin: string; // pairing PIN while pairing is enabled
+  system_name: string; // headset model once connected
+  steam_command: string; // launch-options prefix for Steam games
+  known_keys: KnownHeadset[];
+  preferred_refresh_rate: number;
+  available_refresh_rates: number[];
+  bitrate: number; // bits/s, 0 until connected
+  supported_codecs: string[];
+}
+
 export interface ServiceStatus {
+  backend: Backend;
+  available: boolean; // the selected backend's service binary was found
   running: boolean;
   connected: boolean;
+  // WiVRn: a server we didn't start owns the bus name (dashboard / systemd).
+  external: boolean;
+  wivrn: WivrnStatus | null;
   exit_code: number | null;
   // One-shot: set on the poll right after the kwin freeze watch recovered the
   // desktop from a cold-start HMD adoption (see core::kwin_freeze).

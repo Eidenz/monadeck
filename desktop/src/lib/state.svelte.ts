@@ -19,8 +19,12 @@ export const app = $state({
   version: "",
   config: null as MonadeckConfig | null,
   service: {
+    backend: "monado",
+    available: false,
     running: false,
     connected: false,
+    external: false,
+    wivrn: null,
     exit_code: null,
     freeze_recovery: null,
   } as ServiceStatus,
@@ -88,6 +92,15 @@ export async function loadInitial() {
       const xr = await api.autodetectXrizer();
       if (xr) {
         app.config.xrizer_path = xr;
+        changed = true;
+      }
+    }
+    // WiVRn is autodetected at start time too; pinning the found path here just
+    // makes the Settings field show where it lives.
+    if (!app.config.wivrn_server_path) {
+      const w = await api.autodetectWivrn();
+      if (w) {
+        app.config.wivrn_server_path = w;
         changed = true;
       }
     }
@@ -276,7 +289,73 @@ export async function refreshSnapshot() {
 
 export async function saveConfig() {
   if (!app.config) return;
-  await api.setConfig($state.snapshot(app.config));
+  try {
+    await api.setConfig($state.snapshot(app.config));
+  } catch (e) {
+    // e.g. switching backend while running is refused — re-pull the persisted
+    // config so the UI reflects what actually stuck.
+    app.error = String(e);
+    await refreshConfig();
+  }
+}
+
+// --- WiVRn -------------------------------------------------------------------
+
+// Convenience: is the deck driving WiVRn right now?
+export const isWivrn = () => app.config?.backend === "wivrn";
+
+// Open pairing for a couple of minutes; the PIN then shows on the deck (it's
+// also mirrored in `app.service.wivrn.pin` on the next poll).
+export async function wivrnEnablePairing(minutes = 2) {
+  app.error = "";
+  try {
+    const pin = await api.wivrnEnablePairing(minutes < 0 ? -1 : minutes * 60);
+    if (!pin) app.error = "Pairing can't be enabled while a headset session is active.";
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    await refreshStatus();
+  }
+}
+
+export async function wivrnDisablePairing() {
+  try {
+    await api.wivrnDisablePairing();
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    await refreshStatus();
+  }
+}
+
+export async function wivrnDisconnect() {
+  try {
+    await api.wivrnDisconnect();
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    await refreshStatus();
+  }
+}
+
+export async function wivrnRevokeKey(publicKey: string) {
+  try {
+    await api.wivrnRevokeKey(publicKey);
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    await refreshStatus();
+  }
+}
+
+export async function wivrnRenameKey(publicKey: string, name: string) {
+  try {
+    await api.wivrnRenameKey(publicKey, name);
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    await refreshStatus();
+  }
 }
 
 export async function start() {
