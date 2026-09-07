@@ -439,7 +439,7 @@ fn run() -> Result<()> {
     // of the dashboard, even over a running game.
     let mut toast_panel = make_panel(
         &session, &device, allocator.clone(), render_pass, format, srgb,
-        (720, 168), (0.44, 0.44 * 168.0 / 720.0), anchor,
+        (960, 176), (0.56, 0.56 * 176.0 / 960.0), anchor,
     )?;
     // The game-launch popup ("now starting" card). Its own layer, so it persists
     // after the dashboard auto-closes on launch (SteamVR-style); shows hero art.
@@ -1808,6 +1808,7 @@ fn run() -> Result<()> {
             }
             let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
             if desktop.keyboard.clicked {
+                desktop.keyboard.clicked = false;
                 audio.key();
             }
             let laser_alpha = screen_laser_alpha(desktop.pointing_screen(), &mut screen_laser_since);
@@ -2019,6 +2020,7 @@ fn run() -> Result<()> {
         }
         let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
         if desktop.keyboard.clicked {
+            desktop.keyboard.clicked = false;
             audio.key();
         }
         // Feed the Desktop page.
@@ -2256,6 +2258,7 @@ fn run() -> Result<()> {
                         launch_game(g);
                     }
                     audio.launch();
+                    st.click_pulse = false; // the launch chime is the click
                     // Hand off to the standalone launch popup (SteamVR-style): close
                     // the dashboard and put a "now starting" card in front of the
                     // head. Assigning `launch_popup` below replaces any popup already

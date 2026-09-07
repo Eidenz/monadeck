@@ -2482,7 +2482,7 @@ pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind
                     }
                     ui.add_space(16.0);
                     ui.vertical(|ui| {
-                        const TEXT_W: f32 = 560.0;
+                        const TEXT_W: f32 = 780.0;
                         ui.set_max_width(TEXT_W);
                         // Hard row caps + break-anywhere so a long title, a
                         // multi-line body or an unbroken URL can't spill past the

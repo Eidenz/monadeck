@@ -59,6 +59,9 @@ pub fn apply_style(ctx: &egui::Context) {
     }
     style.visuals = v;
     style.spacing.item_spacing = egui::vec2(10.0, 12.0);
+    // Plain text is never selectable in VR: otherwise every label senses clicks
+    // (text selection) and the watch's clock "clicks" with a sound and a glow.
+    style.interaction.selectable_labels = false;
     style.spacing.button_padding = egui::vec2(14.0, 9.0);
     style.spacing.interact_size.y = 30.0;
     style.text_styles.insert(TextStyle::Heading, FontId::new(26.0, FontFamily::Proportional));
