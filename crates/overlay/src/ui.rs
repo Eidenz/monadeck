@@ -171,6 +171,16 @@ pub struct LibState {
     /// One-shot UI-sound requests, drained by the loop.
     pub sound_select: bool,
     pub sound_tab: bool,
+    /// Some widget was clicked this frame (set by `interaction_pass`): the loop
+    /// plays the generic click unless a more specific sound was requested.
+    pub click_pulse: bool,
+    /// An in-panel confirmation ("Layout saved"): text + when it appeared. Shown
+    /// as a pill at the bottom of the main panel, or as a short toast while the
+    /// dashboard is hidden. `flash_sound` asks the loop for the confirm chime.
+    pub flash: Option<(String, std::time::Instant)>,
+    pub flash_sound: bool,
+    /// Two-tap confirmation for destructive buttons: (key, armed at).
+    pub confirm_arm: Option<(String, std::time::Instant)>,
     /// Settings (mirrored to/from the persisted overlay config by the loop).
     pub audio_enabled: bool,
     pub audio_volume: f32,
@@ -379,6 +389,10 @@ impl LibState {
             fade_in: 0.0,
             sound_select: false,
             sound_tab: false,
+            click_pulse: false,
+            flash: None,
+            flash_sound: false,
+            confirm_arm: None,
             audio_enabled: true,
             audio_volume: 0.55,
             uevr_delay: 30,
@@ -451,6 +465,63 @@ impl LibState {
     }
 }
 
+impl LibState {
+    /// Show a short confirmation ("Layout “Standing” saved") with the confirm
+    /// chime — in the panel when the dashboard is up, as a toast otherwise.
+    pub fn flash(&mut self, msg: impl Into<String>) {
+        self.flash = Some((msg.into(), std::time::Instant::now()));
+        self.flash_sound = true;
+    }
+
+    /// Two-tap guard for destructive buttons. First tap arms `key` for 3 s and
+    /// returns false (the caller shows "tap again"); a second tap within that
+    /// window returns true and clears the arm.
+    pub fn confirm_tap(&mut self, key: &str) -> bool {
+        if self.is_armed(key) {
+            self.confirm_arm = None;
+            true
+        } else {
+            self.confirm_arm = Some((key.to_string(), std::time::Instant::now()));
+            self.sound_tab = true;
+            false
+        }
+    }
+
+    pub fn is_armed(&self, key: &str) -> bool {
+        self.confirm_arm.as_ref().is_some_and(|(k, t)| k == key && t.elapsed().as_secs_f32() < 3.0)
+    }
+}
+
+/// How long the confirmation pill stays up.
+const FLASH_SECS: f32 = 1.9;
+
+/// After a panel's UI is built: universal interaction feedback. Hovered
+/// clickable widgets get a faint highlight (stronger while pressed) whatever
+/// their fill colour, and any click sets `click_pulse` so the loop can play the
+/// generic click when nothing more specific asked for a sound.
+pub fn interaction_pass(ctx: &egui::Context, st: &mut LibState) {
+    let snap = ctx.viewport(|v| v.interact_widgets.clone());
+    if snap.clicked.is_some() {
+        st.click_pulse = true;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("hover-glow")));
+    for id in snap.hovered.iter() {
+        let Some(resp) = ctx.read_response(*id) else { continue };
+        if !resp.sense.senses_click() {
+            continue;
+        }
+        let r = resp.rect;
+        // Buttons, pills, chips, steppers — not tiles, sliders' wide tracks or the
+        // search field (those have their own hover treatment or none by design).
+        if r.height() > 80.0 || r.width() > 420.0 {
+            continue;
+        }
+        let down = resp.is_pointer_button_down_on();
+        let alpha = if down { 52 } else { 18 };
+        painter.rect_filled(r, egui::CornerRadius::same(10), egui::Color32::from_white_alpha(alpha));
+    }
+}
+
 const TILE_W: f32 = 168.0;
 const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
 
@@ -468,10 +539,28 @@ pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
     overlays(ctx, st);
 }
 
-/// Foreground overlay: the summon fade-in. (The launch/loading card is now a
-/// standalone composition layer — see `build_launch_popup` — so it survives the
-/// dashboard closing.)
-fn overlays(ctx: &egui::Context, st: &LibState) {
+/// Foreground overlay: the confirmation pill and the summon fade-in. (The
+/// launch/loading card is a standalone composition layer — see
+/// `build_launch_popup` — so it survives the dashboard closing.)
+fn overlays(ctx: &egui::Context, st: &mut LibState) {
+    if st.flash.as_ref().is_some_and(|(_, t)| t.elapsed().as_secs_f32() > FLASH_SECS) {
+        st.flash = None;
+    }
+    if let Some((msg, since)) = &st.flash {
+        let age = since.elapsed().as_secs_f32();
+        let a = if age < 0.12 { age / 0.12 } else if age > FLASH_SECS - 0.35 { ((FLASH_SECS - age) / 0.35).clamp(0.0, 1.0) } else { 1.0 };
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("flash-pill")));
+        let avail = ctx.available_rect(); // above the on-panel keyboard when it's open
+        let galley = ctx.fonts(|f| f.layout_no_wrap(format!("{}  {msg}", icon::CHECK), egui::FontId::proportional(16.0), egui::Color32::WHITE));
+        let size = galley.size() + egui::vec2(38.0, 18.0);
+        // Slides up a touch as it fades in.
+        let center = egui::pos2(avail.center().x, avail.bottom() - 36.0 + (1.0 - a) * 8.0);
+        let rect = egui::Rect::from_center_size(center, size);
+        painter.rect_filled(rect.translate(egui::vec2(0.0, 2.0)), egui::CornerRadius::same(16), egui::Color32::from_black_alpha((a * 90.0) as u8));
+        painter.rect_filled(rect, egui::CornerRadius::same(16), egui::Color32::from_rgba_unmultiplied(22, 96, 90, (a * 240.0) as u8));
+        painter.rect_stroke(rect, egui::CornerRadius::same(16), egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(64, 224, 208, (a * 120.0) as u8)), egui::StrokeKind::Inside);
+        painter.galley(rect.min + egui::vec2(19.0, 9.0), galley, egui::Color32::from_white_alpha((a * 255.0) as u8));
+    }
     if st.fade_in > 0.001 {
         let screen = ctx.screen_rect();
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("overlay-dim")));
@@ -562,6 +651,7 @@ fn top_bar(ctx: &egui::Context, st: &mut LibState) {
                 .fill(if st.keyboard_open { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH });
             if ui.add(kbd).clicked() {
                 st.keyboard_open = !st.keyboard_open;
+                st.sound_tab = true;
             }
         });
     });
@@ -1212,8 +1302,18 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
             if fkey(ui, "Clear", 96.0, false).clicked() {
                 if naming { st.name_buf.clear(); } else { st.search.clear(); }
             }
-            let commit = if naming { "Create" } else { "Done" };
-            if fkey(ui, commit, 130.0, true).clicked() {
+            let commit = if !naming {
+                "Done"
+            } else if st.layout_rename.is_some() {
+                "Rename"
+            } else {
+                "Create"
+            };
+            let can_commit = !naming || !st.name_buf.trim().is_empty();
+            let commit_resp = ui.add_enabled_ui(can_commit, |ui| fkey(ui, commit, 130.0, true)).inner;
+            if !can_commit {
+                commit_resp.on_hover_text("Type a name first");
+            } else if commit_resp.clicked() {
                 if naming {
                     let name = st.name_buf.trim().to_string();
                     if !name.is_empty() {
@@ -1392,6 +1492,7 @@ fn collection_chips(ui: &mut egui::Ui, st: &mut LibState) {
             st.naming = true;
             st.name_buf.clear();
             st.keyboard_open = true;
+            st.sound_tab = true;
         }
     });
 }
@@ -1597,6 +1698,7 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
         st.naming = true;
         st.name_buf.clear();
         st.keyboard_open = true;
+        st.sound_tab = true;
     }
     ui.add_space(10.0);
 
@@ -1627,10 +1729,17 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
                         .color(theme::ON_SURFACE_VAR),
                 );
                 ui.add_space(6.0);
-                let del = egui::Button::new(egui::RichText::new(icon::TRASH).size(13.0).color(STOP_RED))
-                    .fill(egui::Color32::TRANSPARENT)
-                    .min_size(egui::vec2(28.0, 24.0));
-                if ui.add(del).on_hover_text("Delete collection").clicked() {
+                let key = format!("col-del:{ci}");
+                let armed = st.is_armed(&key);
+                let del = egui::Button::new(
+                    egui::RichText::new(if armed { format!("{}  Tap again to delete", icon::TRASH) } else { icon::TRASH.to_string() })
+                        .size(13.0)
+                        .color(if armed { egui::Color32::BLACK } else { STOP_RED }),
+                )
+                .fill(if armed { STOP_RED } else { egui::Color32::TRANSPARENT })
+                .corner_radius(8)
+                .min_size(egui::vec2(28.0, 24.0));
+                if ui.add(del).on_hover_text("Delete collection").clicked() && st.confirm_tap(&key) {
                     delete = Some(ci);
                 }
             });
@@ -1753,6 +1862,7 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
             .min_size(egui::vec2(280.0, 66.0));
             if ui.add(stop).clicked() {
                 st.stop_request = Some(i);
+                st.sound_tab = true;
             }
         });
     });
@@ -2267,6 +2377,10 @@ pub enum ToastKind {
     Info,
     /// A desktop / XSOverlay notification.
     Notification,
+    /// "Done" feedback for an action taken while the dashboard was hidden.
+    Confirm,
+    /// The boot greeting.
+    Welcome,
 }
 
 impl ToastKind {
@@ -2276,6 +2390,8 @@ impl ToastKind {
             ToastKind::Battery => (icon::BATTERY_WARNING, FAV_GOLD),
             ToastKind::Info => (icon::BELL_RINGING, theme::PRIMARY),
             ToastKind::Notification => (icon::BELL, egui::Color32::from_rgb(150, 190, 255)),
+            ToastKind::Confirm => (icon::CHECK_CIRCLE, theme::PRIMARY),
+            ToastKind::Welcome => (icon::HAND_WAVING, theme::PRIMARY),
         }
     }
 }
@@ -2514,13 +2630,14 @@ fn playspace_view(ui: &mut egui::Ui, st: &mut LibState) {
                     st.ps_game_yaw = 0.0;
                     st.ps_game_override = false;
                     st.ps_game_clear_request = true;
+                    st.flash(format!("{} uses the global offset", st.ps_game_name));
                 } else {
                     st.playspace_x = 0.0;
                     st.playspace_y = 0.0;
                     st.playspace_z = 0.0;
                     st.playspace_yaw = 0.0;
+                    st.flash("Playspace offset reset");
                 }
-                st.sound_tab = true;
             }
             ui.add_space(10.0);
             let rec = egui::Button::new(
@@ -2715,15 +2832,19 @@ fn monado_view(ui: &mut egui::Ui, st: &mut LibState) {
                 // Laid out right-to-left, so add Kill, then Freeze, then Set active
                 // to read [Set active] [Freeze] [Kill] left-to-right.
                 setting_row(ui, &label, sub, |ui| {
+                    let key = format!("kill:{}", c.id);
+                    let armed = st.is_armed(&key);
                     let kill = egui::Button::new(
-                        egui::RichText::new(format!("{}  Kill", icon::X)).size(16.0).color(egui::Color32::WHITE),
+                        egui::RichText::new(if armed { format!("{}  Sure?", icon::WARNING) } else { format!("{}  Kill", icon::X) })
+                            .size(16.0)
+                            .color(if armed { egui::Color32::BLACK } else { egui::Color32::WHITE }),
                     )
-                    .fill(egui::Color32::from_rgb(176, 64, 64))
+                    .fill(if armed { STOP_RED } else { egui::Color32::from_rgb(176, 64, 64) })
                     .corner_radius(10)
                     .min_size(egui::vec2(78.0, 42.0));
-                    if ui.add(kill).clicked() {
+                    if ui.add(kill).on_hover_text(if armed { "Tap again to close it" } else { "Close this app (two taps)" }).clicked() && st.confirm_tap(&key) {
                         st.kill_request = Some(c.name.clone());
-                        st.sound_tab = true;
+                        st.flash(format!("Closing {}…", c.name));
                     }
 
                     // Freeze only shows on a fork that supports it (stock Monado lacks
@@ -2906,9 +3027,10 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
         if st.desktop_ready {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if reset_button(ui, "Re-pick screens").clicked() {
+                    let armed = st.is_armed("repick");
+                    if reset_button(ui, if armed { "Tap again to re-pick" } else { "Re-pick screens" }).clicked() && st.confirm_tap("repick") {
                         st.desktop_reselect_request = true;
-                        st.sound_tab = true;
+                        st.flash("Pick your screens in the desktop dialog");
                     }
                 });
             });
@@ -3242,7 +3364,7 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                     st.panel_dist = 1.5;
                     st.panel_scale = 1.0;
                     st.panel_curve = 1.0;
-                    st.sound_tab = true;
+                    st.flash("Panel placement reset");
                 }
             });
         });

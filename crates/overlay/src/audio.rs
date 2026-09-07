@@ -12,6 +12,7 @@ static TAB: &[u8] = include_bytes!("../assets/sounds/tab.wav");
 static ALARM: &[u8] = include_bytes!("../assets/sounds/alarm.wav");
 static NOTIFY: &[u8] = include_bytes!("../assets/sounds/notify.wav");
 static KEY: &[u8] = include_bytes!("../assets/sounds/key.wav");
+static CONFIRM: &[u8] = include_bytes!("../assets/sounds/confirm.wav");
 
 pub struct Audio {
     // Kept alive for the stream to keep playing; not Send, so Audio lives on the
@@ -73,6 +74,10 @@ impl Audio {
         self.play(KEY);
     }
 
+    /// Something was saved / applied / done (short rising two-note).
+    pub fn confirm(&self) {
+        self.play(CONFIRM);
+    }
     /// Selecting a game (soft tick).
     pub fn select(&self) {
         self.play(SELECT);
