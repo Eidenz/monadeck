@@ -61,6 +61,8 @@ struct Status {
     clients: Vec<ClientInfo>,
     /// Whether the loaded libmonado.so supports controller freezing (our fork).
     freeze_supported: bool,
+    /// The left / right hand role is a UdCap glove (no trackpad: A+B drags).
+    gloves: (bool, bool),
 }
 
 pub struct MonadoLink {
@@ -97,6 +99,11 @@ impl MonadoLink {
     /// our Monado fork. False on stock Monado, so the freeze UI can hide itself.
     pub fn freeze_supported(&self) -> bool {
         self.status.lock().unwrap().freeze_supported
+    }
+
+    /// (left, right): that hand role is currently a UdCap glove.
+    pub fn gloves(&self) -> (bool, bool) {
+        self.status.lock().unwrap().gloves
     }
 
     /// Freeze (hold in place) or unfreeze a client's hand-controller poses.
@@ -186,11 +193,13 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
                 let batteries = poll_batteries(&mon);
                 let clients = poll_clients(&mon, &frozen_ids);
                 let freeze_supported = mon.as_ref().map(|m| m.supports_controller_freeze()).unwrap_or(false);
+                let gloves = poll_gloves(&mon);
                 let mut s = status.lock().unwrap();
                 s.running_app = running;
                 s.batteries = batteries;
                 s.clients = clients;
                 s.freeze_supported = freeze_supported;
+                s.gloves = gloves;
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -227,6 +236,22 @@ fn primary_app(m: &Monado) -> Result<Option<String>, ()> {
         }
     }
     Ok(None)
+}
+
+/// Which hand roles are UdCap gloves (they emulate Index controllers but have
+/// no trackpad, so the playspace drag falls back to A+B).
+fn poll_gloves(mon: &Option<Monado>) -> (bool, bool) {
+    let Some(m) = mon else { return (false, false) };
+    let Ok(devices) = m.devices() else { return (false, false) };
+    let left = m.device_index_from_role(DeviceRole::Left).ok();
+    let right = m.device_index_from_role(DeviceRole::Right).ok();
+    let names: Vec<(u32, String)> = devices.into_iter().map(|d| (d.index(), d.name.to_lowercase())).collect();
+    let is_glove = |idx: Option<u32>| {
+        idx.and_then(|i| names.iter().find(|(j, _)| *j == i))
+            .map(|(_, n)| n.contains("udcap") || n.contains("glove"))
+            .unwrap_or(false)
+    };
+    (is_glove(left), is_glove(right))
 }
 
 /// Battery levels for devices that report one (controllers/gloves/trackers).

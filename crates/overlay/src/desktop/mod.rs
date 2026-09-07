@@ -681,6 +681,20 @@ impl DesktopViewer {
         self.layout_untouched = !layout.recenter_on_toggle;
     }
 
+    /// Move every placed screen and the keyboard by `d` (LOCAL-space metres):
+    /// the playspace drag carries the overlays along with you.
+    pub fn shift_world(&mut self, d: [f32; 3]) {
+        for s in self.screens.iter_mut().filter(|s| s.placed) {
+            s.pose.position.x += d[0];
+            s.pose.position.y += d[1];
+            s.pose.position.z += d[2];
+        }
+        self.keyboard.pose.position.x += d[0];
+        self.keyboard.pose.position.y += d[1];
+        self.keyboard.pose.position.z += d[2];
+        self.derive_docked_poses(&[]);
+    }
+
     /// Default width: applies to screens that were never sized by hand.
     pub fn set_width(&mut self, w: f32) {
         self.width_m = w.clamp(0.4, 4.0);

@@ -101,6 +101,16 @@ pub struct OverlayConfig {
     /// Keyboard follows its docked screen's visibility, and pops up when a text
     /// field gets focus on the desktop (accessibility bus). Off by default.
     pub keyboard_auto: bool,
+    /// Playspace drag (hold the trackpad — A+B on gloves — and move the hand):
+    /// which hands may drag: "both" | "left" | "right" | "off".
+    pub ps_drag_hands: String,
+    /// Drag button: "auto" (trackpad, A+B when that hand is a UdCap glove) |
+    /// "pad" | "ab".
+    pub ps_drag_button: String,
+    /// Dragging may also move you up/down (else horizontal only).
+    pub ps_drag_vertical: bool,
+    /// Screens, keyboard, photos and the dashboard move with you while dragging.
+    pub ps_drag_follow: bool,
 }
 
 impl Default for OverlayConfig {
@@ -152,6 +162,10 @@ impl Default for OverlayConfig {
             notifications_volume: 0.7,
             watch_buttons: vec!["keyboard".into(), "recenter".into(), "layouts".into(), "freeze".into()],
             keyboard_auto: false,
+            ps_drag_hands: "both".into(),
+            ps_drag_button: "auto".into(),
+            ps_drag_vertical: true,
+            ps_drag_follow: true,
         }
     }
 }

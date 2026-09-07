@@ -36,7 +36,7 @@ use gfx::{
     cyl_layout, cylinder_layer, fill_laser, laser_quad, make_laser, make_panel, quad_layer,
     render_panel,
 };
-use mathx::{front_pose, locate_pose, offset_pose, pose_compose, pose_invert, posef, raycast, raycast_cylinder};
+use mathx::{front_pose, locate_pose, offset_pose, pose_compose, pose_invert, posef, qf, quat_rotate, raycast, raycast_cylinder};
 
 static VK_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
 
@@ -521,6 +521,8 @@ fn run() -> Result<()> {
     // B = a click that never drags (the cursor is frozen while held).
     let precise_action = action_set.create_action::<bool>("precise", "Precise click", &[left_path, right_path])?;
     let haptic_action = action_set.create_action::<xr::Haptic>("haptic", "Haptic tick", &[left_path, right_path])?;
+    // Trackpad press: playspace drag (WayVR's binding). Gloves have none → A+B.
+    let pad_action = action_set.create_action::<f32>("pad", "Trackpad press", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
     xr_instance.suggest_interaction_profile_bindings(
         index_profile,
@@ -541,6 +543,8 @@ fn run() -> Result<()> {
             xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/right/input/b/click")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
+            xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/force")?),
+            xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/force")?),
         ],
     )?;
     session.attach_action_sets(&[&action_set])?;
@@ -630,7 +634,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px))),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow))),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -705,6 +709,10 @@ fn run() -> Result<()> {
     st.watch_buttons = ov_cfg.watch_buttons.clone();
     st.keyboard_auto = ov_cfg.keyboard_auto;
     desktop.keyboard_auto = ov_cfg.keyboard_auto;
+    st.ps_drag_hands = ov_cfg.ps_drag_hands.clone();
+    st.ps_drag_button = ov_cfg.ps_drag_button.clone();
+    st.ps_drag_vertical = ov_cfg.ps_drag_vertical;
+    st.ps_drag_follow = ov_cfg.ps_drag_follow;
     st.watch_buttons.resize(4, "keyboard".into());
     st.notif_dbus_ok = notifications.dbus_ok;
     st.notif_udp_ok = notifications.udp_ok;
@@ -753,6 +761,15 @@ fn run() -> Result<()> {
     // Double-tap B on the LEFT controller toggles all screens (+ keyboard).
     let mut left_b_prev = false;
     let mut left_b_last: Option<Instant> = None;
+    // Playspace drag (WayVR-style): hold the trackpad (A+B on a glove) and move
+    // the hand; the world comes along. `drag_ps` is a session-only translation
+    // on top of the configured offset; a double press snaps it back to zero.
+    let mut drag_ps: [f32; 3] = [0.0; 3];
+    let mut space_drag: Option<(usize, [f32; 3])> = None; // (hand, hand pos in STAGE at start)
+    let mut pad_prev = [false; 2];
+    let mut pad_last: [Option<Instant>; 2] = [None; 2];
+    let mut pad_suppressed = [false; 2]; // held after a double press: no drag until release
+    let mut glove_mode = [false; 2]; // this hand drags with A+B (its A/B clicks are then ignored)
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     // Re-scan to refresh last-played ordering when a game starts/stops.
     let mut running_app_prev: Option<String> = None;
@@ -1106,11 +1123,12 @@ fn run() -> Result<()> {
             }
         }
         // Effective offset = the running game's override (if any) else the global.
-        let eff_ps = if st.ps_game_active && st.ps_game_override {
+        let base_ps = if st.ps_game_active && st.ps_game_override {
             (st.ps_game_x, st.ps_game_y, st.ps_game_z, st.ps_game_yaw)
         } else {
             (st.playspace_x, st.playspace_y, st.playspace_z, st.playspace_yaw)
         };
+        let eff_ps = (base_ps.0 + drag_ps[0], base_ps.1 + drag_ps[1], base_ps.2 + drag_ps[2], base_ps.3);
         if eff_ps != applied_ps_prev {
             applied_ps_prev = eff_ps;
             monado.set_origin(eff_ps.0, eff_ps.1, eff_ps.2, eff_ps.3.to_radians());
@@ -1169,7 +1187,128 @@ fn run() -> Result<()> {
                 });
             }
         }
-        desktop.set_local_in_stage(stage_space.as_ref().and_then(|st| locate_pose(&space, st, time)));
+        let local_in_stage = stage_space.as_ref().and_then(|st| locate_pose(&space, st, time));
+        desktop.set_local_in_stage(local_in_stage);
+
+        // --- Playspace drag: hold trackpad (A+B on a glove), move the hand -----
+        {
+            let gloves = monado.gloves();
+            st.gloves = gloves;
+            let allowed = match st.ps_drag_hands.as_str() {
+                "off" => [false, false],
+                "left" => [true, false],
+                "right" => [false, true],
+                _ => [true, true],
+            };
+            let drag_button = st.ps_drag_button.clone();
+            let stage_pos = |p: &xr::Posef| {
+                let q = local_in_stage.as_ref().map_or(*p, |l| pose_compose(l, p));
+                [q.position.x, q.position.y, q.position.z]
+            };
+            let mut pressed = [false; 2];
+            for (hi, h) in hands.iter().enumerate().take(2) {
+                glove_mode[hi] = match drag_button.as_str() {
+                    "pad" => false,
+                    "ab" => true,
+                    _ => if hi == 0 { gloves.0 } else { gloves.1 },
+                };
+                let pad = pad_action.state(&session, h.path)?.current_state > 0.5;
+                pressed[hi] = h.active && allowed[hi] && if glove_mode[hi] { h.secondary && h.precise } else { pad };
+                if pressed[hi] && !pad_prev[hi] {
+                    let double = pad_last[hi].is_some_and(|t| t.elapsed().as_millis() < 450);
+                    pad_last[hi] = Some(Instant::now());
+                    if double {
+                        pad_last[hi] = None;
+                        pad_suppressed[hi] = true;
+                        space_drag = None;
+                        st.ps_drag_reset_request = true;
+                    } else if space_drag.is_none() {
+                        space_drag = Some((hi, stage_pos(&h.aim)));
+                        pulse(&session, &haptic_action, h.path, 0.35, 25);
+                        log::info!("playspace: drag start (hand {hi})");
+                    }
+                }
+                if !pressed[hi] {
+                    pad_suppressed[hi] = false;
+                }
+                pad_prev[hi] = pressed[hi];
+            }
+            if let Some((hi, start)) = space_drag {
+                let still = pressed.get(hi).copied().unwrap_or(false) && !pad_suppressed[hi];
+                if !still {
+                    space_drag = None;
+                    log::info!("playspace: drag end · session offset {:+.2} {:+.2} {:+.2}", drag_ps[0], drag_ps[1], drag_ps[2]);
+                } else if let Some(h) = hands.get(hi).filter(|h| h.active) {
+                    // Keep the hand where it was in the app: offset += (start − now).
+                    let now = stage_pos(&h.aim);
+                    let mut d = [start[0] - now[0], start[1] - now[1], start[2] - now[2]];
+                    if !st.ps_drag_vertical {
+                        d[1] = 0.0;
+                    }
+                    let len2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+                    if len2 > 1e-10 && len2 < 100.0 {
+                        for k in 0..3 {
+                            drag_ps[k] += d[k];
+                        }
+                        if st.ps_drag_follow {
+                            // Same shift in LOCAL space so overlays stay with you.
+                            let dl = match &local_in_stage {
+                                Some(l) => {
+                                    let q = qf(&l.orientation);
+                                    quat_rotate([-q[0], -q[1], -q[2], q[3]], d)
+                                }
+                                None => d,
+                            };
+                            desktop.shift_world(dl);
+                            photos.shift_world(dl);
+                            anchor.position.x += dl[0];
+                            anchor.position.y += dl[1];
+                            anchor.position.z += dl[2];
+                        }
+                        let eff = (base_ps.0 + drag_ps[0], base_ps.1 + drag_ps[1], base_ps.2 + drag_ps[2], base_ps.3);
+                        applied_ps_prev = eff;
+                        monado.set_origin(eff.0, eff.1, eff.2, eff.3.to_radians());
+                    }
+                }
+            }
+            if st.ps_drag_reset_request {
+                st.ps_drag_reset_request = false;
+                space_drag = None;
+                if drag_ps.iter().any(|v| v.abs() > 1e-6) {
+                    if st.ps_drag_follow {
+                        let d = [-drag_ps[0], -drag_ps[1], -drag_ps[2]];
+                        let dl = match &local_in_stage {
+                            Some(l) => {
+                                let q = qf(&l.orientation);
+                                quat_rotate([-q[0], -q[1], -q[2], q[3]], d)
+                            }
+                            None => d,
+                        };
+                        desktop.shift_world(dl);
+                        photos.shift_world(dl);
+                        anchor.position.x += dl[0];
+                        anchor.position.y += dl[1];
+                        anchor.position.z += dl[2];
+                    }
+                    drag_ps = [0.0; 3];
+                    applied_ps_prev = base_ps;
+                    monado.set_origin(base_ps.0, base_ps.1, base_ps.2, base_ps.3.to_radians());
+                    audio.tab();
+                    for h in hands.iter().take(2) {
+                        pulse(&session, &haptic_action, h.path, 0.5, 40);
+                    }
+                    log::info!("playspace: drag offset reset");
+                }
+            }
+            st.ps_drag_offset = drag_ps;
+            // A glove hand dragging with A+B must not also click / toggle.
+            for (hi, h) in hands.iter_mut().enumerate().take(2) {
+                if glove_mode[hi] && h.secondary && h.precise {
+                    h.secondary = false;
+                    h.precise = false;
+                }
+            }
+        }
         desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
         if let Some(tok) = desktop.take_token_change() {
             screencast_token = tok;
@@ -1426,7 +1565,7 @@ fn run() -> Result<()> {
         }
         // Double-B (left): hide every shown screen / bring the same set back.
         // Ignored while that hand is pointing at a screen (B = frozen click there).
-        let left_b = hands.first().is_some_and(|h| h.active && h.precise);
+        let left_b = hands.first().is_some_and(|h| h.active && h.precise && !(glove_mode[0] && h.secondary));
         if left_b && !left_b_prev && desktop.pointing_hand() != Some(0) {
             let double = left_b_last.is_some_and(|t| t.elapsed().as_millis() < 450);
             if double {
@@ -2068,7 +2207,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px))),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow))),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -2332,6 +2471,10 @@ fn overlay_config_from(
         notifications_volume: st.notif_volume,
         watch_buttons: st.watch_buttons.clone(),
         keyboard_auto: st.keyboard_auto,
+        ps_drag_hands: st.ps_drag_hands.clone(),
+        ps_drag_button: st.ps_drag_button.clone(),
+        ps_drag_vertical: st.ps_drag_vertical,
+        ps_drag_follow: st.ps_drag_follow,
     }
 }
 

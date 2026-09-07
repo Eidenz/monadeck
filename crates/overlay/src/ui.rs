@@ -191,6 +191,14 @@ pub struct LibState {
     pub playspace_yaw: f32,
     pub playspace_step: f32,     // metres per nudge
     pub playspace_yaw_step: f32, // degrees per nudge
+    // Playspace drag (hold trackpad / A+B on gloves, move the hand).
+    pub ps_drag_hands: String,  // both | left | right | off
+    pub ps_drag_button: String, // auto | pad | ab
+    pub ps_drag_vertical: bool,
+    pub ps_drag_follow: bool,
+    pub ps_drag_offset: [f32; 3], // live session offset from dragging (readout)
+    pub ps_drag_reset_request: bool,
+    pub gloves: (bool, bool), // hand roles that are UdCap gloves (for the hint)
     /// Per-game playspace override editing. The steppers edit the running game's
     /// override (`ps_game_*`) when `ps_target_game` is set and a game is running,
     /// otherwise the global offset above. Maintained + persisted by the loop.
@@ -395,6 +403,13 @@ impl LibState {
             ps_game_yaw: 0.0,
             ps_game_save_request: false,
             ps_game_clear_request: false,
+            ps_drag_hands: "both".into(),
+            ps_drag_button: "auto".into(),
+            ps_drag_vertical: true,
+            ps_drag_follow: true,
+            ps_drag_offset: [0.0; 3],
+            ps_drag_reset_request: false,
+            gloves: (false, false),
             timer_secs: 300,
             timer_total: 300,
             timer_remaining: 300,
@@ -1992,6 +2007,8 @@ fn controls_card(ui: &mut egui::Ui) {
             &[
                 ("Left system button", "summon / dismiss the dashboard (it re-centres in front of you)"),
                 ("Double-B (left hand)", "hide every screen + the keyboard, or bring them back"),
+                ("Hold trackpad, move hand", "drag the playspace (A + B on a UdCap glove) · System → Playspace → Drag"),
+                ("Trackpad twice", "snap the playspace back (A + B twice on a glove)"),
                 ("Trigger", "click on the dashboard, the watch, the keyboard, photo windows"),
             ],
         ),
@@ -2516,6 +2533,59 @@ fn playspace_view(ui: &mut egui::Ui, st: &mut LibState) {
             "Offsets persist and re-apply when the runtime restarts."
         };
         ui.label(egui::RichText::new(note).size(13.0).color(theme::ON_SURFACE_VAR));
+        ui.add_space(18.0);
+
+        section(ui, "Drag", |ui| {
+            let mut t = false;
+            let glove_hint = match st.gloves {
+                (true, true) => "gloves detected on both hands: A + B",
+                (true, false) => "left glove: A + B · right: trackpad",
+                (false, true) => "right glove: A + B · left: trackpad",
+                _ => "trackpad press (A + B on UdCap gloves)",
+            };
+            setting_row(ui, "Hold to move", Some(&format!("Hold the button and move your hand to pull the world along · press it twice to snap back · {glove_hint}")), |ui| {
+                for (label, id) in [("Off", "off"), ("Right", "right"), ("Left", "left"), ("Both", "both")] {
+                    if pill(ui, label, 74.0, st.ps_drag_hands == id).clicked() && st.ps_drag_hands != id {
+                        st.ps_drag_hands = id.into();
+                        t = true;
+                    }
+                }
+            });
+            divider(ui);
+            setting_row(ui, "Button", Some("Auto picks the trackpad, or A + B on a hand that is a glove"), |ui| {
+                for (label, id) in [("A + B", "ab"), ("Trackpad", "pad"), ("Auto", "auto")] {
+                    if pill(ui, label, 92.0, st.ps_drag_button == id).clicked() && st.ps_drag_button != id {
+                        st.ps_drag_button = id.into();
+                        t = true;
+                    }
+                }
+            });
+            divider(ui);
+            setting_row(ui, "Up & down too", Some("Off = horizontal only (no accidental floor changes)"), |ui| {
+                t |= seg_toggle(ui, &mut st.ps_drag_vertical);
+            });
+            divider(ui);
+            setting_row(ui, "Overlays follow you", Some("Screens, keyboard, photos and the menu keep their place around you while you drag"), |ui| {
+                t |= seg_toggle(ui, &mut st.ps_drag_follow);
+            });
+            divider(ui);
+            let o = st.ps_drag_offset;
+            let moved = o.iter().any(|v| v.abs() > 1e-4);
+            let sub = if moved {
+                format!("{:+.2} m · {:+.2} m · {:+.2} m on top of the offset above · this session only", o[0], o[1], o[2])
+            } else {
+                "Nothing dragged yet · this session only".to_string()
+            };
+            setting_row(ui, "Dragged so far", Some(&sub), |ui| {
+                if moved && action_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Snap back").clicked() {
+                    st.ps_drag_reset_request = true;
+                    t = true;
+                }
+            });
+            if t {
+                st.sound_tab = true;
+            }
+        });
     });
 }
 

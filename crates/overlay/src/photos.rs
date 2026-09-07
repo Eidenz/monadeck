@@ -318,6 +318,15 @@ impl Photos {
 
     // --- Gallery -----------------------------------------------------------------
 
+    /// Move the open photo windows by `d` (LOCAL-space metres) — playspace drag.
+    pub fn shift_world(&mut self, d: [f32; 3]) {
+        for s in self.slots.iter_mut().filter(|s| s.open) {
+            s.gfx.pose.position.x += d[0];
+            s.gfx.pose.position.y += d[1];
+            s.gfx.pose.position.z += d[2];
+        }
+    }
+
     pub fn gallery_active(&self) -> bool {
         self.gallery.active
     }
