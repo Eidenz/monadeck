@@ -19,8 +19,9 @@
 
   const killSteamvrOn = $derived(app.config?.kill_steamvr_on_start ?? true);
 
+  const isWivrn = $derived(app.config?.backend === "wivrn");
   const runtimeDone = $derived(app.caps !== "no_binary");
-  const capsDone = $derived(app.caps === "set");
+  const capsDone = $derived(app.caps === "set" || app.caps === "not_needed");
   const preflightDone = $derived(!!app.preflight?.all_ok);
   const protonDone = $derived(app.importOpenxr);
   // Floor calibration only applies to the SteamVR Lighthouse driver.
@@ -62,16 +63,22 @@
       <div class="item" class:done={runtimeDone}>
         <div class="mark">{runtimeDone ? "✓" : ""}</div>
         <div class="text">
-          <div class="t">Monado runtime</div>
+          <div class="t">{isWivrn ? "WiVRn runtime" : "Monado runtime"}</div>
           <div class="d">
-            {runtimeDone
-              ? "monado-service found."
-              : "Install the built-in fork, or point the prefix at your build in Settings."}
+            {isWivrn
+              ? runtimeDone
+                ? "wivrn-server found."
+                : "Install WiVRn from your distro, or set its path in Settings."
+              : runtimeDone
+                ? "monado-service found."
+                : "Install the built-in fork, or point the prefix at your build in Settings."}
           </div>
         </div>
         <div class="act">
           {#if runtimeDone}
             <span class="ok">Ready</span>
+          {:else if isWivrn}
+            <button class="accent" onclick={() => openSettings("general")}>Set up</button>
           {:else}
             <button
               class="accent"
@@ -89,7 +96,11 @@
         <div class="mark">{capsDone ? "✓" : ""}</div>
         <div class="text">
           <div class="t">Service capabilities</div>
-          <div class="d">CAP_SYS_NICE on monado-service (re-apply after each rebuild).</div>
+          <div class="d">
+            {isWivrn
+              ? "Not needed for WiVRn."
+              : "CAP_SYS_NICE on monado-service (re-apply after each rebuild)."}
+          </div>
         </div>
         <div class="act">
           {#if capsDone}

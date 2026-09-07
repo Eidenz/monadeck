@@ -24,6 +24,20 @@ pub enum OvrRuntime {
     None,
 }
 
+/// Which XR runtime Monadeck orchestrates. Both are Monado-based, so the
+/// device strip, app list and overlay work the same; what differs is how the
+/// service is started/stopped and where its IPC socket lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    /// The user's Monado fork at `monado_prefix` (`monado-service`).
+    #[default]
+    Monado,
+    /// WiVRn's streaming server (`wivrn-server`), for standalone headsets.
+    /// Started as our child, controlled over the session bus. See `crate::wivrn`.
+    Wivrn,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -57,6 +71,15 @@ pub struct MonadeckConfig {
     /// `monado-service`, the libs, and the runtime manifest are all derived from
     /// this — an explicit anchor is the only reliable way to find a custom fork.
     pub monado_prefix: PathBuf,
+
+    /// Which runtime to run. Switching is only allowed while stopped.
+    #[serde(default)]
+    pub backend: Backend,
+
+    /// Explicit path to `wivrn-server`. `None` = autodetect (`$PATH`, then the
+    /// usual system prefixes). Only used when `backend` is [`Backend::Wivrn`].
+    #[serde(default)]
+    pub wivrn_server_path: Option<PathBuf>,
 
     /// Directory that contains the xrizer OpenVR runtime (the path written into
     /// `openvrpaths.vrpath`'s `runtime` list). `None` until the user sets it.
@@ -155,6 +178,8 @@ impl Default for MonadeckConfig {
             // A sensible guess; the UI lets the user correct it. Empty would be
             // more honest but this makes first-run autodetect cheaper to attempt.
             monado_prefix: PathBuf::new(),
+            backend: Backend::default(),
+            wivrn_server_path: None,
             xrizer_path: None,
             ovr_runtime: OvrRuntime::default(),
             minimize_to_tray: true,
@@ -251,5 +276,26 @@ impl MonadeckConfig {
     /// Quick sanity check that the prefix actually points at a monado build.
     pub fn prefix_looks_valid(&self) -> bool {
         self.monado_service_bin().is_file()
+    }
+
+    // --- WiVRn ------------------------------------------------------------
+
+    /// The `wivrn-server` binary to spawn: the explicit override when set (and
+    /// present), else autodetected. `None` when WiVRn isn't installed.
+    pub fn wivrn_server_bin(&self) -> Option<PathBuf> {
+        if let Some(p) = &self.wivrn_server_path {
+            if p.is_file() {
+                return Some(p.clone());
+            }
+        }
+        crate::wivrn::detect_server()
+    }
+
+    /// Whether the selected backend's service binary exists.
+    pub fn backend_available(&self) -> bool {
+        match self.backend {
+            Backend::Monado => self.prefix_looks_valid(),
+            Backend::Wivrn => self.wivrn_server_bin().is_some(),
+        }
     }
 }

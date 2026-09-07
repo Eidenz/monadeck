@@ -4,22 +4,22 @@
 
 use crate::state::AppState;
 use monadeck_core::active_runtime::{self, ActiveRuntimeKind};
-use monadeck_core::config::MonadeckConfig;
-use monadeck_core::config::OvrRuntime;
+use monadeck_core::config::{Backend, MonadeckConfig, OvrRuntime};
 use monadeck_core::desktop::{self, InstalledApp};
 use monadeck_core::devices::{self, Snapshot};
 use monadeck_core::floor_calibration::{self, FloorCalStatus};
 use monadeck_core::gpu::{self, AmdGpu};
 use monadeck_core::installer::{self, Installed};
-use monadeck_core::proton;
 use monadeck_core::launch_options;
 use monadeck_core::openvr_paths::{self, OvrPathsKind};
 use monadeck_core::plugins::ExecWhen;
 use monadeck_core::preflight::{self, PreflightReport};
+use monadeck_core::proton;
 use monadeck_core::setcap::{self, CapStatus};
 use monadeck_core::steamvr;
 use monadeck_core::survive_calibration::{self, SurviveCalStatus};
 use monadeck_core::uevr;
+use monadeck_core::wivrn::{self, WivrnStatus};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -30,10 +30,20 @@ type CmdResult<T> = Result<T, String>;
 
 #[derive(Serialize)]
 pub struct ServiceStatus {
+    /// Which runtime the deck is driving right now.
+    backend: Backend,
+    /// The selected backend's service binary was found.
+    available: bool,
     /// Our child process is alive.
     running: bool,
-    /// libmonado can reach the service (it's actually serving IPC).
+    /// libmonado can reach the service (it's actually serving IPC). For WiVRn
+    /// that additionally means a headset session is up.
     connected: bool,
+    /// WiVRn only: a server we didn't start owns the bus name (e.g. the WiVRn
+    /// dashboard's). We won't spawn a second one while it's there.
+    external: bool,
+    /// WiVRn only: the server's exported state, while reachable.
+    wivrn: Option<WivrnStatus>,
     exit_code: Option<i32>,
     /// Set (once) when the kwin freeze watch recovered the desktop from a
     /// cold-start HMD adoption; the UI turns it into a toast.
@@ -64,9 +74,20 @@ pub fn get_config(state: State<AppState>) -> MonadeckConfig {
 
 #[tauri::command]
 pub fn set_config(state: State<AppState>, config: MonadeckConfig) -> CmdResult<()> {
+    let previous = state.config.lock().unwrap().backend;
+    if config.backend != previous && state.runner.lock().unwrap().is_running() {
+        return Err("stop the service before switching the runtime backend".into());
+    }
     config.save().map_err(|e| e.to_string())?;
+    devices::set_backend(config.backend);
     *state.config.lock().unwrap() = config;
     Ok(())
+}
+
+/// Best-effort guess at the `wivrn-server` binary.
+#[tauri::command]
+pub fn autodetect_wivrn() -> Option<String> {
+    wivrn::detect_server().map(|p| p.to_string_lossy().to_string())
 }
 
 /// Search `$PATH` for an executable.
@@ -110,15 +131,30 @@ pub fn autodetect_prefix() -> Option<String> {
 pub async fn service_status(state: State<'_, AppState>) -> CmdResult<ServiceStatus> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut runner = st.runner.lock().unwrap();
-        let running = runner.is_running();
-        let exit_code = match runner.status() {
-            monadeck_core::cmd_runner::RunnerStatus::Stopped(c) => c,
-            _ => None,
+        let cfg = st.config.lock().unwrap().clone();
+        let (running, exit_code) = {
+            let mut runner = st.runner.lock().unwrap();
+            let running = runner.is_running();
+            let exit_code = match runner.status() {
+                monadeck_core::cmd_runner::RunnerStatus::Stopped(c) => c,
+                _ => None,
+            };
+            (running, exit_code)
+        };
+        let (external, wivrn_status) = match cfg.backend {
+            Backend::Monado => (false, None),
+            Backend::Wivrn => {
+                let status = wivrn::status();
+                (status.is_some() && !running, status)
+            }
         };
         ServiceStatus {
+            backend: cfg.backend,
+            available: cfg.backend_available(),
             running,
             connected: devices::service_connected(),
+            external,
+            wivrn: wivrn_status,
             exit_code,
             freeze_recovery: st.freeze_watch.lock().unwrap().take_result(),
         }
@@ -139,8 +175,20 @@ pub async fn runtime_status() -> CmdResult<RuntimeStatus> {
 
 #[tauri::command]
 pub async fn capabilities_status(state: State<'_, AppState>) -> CmdResult<String> {
-    let bin = state.config.lock().unwrap().monado_service_bin();
+    let cfg = state.config.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // WiVRn runs fine without CAP_SYS_NICE (its own systemd unit is the only
+        // thing that grants it), and its binary is a distro-owned file we
+        // shouldn't setcap. Report "not needed" so the nudges stay quiet; the
+        // one status the deck still cares about is whether it's installed.
+        if cfg.backend == Backend::Wivrn {
+            return if cfg.wivrn_server_bin().is_some() {
+                "not_needed".to_string()
+            } else {
+                "no_binary".to_string()
+            };
+        }
+        let bin = cfg.monado_service_bin();
         match setcap::status(&bin) {
             CapStatus::Set => "set",
             CapStatus::NeedsSetcap => "needs_setcap",
@@ -190,11 +238,85 @@ fn env_map(cfg: &MonadeckConfig) -> HashMap<String, String> {
 }
 
 /// Stop and reap every plugin/overlay child we launched on service start.
-fn kill_plugins(st: &AppState) {
+pub(crate) fn kill_plugins(st: &AppState) {
     let mut children = st.plugin_children.lock().unwrap();
     for mut child in children.drain(..) {
         monadeck_core::plugins::terminate(&mut child);
     }
+}
+
+/// Launch the after-start plugins and the built-in overlay, replacing anything
+/// still tracked from a previous run so we never end up with two of the same.
+/// Monado: right after the service accepts IPC. WiVRn: at each headset session
+/// start (see `wivrn_watch`).
+pub(crate) fn launch_session_plugins(st: &AppState) {
+    let cfg = st.config.lock().unwrap().clone();
+    let env = service_env(&cfg);
+    kill_plugins(st);
+    let mut children = st.plugin_children.lock().unwrap();
+    for p in cfg
+        .plugins
+        .iter()
+        .filter(|p| p.enabled && p.when == ExecWhen::AfterStart)
+    {
+        match p.launch(&env) {
+            Ok(child) => children.push(child),
+            Err(e) => log::warn!("plugin '{}' failed to launch: {e}", p.name),
+        }
+    }
+    // Built-in in-headset overlay — the permanent auto-launch entry.
+    if cfg.overlay_enabled {
+        match crate::overlay::launch(&env) {
+            Ok(child) => children.push(child),
+            Err(e) => log::warn!("built-in overlay failed to launch: {e}"),
+        }
+    }
+}
+
+/// The environment the service and everything launched beside it get: the
+/// user's custom vars plus the backend marker children use to find the right
+/// IPC socket (see `devices::BACKEND_ENV`).
+fn service_env(cfg: &MonadeckConfig) -> HashMap<String, String> {
+    let mut env = env_map(cfg);
+    env.insert(
+        devices::BACKEND_ENV.to_string(),
+        match cfg.backend {
+            Backend::Monado => "monado",
+            Backend::Wivrn => "wivrn",
+        }
+        .to_string(),
+    );
+    env
+}
+
+/// SteamVR fights monado for the HMD's display + tracking; with it up, monado
+/// usually fails to grab the headset or crashes. Now that we know we're actually
+/// going to start, run a one-shot check (not a continuous scan) and stop SteamVR
+/// first — killing vrserver brings the rest of it down too. On by default; the
+/// user can disable it. Powering on controllers/trackers can silently auto-launch
+/// SteamVR, so this often fires without the user realising it was up. For WiVRn
+/// the headset isn't shared, but a live SteamVR would still sit on the OpenVR
+/// runtime registration we're about to swap. See core::steamvr.
+fn stop_steamvr_first(cfg: &MonadeckConfig) {
+    if cfg.kill_steamvr_on_start {
+        let n = steamvr::kill_steamvr();
+        if n > 0 {
+            log::info!("stopped SteamVR ({n} vrserver process(es)) before starting");
+            // Let the SteamVR compositor release the HMD display / DRM master
+            // before monado tries to claim it.
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    }
+}
+
+/// Register xrizer as the OpenVR runtime when configured (backs up the original).
+fn register_openvr(cfg: &MonadeckConfig) -> CmdResult<()> {
+    if cfg.ovr_runtime == OvrRuntime::Xrizer {
+        if let Some(xr) = cfg.xrizer_path.as_ref() {
+            openvr_paths::set_to_xrizer(xr).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -202,165 +324,211 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
         let cfg = st.config.lock().unwrap().clone();
-        if !cfg.prefix_looks_valid() {
-            return Err(format!(
-                "monado-service not found at {}",
-                cfg.monado_service_bin().display()
-            ));
+        match cfg.backend {
+            Backend::Monado => start_monado(&st, cfg),
+            Backend::Wivrn => start_wivrn(&st, cfg),
         }
-
-        // A previous unclean exit (freeze/crash/SIGKILL) can leave monado's IPC
-        // socket behind with nothing listening; the next bind() then fails with
-        // "Address already in use" and the service refuses to boot. If a live
-        // service is still listening, don't spawn a colliding second instance —
-        // report it. Otherwise clear any stale leftover before we spawn.
-        if devices::service_connected() {
-            return Err("monado is already running — stop it before starting again.".into());
-        }
-        devices::reclaim_stale_socket();
-
-        // SteamVR fights monado for the HMD's display + tracking; with it up,
-        // monado usually fails to grab the headset or crashes. Now that we know
-        // we're actually going to start, run a one-shot check (not a continuous
-        // scan) and stop SteamVR first — killing vrserver brings the rest of it
-        // down too. On by default; the user can disable it. Powering on
-        // controllers/trackers can silently auto-launch SteamVR, so this often
-        // fires without the user realising it was up. See core::steamvr.
-        if cfg.kill_steamvr_on_start {
-            let n = steamvr::kill_steamvr();
-            if n > 0 {
-                log::info!("stopped SteamVR ({n} vrserver process(es)) before starting monado");
-                // Let the SteamVR compositor release the HMD display / DRM master
-                // before monado tries to claim it.
-                std::thread::sleep(Duration::from_millis(400));
-            }
-        }
-
-        // Wire up runtimes (each backs up what it replaces).
-        active_runtime::set_to_monado(&cfg).map_err(|e| e.to_string())?;
-        if cfg.ovr_runtime == monadeck_core::config::OvrRuntime::Xrizer {
-            if let Some(xr) = cfg.xrizer_path.as_ref() {
-                openvr_paths::set_to_xrizer(xr).map_err(|e| e.to_string())?;
-            }
-        }
-
-        let mut env = env_map(&cfg);
-        // Emit structured (JSON) logs so the Logs view can show levels + filter.
-        // A user who sets XRT_JSON_LOG explicitly (e.g. =0 for raw) wins.
-        env.entry("XRT_JSON_LOG".to_string())
-            .or_insert_with(|| "1".to_string());
-        // Pick the lighthouse driver exactly like Envision: the SteamVR wrapper
-        // (for the Beyond / SteamVR-tracked HMDs) is enabled via STEAMVR_LH_ENABLE
-        // and must NOT set LH_DRIVER (LH_DRIVER=steamvr actively errors); vive and
-        // survive go through LH_DRIVER. An explicit user LH_DRIVER wins.
-        if !env.contains_key("LH_DRIVER") {
-            if cfg.lighthouse_driver.eq_ignore_ascii_case("steamvr") {
-                env.entry("STEAMVR_LH_ENABLE".to_string())
-                    .or_insert_with(|| "true".to_string());
-            } else {
-                env.insert("LH_DRIVER".to_string(), cfg.lighthouse_driver.to_lowercase());
-            }
-        }
-        // Compositor settings, injected like Envision's profile defaults. An
-        // explicit user env var always wins (or_insert).
-        if cfg.render_scale != 100 {
-            env.entry("XRT_COMPOSITOR_SCALE_PERCENTAGE".to_string())
-                .or_insert_with(|| cfg.render_scale.to_string());
-        }
-        if cfg.min_frame_period {
-            env.entry("U_PACING_APP_USE_MIN_FRAME_PERIOD".to_string())
-                .or_insert_with(|| "1".to_string());
-        }
-        if cfg.compute_compositor {
-            env.entry("XRT_COMPOSITOR_COMPUTE".to_string())
-                .or_insert_with(|| "1".to_string());
-        }
-        if cfg.debug_gui {
-            env.entry("XRT_DEBUG_GUI".to_string())
-                .or_insert_with(|| "1".to_string());
-            env.entry("XRT_CURATED_GUI".to_string())
-                .or_insert_with(|| "1".to_string());
-        }
-        // Simulated headset for testing the overlay without hardware. The
-        // simulated builder is off unless SIMULATED_ENABLE is set; add simple
-        // controllers too so there's something to point the laser with.
-        if cfg.simulated_hmd {
-            env.entry("SIMULATED_ENABLE".to_string())
-                .or_insert_with(|| "1".to_string());
-            env.entry("SIMULATED_LEFT".to_string())
-                .or_insert_with(|| "simple".to_string());
-            env.entry("SIMULATED_RIGHT".to_string())
-                .or_insert_with(|| "simple".to_string());
-        }
-        // NVIDIA compositor mitigations — only when an NVIDIA GPU is actually
-        // present (so it's a no-op for AMD users / portable to nvidia friends).
-        if cfg.nvidia_mitigation && gpu::has_nvidia_gpu() {
-            env.entry("U_PACING_COMP_TIME_FRACTION_PERCENT".to_string())
-                .or_insert_with(|| "95".to_string());
-            env.entry("XRT_COMPOSITOR_USE_PRESENT_WAIT".to_string())
-                .or_insert_with(|| "1".to_string());
-        }
-        // Arm the kwin freeze watch before the service can power the headset
-        // display: a cold-started HMD can serve corrupt EDID, which makes kwin
-        // adopt it as a desktop monitor and freeze every output retrying a
-        // failing modeset. The watch spots the spam and drops the output so
-        // the desktop survives without unplugging. See core::kwin_freeze.
-        st.freeze_watch.lock().unwrap().spawn();
-
-        let bin = cfg.monado_service_bin();
-        st.runner
-            .lock()
-            .unwrap()
-            .start(&bin.to_string_lossy(), &[], &env)
-            .map_err(|e| format!("failed to start monado-service: {e}"))?;
-
-        // Wait briefly for the service to accept IPC before launching plugins.
-        for _ in 0..25 {
-            if devices::service_connected() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-
-        // Clean slate: stop anything still tracked from a previous run before
-        // launching fresh, so we never end up with two of the same plugin.
-        kill_plugins(&st);
-        let mut children = st.plugin_children.lock().unwrap();
-        for p in cfg
-            .plugins
-            .iter()
-            .filter(|p| p.enabled && p.when == ExecWhen::AfterStart)
-        {
-            match p.launch(&env) {
-                Ok(child) => children.push(child),
-                Err(e) => log::warn!("plugin '{}' failed to launch: {e}", p.name),
-            }
-        }
-        // Built-in in-headset overlay — the permanent auto-launch entry.
-        if cfg.overlay_enabled {
-            match crate::overlay::launch(&env) {
-                Ok(child) => children.push(child),
-                Err(e) => log::warn!("built-in overlay failed to launch: {e}"),
-            }
-        }
-        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
+    if !cfg.prefix_looks_valid() {
+        return Err(format!(
+            "monado-service not found at {}",
+            cfg.monado_service_bin().display()
+        ));
+    }
+
+    // A previous unclean exit (freeze/crash/SIGKILL) can leave monado's IPC
+    // socket behind with nothing listening; the next bind() then fails with
+    // "Address already in use" and the service refuses to boot. If a live
+    // service is still listening, don't spawn a colliding second instance —
+    // report it. Otherwise clear any stale leftover before we spawn.
+    if devices::service_connected() {
+        return Err("monado is already running — stop it before starting again.".into());
+    }
+    devices::reclaim_stale_socket();
+
+    stop_steamvr_first(&cfg);
+
+    // Wire up runtimes (each backs up what it replaces).
+    active_runtime::set_to_monado(&cfg).map_err(|e| e.to_string())?;
+    register_openvr(&cfg)?;
+
+    let mut env = service_env(&cfg);
+    // Emit structured (JSON) logs so the Logs view can show levels + filter.
+    // A user who sets XRT_JSON_LOG explicitly (e.g. =0 for raw) wins.
+    env.entry("XRT_JSON_LOG".to_string())
+        .or_insert_with(|| "1".to_string());
+    // Pick the lighthouse driver exactly like Envision: the SteamVR wrapper
+    // (for the Beyond / SteamVR-tracked HMDs) is enabled via STEAMVR_LH_ENABLE
+    // and must NOT set LH_DRIVER (LH_DRIVER=steamvr actively errors); vive and
+    // survive go through LH_DRIVER. An explicit user LH_DRIVER wins.
+    if !env.contains_key("LH_DRIVER") {
+        if cfg.lighthouse_driver.eq_ignore_ascii_case("steamvr") {
+            env.entry("STEAMVR_LH_ENABLE".to_string())
+                .or_insert_with(|| "true".to_string());
+        } else {
+            env.insert(
+                "LH_DRIVER".to_string(),
+                cfg.lighthouse_driver.to_lowercase(),
+            );
+        }
+    }
+    // Compositor settings, injected like Envision's profile defaults. An
+    // explicit user env var always wins (or_insert).
+    if cfg.render_scale != 100 {
+        env.entry("XRT_COMPOSITOR_SCALE_PERCENTAGE".to_string())
+            .or_insert_with(|| cfg.render_scale.to_string());
+    }
+    if cfg.min_frame_period {
+        env.entry("U_PACING_APP_USE_MIN_FRAME_PERIOD".to_string())
+            .or_insert_with(|| "1".to_string());
+    }
+    if cfg.compute_compositor {
+        env.entry("XRT_COMPOSITOR_COMPUTE".to_string())
+            .or_insert_with(|| "1".to_string());
+    }
+    if cfg.debug_gui {
+        env.entry("XRT_DEBUG_GUI".to_string())
+            .or_insert_with(|| "1".to_string());
+        env.entry("XRT_CURATED_GUI".to_string())
+            .or_insert_with(|| "1".to_string());
+    }
+    // Simulated headset for testing the overlay without hardware. The
+    // simulated builder is off unless SIMULATED_ENABLE is set; add simple
+    // controllers too so there's something to point the laser with.
+    if cfg.simulated_hmd {
+        env.entry("SIMULATED_ENABLE".to_string())
+            .or_insert_with(|| "1".to_string());
+        env.entry("SIMULATED_LEFT".to_string())
+            .or_insert_with(|| "simple".to_string());
+        env.entry("SIMULATED_RIGHT".to_string())
+            .or_insert_with(|| "simple".to_string());
+    }
+    // NVIDIA compositor mitigations — only when an NVIDIA GPU is actually
+    // present (so it's a no-op for AMD users / portable to nvidia friends).
+    if cfg.nvidia_mitigation && gpu::has_nvidia_gpu() {
+        env.entry("U_PACING_COMP_TIME_FRACTION_PERCENT".to_string())
+            .or_insert_with(|| "95".to_string());
+        env.entry("XRT_COMPOSITOR_USE_PRESENT_WAIT".to_string())
+            .or_insert_with(|| "1".to_string());
+    }
+    // Arm the kwin freeze watch before the service can power the headset
+    // display: a cold-started HMD can serve corrupt EDID, which makes kwin
+    // adopt it as a desktop monitor and freeze every output retrying a
+    // failing modeset. The watch spots the spam and drops the output so
+    // the desktop survives without unplugging. See core::kwin_freeze.
+    st.freeze_watch.lock().unwrap().spawn();
+
+    let bin = cfg.monado_service_bin();
+    st.runner
+        .lock()
+        .unwrap()
+        .start(&bin.to_string_lossy(), &[], &env)
+        .map_err(|e| format!("failed to start monado-service: {e}"))?;
+
+    // Wait briefly for the service to accept IPC before launching plugins.
+    for _ in 0..25 {
+        if devices::service_connected() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    launch_session_plugins(st);
+    Ok(())
+}
+
+/// Start WiVRn's server. It idles until a headset connects; the session watch
+/// then launches the plugins/overlay per headset session (see `wivrn_watch`).
+fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
+    let bin = cfg.wivrn_server_bin().ok_or_else(|| {
+        "wivrn-server not found — install WiVRn or set its path in Settings".to_string()
+    })?;
+    let manifest = wivrn::manifest_for(&bin).ok_or_else(|| {
+        format!(
+            "WiVRn's OpenXR manifest (openxr_wivrn.json) not found next to {}",
+            bin.display()
+        )
+    })?;
+
+    // Never spawn a second server: it would unlink the running one's IPC socket
+    // path and then die. A server we didn't start (the WiVRn dashboard's, a
+    // systemd unit) shows up as `external` in the status.
+    if wivrn::dbus_name_owned() {
+        return Err(
+            "WiVRn is already running outside Monadeck (the WiVRn dashboard or its systemd service) — stop it first."
+                .into(),
+        );
+    }
+    if st.runner.lock().unwrap().is_running() {
+        return Err("the service is already running — stop it before starting again.".into());
+    }
+
+    stop_steamvr_first(&cfg);
+
+    // Wire up runtimes ourselves (each backs up what it replaces); the server is
+    // told not to touch them.
+    active_runtime::set_to_wivrn(&manifest).map_err(|e| e.to_string())?;
+    register_openvr(&cfg)?;
+
+    let env = service_env(&cfg);
+    let args = wivrn::server_args();
+    st.runner
+        .lock()
+        .unwrap()
+        .start(&bin.to_string_lossy(), &args, &env)
+        .map_err(|e| format!("failed to start wivrn-server: {e}"))?;
+
+    // The bus name appears ~1–2 s after spawn; give it a moment so the deck
+    // shows live status right away, but don't fail the start if it's slow.
+    for _ in 0..30 {
+        if wivrn::dbus_name_owned() {
+            break;
+        }
+        if !st.runner.lock().unwrap().is_running() {
+            let _ = active_runtime::restore_backup();
+            let _ = openvr_paths::restore_backup();
+            return Err("wivrn-server exited right after starting — see Logs.".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    st.wivrn_watch.lock().unwrap().spawn(st.clone());
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
+        let cfg = st.config.lock().unwrap().clone();
         st.freeze_watch.lock().unwrap().stop_watch();
-        st.runner.lock().unwrap().terminate();
-        // Stop the plugins/overlay we launched on start (WayVR, etc.) so they don't
+        st.wivrn_watch.lock().unwrap().stop_watch();
+        // Stop the plugins/overlay we launched (WayVR, etc.) so they don't
         // outlive the service and collide with the next start.
         kill_plugins(&st);
 
-        let cfg = st.config.lock().unwrap().clone();
-        let env = env_map(&cfg);
+        if cfg.backend == Backend::Wivrn && st.runner.lock().unwrap().is_running() {
+            // Ask nicely over the bus first: Quit tears down a live headset
+            // session and any app WiVRn launched before exiting. The runner's
+            // terminate() below then reaps it (or SIGTERMs it if Quit failed).
+            if let Err(e) = wivrn::quit() {
+                log::warn!("WiVRn Quit over D-Bus failed ({e}); falling back to SIGTERM");
+            } else {
+                for _ in 0..30 {
+                    if !st.runner.lock().unwrap().is_running() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+        st.runner.lock().unwrap().terminate();
+
+        let env = service_env(&cfg);
         for p in cfg
             .plugins
             .iter()
@@ -371,10 +539,84 @@ pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
             }
         }
 
-        // Hand the runtimes back so SteamVR keeps working when monado is off.
+        // Hand the runtimes back so SteamVR keeps working when we're off.
         let _ = active_runtime::restore_backup();
         let _ = openvr_paths::restore_backup();
         Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// --- WiVRn -------------------------------------------------------------------
+
+fn wivrn_err(e: impl std::fmt::Display) -> String {
+    format!("WiVRn: {e}")
+}
+
+/// Allow a new headset to pair; returns the PIN to enter on it. `timeout_secs`
+/// -1 keeps pairing open until disabled.
+#[tauri::command]
+pub async fn wivrn_enable_pairing(timeout_secs: i32) -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        wivrn::enable_pairing(timeout_secs).map_err(wivrn_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn wivrn_disable_pairing() -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(|| wivrn::disable_pairing().map_err(wivrn_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Drop the current headset connection (the server keeps listening).
+#[tauri::command]
+pub async fn wivrn_disconnect() -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(|| wivrn::disconnect().map_err(wivrn_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn wivrn_revoke_key(public_key: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || wivrn::revoke_key(&public_key).map_err(wivrn_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn wivrn_rename_key(public_key: String, name: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        wivrn::rename_key(&public_key, &name).map_err(wivrn_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The server's configuration JSON (encoder, codec, application, …).
+#[tauri::command]
+pub async fn wivrn_get_config() -> CmdResult<String> {
+    tauri::async_runtime::spawn_blocking(|| wivrn::json_configuration().map_err(wivrn_err))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Replace the server's configuration. Validated as JSON here because the
+/// server writes whatever it's given straight to its config file.
+#[tauri::command]
+pub async fn wivrn_set_config(json: String) -> CmdResult<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("invalid JSON: {e}"))?;
+    if !value.is_object() {
+        return Err("WiVRn configuration must be a JSON object".into());
+    }
+    // Normalise so the file on disk is tidy regardless of how it was typed.
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        wivrn::set_json_configuration(&text).map_err(wivrn_err)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -530,7 +772,10 @@ pub async fn uevr_status() -> UevrStatus {
         chihuahua: uevr::detect_chihuahua().map(|p| p.to_string_lossy().into_owned()),
     })
     .await
-    .unwrap_or(UevrStatus { protontricks: false, chihuahua: None })
+    .unwrap_or(UevrStatus {
+        protontricks: false,
+        chihuahua: None,
+    })
 }
 
 /// Download the chihuahua injector ahead of time. `force` re-downloads the latest
@@ -539,8 +784,13 @@ pub async fn uevr_status() -> UevrStatus {
 #[tauri::command]
 pub async fn install_chihuahua(force: bool) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let r = if force { uevr::reinstall_chihuahua() } else { uevr::ensure_chihuahua() };
-        r.map(|p| p.to_string_lossy().into_owned()).map_err(|e| e.to_string())
+        let r = if force {
+            uevr::reinstall_chihuahua()
+        } else {
+            uevr::ensure_chihuahua()
+        };
+        r.map(|p| p.to_string_lossy().into_owned())
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

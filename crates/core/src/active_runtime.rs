@@ -18,7 +18,10 @@ const BACKUP_NAME: &str = "active_runtime.json.monadeck.bak";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveRuntimeInner {
-    #[serde(rename = "VALVE_runtime_is_steamvr", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "VALVE_runtime_is_steamvr",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub valve_runtime_is_steamvr: Option<bool>,
     #[serde(rename = "MND_libmonado_path", skip_serializing_if = "Option::is_none")]
     pub libmonado_path: Option<PathBuf>,
@@ -38,6 +41,7 @@ pub struct ActiveRuntime {
 #[serde(rename_all = "snake_case")]
 pub enum ActiveRuntimeKind {
     Monado,
+    Wivrn,
     SteamVr,
     Other,
     None,
@@ -60,14 +64,30 @@ pub fn current() -> Option<ActiveRuntime> {
     read_runtime(&active_runtime_path())
 }
 
+fn looks_like_wivrn(ar: &ActiveRuntime) -> bool {
+    // WiVRn's manifest is Monado-shaped (it even names itself "Monado" and
+    // carries MND_libmonado_path); its library path is the tell.
+    ar.runtime
+        .library_path
+        .to_string_lossy()
+        .to_lowercase()
+        .contains("wivrn")
+}
+
 fn looks_like_monado(ar: &ActiveRuntime) -> bool {
-    ar.runtime.libmonado_path.is_some()
-        || ar
-            .runtime
-            .library_path
-            .to_string_lossy()
-            .to_lowercase()
-            .contains("monado")
+    !looks_like_wivrn(ar)
+        && (ar.runtime.libmonado_path.is_some()
+            || ar
+                .runtime
+                .library_path
+                .to_string_lossy()
+                .to_lowercase()
+                .contains("monado"))
+}
+
+/// Either of the runtimes Monadeck itself installs — never worth backing up.
+fn looks_like_ours(ar: &ActiveRuntime) -> bool {
+    looks_like_monado(ar) || looks_like_wivrn(ar)
 }
 
 fn looks_like_steamvr(ar: &ActiveRuntime) -> bool {
@@ -87,6 +107,7 @@ pub fn kind() -> ActiveRuntimeKind {
         return ActiveRuntimeKind::None;
     }
     match current() {
+        Some(ar) if looks_like_wivrn(&ar) => ActiveRuntimeKind::Wivrn,
         Some(ar) if looks_like_monado(&ar) => ActiveRuntimeKind::Monado,
         Some(ar) if looks_like_steamvr(&ar) => ActiveRuntimeKind::SteamVr,
         Some(_) => ActiveRuntimeKind::Other,
@@ -109,8 +130,13 @@ fn make_writable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Point the OpenXR loader at monado. Backs up any existing runtime first.
-pub fn set_to_monado(config: &MonadeckConfig) -> Result<()> {
+/// Clear the way for our runtime: back up whatever foreign file is there now
+/// (once), or just drop our own previous entry. Returns the destination path.
+///
+/// Never clobbers an existing backup and never backs up our own symlink, or a
+/// crash-without-restore would lose the real pre-Monadeck original (or its
+/// absence) forever.
+fn prepare_dest() -> Result<PathBuf> {
     let dest = active_runtime_path();
     if dest.is_dir() {
         bail!("{} is a directory, refusing to touch it", dest.display());
@@ -118,11 +144,8 @@ pub fn set_to_monado(config: &MonadeckConfig) -> Result<()> {
     let parent = dest.parent().expect("has parent");
     create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
 
-    // Back up whatever is there now — but never clobber an existing backup or
-    // back up our own monado symlink, or a crash-without-restore would lose the
-    // real pre-Monadeck original (or its absence) forever.
     if dest.is_file() || dest.is_symlink() {
-        let is_ours = current().map(|ar| looks_like_monado(&ar)).unwrap_or(false);
+        let is_ours = current().map(|ar| looks_like_ours(&ar)).unwrap_or(false);
         let bak = backup_path();
         make_writable(&dest)?;
         if is_ours || bak.exists() {
@@ -135,6 +158,25 @@ pub fn set_to_monado(config: &MonadeckConfig) -> Result<()> {
                 .with_context(|| format!("backing up {} -> {}", dest.display(), bak.display()))?;
         }
     }
+    Ok(dest)
+}
+
+/// Point the OpenXR loader at WiVRn by symlinking its manifest (which carries
+/// `MND_libmonado_path`, so libmonado-rs finds `libmonado_wivrn.so` through it).
+/// Backs up any existing foreign runtime first, like [`set_to_monado`].
+pub fn set_to_wivrn(manifest: &Path) -> Result<()> {
+    if !manifest.is_file() {
+        bail!("WiVRn manifest {} not found", manifest.display());
+    }
+    let dest = prepare_dest()?;
+    symlink(manifest, &dest)
+        .with_context(|| format!("symlinking {} -> {}", manifest.display(), dest.display()))?;
+    Ok(())
+}
+
+/// Point the OpenXR loader at monado. Backs up any existing runtime first.
+pub fn set_to_monado(config: &MonadeckConfig) -> Result<()> {
+    let dest = prepare_dest()?;
 
     // Preferred: symlink monado's own manifest so it tracks the build.
     let manifest = config.openxr_monado_json();
@@ -157,7 +199,10 @@ pub fn set_to_monado(config: &MonadeckConfig) -> Result<()> {
         file_format_version: "1.0.0".to_string(),
         runtime: ActiveRuntimeInner {
             valve_runtime_is_steamvr: None,
-            libmonado_path: config.libmonado_so().is_file().then(|| config.libmonado_so()),
+            libmonado_path: config
+                .libmonado_so()
+                .is_file()
+                .then(|| config.libmonado_so()),
             library_path: lib,
             name: Some("Monado (Monadeck)".to_string()),
         },
@@ -190,4 +235,44 @@ pub fn restore_backup() -> Result<()> {
     fs::rename(&bak, &dest)
         .with_context(|| format!("restoring {} -> {}", bak.display(), dest.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Swap the real `active_runtime.json` to WiVRn's manifest and back, the way
+    /// start/stop do. Skipped unless WiVRn is installed; reversible: whatever was
+    /// there before (a file, a symlink, or nothing) is put back. Run with
+    /// `cargo test -p monadeck-core -- --ignored`.
+    #[test]
+    #[ignore]
+    fn wivrn_runtime_swap_roundtrip() {
+        let Some(bin) = crate::wivrn::detect_server() else {
+            eprintln!("wivrn-server not installed; skipping");
+            return;
+        };
+        let manifest = crate::wivrn::manifest_for(&bin).expect("manifest");
+        let dest = active_runtime_path();
+        let before = fs::read_link(&dest)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| fs::read_to_string(&dest).ok());
+        let before_kind = kind();
+
+        set_to_wivrn(&manifest).expect("set_to_wivrn");
+        assert_eq!(kind(), ActiveRuntimeKind::Wivrn);
+        assert_eq!(fs::read_link(&dest).unwrap(), manifest);
+        // Re-applying must not back up our own symlink.
+        set_to_wivrn(&manifest).expect("set_to_wivrn again");
+        assert_eq!(kind(), ActiveRuntimeKind::Wivrn);
+
+        restore_backup().expect("restore");
+        assert_eq!(kind(), before_kind);
+        let after = fs::read_link(&dest)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| fs::read_to_string(&dest).ok());
+        assert_eq!(after, before, "active_runtime.json not restored");
+    }
 }

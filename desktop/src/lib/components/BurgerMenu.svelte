@@ -1,6 +1,7 @@
 <script lang="ts">
   import { openSettings, openBindings } from "$lib/windows";
   import { beyondPresent } from "$lib/api";
+  import { app } from "$lib/state.svelte";
 
   let open = $state(false);
   // Only Beyond owners get the eye-tracking entry. Re-checked each time the menu
@@ -13,15 +14,16 @@
     { label: "Logs", run: () => openSettings("logs") },
   ];
 
-  // The Beyond entry just deep-links the Settings window to its tab.
-  let items = $derived(
-    hasBeyond
-      ? [
-          ...baseItems,
-          { label: "Beyond eye tracking", run: () => openSettings("beyond") },
-        ]
-      : baseItems,
-  );
+  // The Beyond / WiVRn entries just deep-link the Settings window to their tab.
+  let items = $derived([
+    ...baseItems,
+    ...(app.config?.backend === "wivrn"
+      ? [{ label: "WiVRn headset", run: () => openSettings("wivrn") }]
+      : []),
+    ...(hasBeyond
+      ? [{ label: "Beyond eye tracking", run: () => openSettings("beyond") }]
+      : []),
+  ]);
 
   async function toggle() {
     open = !open;

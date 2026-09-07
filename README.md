@@ -32,13 +32,14 @@ Monadeck is two halves that share one configuration: an in-headset overlay you l
 - **A wrist watch that keeps you in the loop.** Clock and time zones, battery levels, desktop and XSOverlay-protocol notifications, media controls, new screenshots to review, translate or share, and four quick buttons of your choice.
 - **Control the runtime without taking the headset off.** Nudge and rotate your play area, pick which app the headset shows, freeze an app's controllers, set a timer.
 - **Set up Monado in one click.** The desktop app installs a prebuilt build of the Monado fork and xrizer, runs the service with your environment, switches runtimes without breaking an existing SteamVR setup, and manages launch options and binding overrides.
+- **Or stream to a standalone headset with WiVRn.** Pick the WiVRn backend in Settings → General and Monadeck runs `wivrn-server` instead: pair headsets by PIN, see the stream status, pick the encoder, and the same overlay and plugins launch with each headset session. Needs [WiVRn](https://github.com/WiVRn/WiVRn) installed from your distro.
 
 It deliberately doesn't build Monado from source or manage drivers. For that, [Envision](https://gitlab.com/gabmus/envision) is the right tool; Monadeck can sit next to it.
 
 ## Requirements
 
 - **Linux** with a Wayland desktop (the screen mirror uses the desktop portal and PipeWire; KDE is what it's tested on).
-- A **Monado**-based OpenXR runtime and **xrizer** for OpenVR games, though not up front: Monadeck can install a prebuilt build of the fork and the latest xrizer for you (Settings → General → *Install built-in*), or use your own.
+- A **Monado**-based OpenXR runtime and **xrizer** for OpenVR games, though not up front: Monadeck can install a prebuilt build of the fork and the latest xrizer for you (Settings → General → *Install built-in*), or use your own. For a standalone headset, install **WiVRn** (26.6 or newer) and choose it as the runtime instead.
 - **Steam** (with Proton for Windows games) for your library and cover art.
 - Some features need the [Monado fork](https://github.com/Eidenz/Monado): controller freeze, in-headset screenshots, device hotplug. They hide themselves on stock Monado.
 

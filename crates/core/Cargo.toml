@@ -17,4 +17,7 @@ walkdir = "2"
 base64 = "0.22"
 # Same pin NemuriXR uses; dlopen-based, talks to whatever libmonado.so the active
 # runtime points at (your fork's 1.7.0 .so — safe: older client, newer lib).
+# WiVRn backend: its server is driven over the session bus (io.github.wivrn.Server).
+# Same feature set the overlay crate uses (via ashpd) so the two unify cleanly.
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 libmonado = { git = "https://github.com/wayvr-org/libmonado-rs.git", rev = "6f66b26930c24a8a2fc57ddcd85704784894c750", version = "1.6.0" }

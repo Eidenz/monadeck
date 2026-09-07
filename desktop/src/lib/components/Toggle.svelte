@@ -2,9 +2,14 @@
   let {
     checked = false,
     label = "Toggle",
+    disabled = false,
     onchange,
-  }: { checked?: boolean; label?: string; onchange: (v: boolean) => void } =
-    $props();
+  }: {
+    checked?: boolean;
+    label?: string;
+    disabled?: boolean;
+    onchange: (v: boolean) => void;
+  } = $props();
 </script>
 
 <button
@@ -14,12 +19,16 @@
   aria-label={label}
   class="sw"
   class:on={checked}
+  {disabled}
   onclick={() => onchange(!checked)}
 >
   <span class="knob"></span>
 </button>
 
 <style>
+  .sw:disabled {
+    opacity: 0.5;
+  }
   .sw {
     flex: none;
     width: 38px;

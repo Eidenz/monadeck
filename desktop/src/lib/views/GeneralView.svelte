@@ -12,9 +12,20 @@
   } from "$lib/state.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
 
-  async function browse(field: "monado_prefix" | "xrizer_path") {
+  const isWivrn = $derived(app.config?.backend === "wivrn");
+
+  async function setBackend(b: "monado" | "wivrn") {
+    if (!app.config || app.config.backend === b) return;
+    app.config.backend = b;
+    await saveConfig();
+  }
+
+  async function browse(field: "monado_prefix" | "xrizer_path" | "wivrn_server_path") {
     if (!app.config) return;
-    const picked = await open({ directory: true, multiple: false });
+    const picked = await open({
+      directory: field !== "wivrn_server_path",
+      multiple: false,
+    });
     if (typeof picked === "string") {
       app.config[field] = picked;
       await saveConfig();
@@ -26,12 +37,61 @@
     needs_setcap: "Not set",
     no_binary: "No service binary",
     no_tooling: "getcap/setcap missing",
+    not_needed: "Not needed for WiVRn",
   };
 </script>
 
 <section class="view">
   <h2>General</h2>
 
+  <div class="field">
+    <span class="lbl">Runtime</span>
+    <div class="seg">
+      <button
+        class:active={!isWivrn}
+        disabled={app.service.running}
+        onclick={() => setBackend("monado")}>Monado (wired headsets)</button
+      >
+      <button
+        class:active={isWivrn}
+        disabled={app.service.running}
+        onclick={() => setBackend("wivrn")}>WiVRn (standalone, streamed)</button
+      >
+    </div>
+    <span class="note">
+      {app.service.running
+        ? "Stop the service to switch."
+        : isWivrn
+          ? "Streams to a Quest/Pico-style headset over Wi-Fi via WiVRn's server. Device strip, apps and the overlay work the same."
+          : "Runs your Monado fork for a wired (Lighthouse/Beyond) headset."}
+    </span>
+  </div>
+
+  {#if isWivrn}
+    <div class="field">
+      <span class="lbl">wivrn-server</span>
+      <div class="row">
+        <input
+          value={app.config?.wivrn_server_path ?? ""}
+          placeholder="/usr/bin/wivrn-server (autodetected when empty)"
+          onchange={(e) => {
+            if (app.config) {
+              app.config.wivrn_server_path = e.currentTarget.value || null;
+              saveConfig();
+            }
+          }}
+        />
+        <button onclick={() => browse("wivrn_server_path")}>Browse…</button>
+      </div>
+      <span class="note" class:bad={!app.service.available}>
+        {app.service.available
+          ? "wivrn-server found. Pairing and server settings live in the WiVRn tab."
+          : "wivrn-server not found — install WiVRn from your distro (package \"wivrn\") and it will be picked up automatically."}
+      </span>
+    </div>
+  {/if}
+
+  {#if !isWivrn}
   <div class="field">
     <span class="lbl">Monado build prefix</span>
     <div class="row">
@@ -68,6 +128,7 @@
       <span class="install-ok" class:bad={!app.installResult.ok}>{app.installResult.msg}</span>
     {/if}
   </div>
+  {/if}
 
   <div class="field">
     <span class="lbl">xrizer runtime path</span>
@@ -162,10 +223,11 @@
           }
         }}
       />
-      <span>Stop SteamVR before starting <em>(it conflicts with monado over the headset)</em></span>
+      <span>Stop SteamVR before starting <em>{isWivrn ? "(it would sit on the OpenVR runtime we swap)" : "(it conflicts with monado over the headset)"}</em></span>
     </div>
   </div>
 
+  {#if !isWivrn}
   <div class="field">
     <span class="lbl">Lighthouse driver</span>
     <div class="seg">
@@ -270,11 +332,16 @@
       {/if}
     </div>
   {/if}
+  {/if}
 
   <div class="field">
     <span class="lbl">Service capabilities (CAP_SYS_NICE)</span>
     <div class="row">
-      <span class="pill" class:good={app.caps === "set"} class:warn={app.caps === "needs_setcap"}>
+      <span
+        class="pill"
+        class:good={app.caps === "set" || app.caps === "not_needed"}
+        class:warn={app.caps === "needs_setcap"}
+      >
         {capLabel[app.caps] ?? app.caps}
       </span>
       {#if app.caps === "needs_setcap"}

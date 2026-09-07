@@ -10,7 +10,8 @@
   import LogsView from "$lib/views/LogsView.svelte";
   import AboutView from "$lib/views/AboutView.svelte";
   import BeyondView from "$lib/views/BeyondView.svelte";
-  import { loadInitial, refreshStatus } from "$lib/state.svelte";
+  import WivrnView from "$lib/views/WivrnView.svelte";
+  import { app, loadInitial, refreshStatus } from "$lib/state.svelte";
   import { beyondPresent } from "$lib/api";
   import type { SettingsSection } from "$lib/windows";
 
@@ -22,17 +23,23 @@
     { id: "logs", label: "Logs" },
     { id: "about", label: "About" },
   ];
-  // Beyond owners get an extra "Beyond eye tracking" tab (inserted after Plugins).
+  // Beyond owners get an extra "Beyond eye tracking" tab (inserted after Plugins);
+  // the WiVRn backend gets its own tab right after General.
   let hasBeyond = $state(false);
-  const nav = $derived(
-    hasBeyond
-      ? [
-          ...baseNav.slice(0, 4),
-          { id: "beyond" as SettingsSection, label: "Beyond eye tracking" },
-          ...baseNav.slice(4),
-        ]
-      : baseNav,
-  );
+  const nav = $derived.by(() => {
+    let items = baseNav;
+    if (hasBeyond) {
+      items = [
+        ...items.slice(0, 4),
+        { id: "beyond" as SettingsSection, label: "Beyond eye tracking" },
+        ...items.slice(4),
+      ];
+    }
+    if (app.config?.backend === "wivrn") {
+      items = [items[0], { id: "wivrn" as SettingsSection, label: "WiVRn" }, ...items.slice(1)];
+    }
+    return items;
+  });
   let active = $state<SettingsSection>("general");
 
   onMount(() => {
@@ -99,6 +106,8 @@
         <LogsView />
       {:else if active === "beyond"}
         <BeyondView />
+      {:else if active === "wivrn"}
+        <WivrnView />
       {:else if active === "about"}
         <AboutView />
       {/if}

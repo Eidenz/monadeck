@@ -20,6 +20,21 @@ export const autodetectPrefix = () =>
   invoke<string | null>("autodetect_prefix");
 export const autodetectXrizer = () =>
   invoke<string | null>("autodetect_xrizer");
+export const autodetectWivrn = () =>
+  invoke<string | null>("autodetect_wivrn");
+
+// WiVRn backend (all over the server's D-Bus interface; fail when it's down).
+export const wivrnEnablePairing = (timeoutSecs: number) =>
+  invoke<string>("wivrn_enable_pairing", { timeoutSecs });
+export const wivrnDisablePairing = () => invoke<void>("wivrn_disable_pairing");
+export const wivrnDisconnect = () => invoke<void>("wivrn_disconnect");
+export const wivrnRevokeKey = (publicKey: string) =>
+  invoke<void>("wivrn_revoke_key", { publicKey });
+export const wivrnRenameKey = (publicKey: string, name: string) =>
+  invoke<void>("wivrn_rename_key", { publicKey, name });
+export const wivrnGetConfig = () => invoke<string>("wivrn_get_config");
+export const wivrnSetConfig = (json: string) =>
+  invoke<void>("wivrn_set_config", { json });
 
 export const serviceStatus = () => invoke<ServiceStatus>("service_status");
 export const runtimeStatus = () => invoke<RuntimeStatus>("runtime_status");

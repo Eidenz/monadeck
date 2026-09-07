@@ -6,10 +6,12 @@
 //! approach, expanded to the full device strip (role, serial, battery) that
 //! drives the SteamVR-style icon row.
 
+use crate::config::Backend;
 use libmonado::{ClientLogic, ClientState, DeviceLogic, DeviceRole, Monado};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// A coarse device class the frontend maps to an icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,10 +95,51 @@ fn role_map(monado: &Monado) -> Vec<(u32, &'static str)> {
     out
 }
 
-/// Path to monado's compositor IPC socket, the cheap "is the service up?" signal.
-/// Checking this file avoids invoking libmonado's `auto_connect` while the
-/// service is down — which spams stderr with C-side connection-failure messages.
+/// Env var carrying the selected backend to the processes we spawn (overlay,
+/// plugins), which use this same crate to find the service. The desktop app sets
+/// it in its own environment on every backend switch, so children inherit it.
+pub const BACKEND_ENV: &str = "MONADECK_BACKEND";
+
+/// The backend in effect for this process: whatever [`set_backend`] chose, else
+/// `$MONADECK_BACKEND` (inherited from the desktop app), else Monado.
+static BACKEND: AtomicU8 = AtomicU8::new(u8::MAX);
+
+pub fn current_backend() -> Backend {
+    match BACKEND.load(Ordering::Relaxed) {
+        0 => Backend::Monado,
+        1 => Backend::Wivrn,
+        _ => match std::env::var(BACKEND_ENV).as_deref() {
+            Ok("wivrn") => Backend::Wivrn,
+            _ => Backend::Monado,
+        },
+    }
+}
+
+/// Select the backend the socket helpers dispatch on, and export it to child
+/// processes via [`BACKEND_ENV`]. Called by the desktop app whenever the config
+/// is loaded or saved.
+pub fn set_backend(backend: Backend) {
+    let (code, name) = match backend {
+        Backend::Monado => (0, "monado"),
+        Backend::Wivrn => (1, "wivrn"),
+    };
+    BACKEND.store(code, Ordering::Relaxed);
+    std::env::set_var(BACKEND_ENV, name);
+}
+
+/// Path to the selected runtime's compositor IPC socket, the cheap "is the
+/// service up?" signal. Checking this file avoids invoking libmonado's
+/// `auto_connect` while the service is down — which spams stderr with C-side
+/// connection-failure messages.
 pub fn ipc_socket_path() -> PathBuf {
+    match current_backend() {
+        Backend::Monado => monado_ipc_socket_path(),
+        Backend::Wivrn => crate::wivrn::ipc_socket_path(),
+    }
+}
+
+/// `$XDG_RUNTIME_DIR/monado_comp_ipc` — monado-service's socket.
+pub fn monado_ipc_socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
@@ -234,7 +277,7 @@ pub fn list() -> Result<Vec<DeviceInfo>, String> {
 /// adds zero client connect/disconnect churn to monado's log even when polled
 /// every tick (the whole reason [`crate::monado_conn`] holds one persistent
 /// connection). If procfs is somehow unreadable we fall back to file presence.
-fn socket_is_listening(path: &Path) -> bool {
+pub(crate) fn socket_is_listening(path: &Path) -> bool {
     // /proc/net/unix columns: Num RefCount Protocol Flags Type St Inode Path.
     // A bound, listening socket has the SO_ACCEPTCON flag (0x10000) set in
     // `Flags`; a stale path has no row at all.
@@ -260,7 +303,14 @@ fn socket_is_listening(path: &Path) -> bool {
 /// is down. Returning `false` on a leftover socket is deliberate: an unclean
 /// exit leaves the file behind, and treating that as "up" would make the UI lie
 /// and make the persistent worker keep retrying `auto_connect` against a corpse.
+///
+/// For the WiVRn backend "up" additionally requires a headset session: its
+/// socket is bound from server start but only served once a headset connects,
+/// and a libmonado connect before that blocks forever. See [`crate::wivrn`].
 pub fn service_connected() -> bool {
+    if current_backend() == Backend::Wivrn {
+        return crate::wivrn::service_connected();
+    }
     let path = ipc_socket_path();
     // Stat first: in the common down-state there's no file, so we never read
     // /proc/net/unix at all.
@@ -320,7 +370,10 @@ mod tests {
         let dead = UnixListener::bind(&stale).expect("bind stale socket");
         drop(dead);
 
-        assert!(stale.exists(), "dropped listener should leave the socket file");
+        assert!(
+            stale.exists(),
+            "dropped listener should leave the socket file"
+        );
         assert!(socket_is_listening(&live), "live listener must read as up");
         assert!(
             !socket_is_listening(&stale),

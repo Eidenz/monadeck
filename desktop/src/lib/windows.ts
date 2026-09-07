@@ -9,6 +9,7 @@ export type SettingsSection =
   | "compositor"
   | "environment"
   | "plugins"
+  | "wivrn"
   | "logs"
   | "beyond"
   | "about";

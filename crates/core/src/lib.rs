@@ -12,6 +12,7 @@
 //! - [`floor_calibration`] — detect/run SteamVR floor calibration for steamvr_lh.
 //! - [`survive_calibration`] — import SteamVR calibration into libsurvive (survive driver).
 //! - [`devices`] — live device list via libmonado (`auto_connect`).
+//! - [`wivrn`] — the WiVRn backend: detect the server, drive it over D-Bus.
 //! - [`plugins`] — launch arbitrary apps by explicit path alongside the service.
 //! - [`config`] / [`paths`] — persisted settings and well-known file locations.
 
@@ -42,5 +43,6 @@ pub mod steam;
 pub mod steamvr;
 pub mod survive_calibration;
 pub mod uevr;
+pub mod wivrn;
 
 pub use config::MonadeckConfig;

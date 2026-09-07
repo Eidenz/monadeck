@@ -48,6 +48,13 @@
 
 <section class="view">
   <h2>Compositor</h2>
+  {#if app.config?.backend === "wivrn"}
+    <div class="backend-note">
+      These are environment settings for <b>monado-service</b>. With the WiVRn
+      backend the headset renders what it receives — resolution, refresh rate and
+      bitrate are set in the headset app, and the encoder in the WiVRn tab.
+    </div>
+  {/if}
 
   <div class="field">
     <span class="lbl">Render scale</span>
@@ -134,6 +141,15 @@
 </section>
 
 <style>
+  .backend-note {
+    font-size: 12.5px;
+    padding: 9px 12px;
+    border-radius: var(--radius-s);
+    background: hsl(var(--warn) / 0.1);
+    border: 1px solid hsl(var(--warn) / 0.35);
+    color: hsl(var(--foreground));
+    line-height: 1.45;
+  }
   .view {
     padding: 18px 20px;
     display: flex;
