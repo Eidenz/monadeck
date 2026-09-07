@@ -688,14 +688,14 @@ impl DesktopViewer {
         self.layout_untouched = !layout.recenter_on_toggle;
     }
 
-    /// The swap island's quad for screen `si`: hanging from the top edge, a
-    /// touch in front of the surface (the top-centre is the pose + up·h/2 for
-    /// flat and curved screens alike).
+    /// The swap island's quad for screen `si`: floating just above the top
+    /// edge, a touch in front of the surface (the top-centre is the pose +
+    /// up·h/2 for flat and curved screens alike).
     pub fn island_pose(&self, si: usize) -> (xr::Posef, (f32, f32)) {
         let s = &self.screens[si];
         let (_, h) = s.size_m();
         let isz = island::size_m();
-        (offset_pose(&s.pose, 0.0, h / 2.0 - island::TOP_INSET_M - isz.1 / 2.0, island::FWD_M), isz)
+        (offset_pose(&s.pose, 0.0, h / 2.0 + island::TOP_GAP_M + isz.1 / 2.0, island::FWD_M), isz)
     }
 
     /// (screen index, name) in bar order — the island's buttons.
@@ -1452,9 +1452,11 @@ impl DesktopViewer {
                         self.screens[si].island_until = Some(now + island::LINGER);
                     }
                 }
+                // The island lives above the screen, so aiming at its spot
+                // reveals it even when it's faded out, and never costs desktop.
                 for si in 0..self.screens.len() {
                     let s = &self.screens[si];
-                    if !s.shown || !s.has_content || island::alpha(s.island_until, now) <= 0.0 {
+                    if !s.shown || !s.has_content {
                         continue;
                     }
                     let (ip, isz) = self.island_pose(si);

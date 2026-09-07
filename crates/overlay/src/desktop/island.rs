@@ -1,5 +1,6 @@
-//! The screen "island": a small pill hanging from the top edge of a mirrored
-//! screen with one numbered button per approved screen, the current one lit.
+//! The screen "island": a small pill floating just above the top edge of a
+//! mirrored screen with one numbered button per approved screen, the current
+//! one lit (outside the image, so the desktop stays fully clickable).
 //! Tapping another number swaps that screen into this spot (same pose, size,
 //! curve and docking) so a screen can be replaced without hiding it and
 //! spawning the other. Shown for a couple of seconds when a screen appears,
@@ -16,12 +17,14 @@ pub const LINGER: Duration = Duration::from_millis(2000);
 const FADE_SECS: f32 = 0.35;
 /// Physical height of the island, metres; width follows the panel aspect.
 pub const HEIGHT_M: f32 = 0.042;
-/// Gap between the screen's top edge and the island.
-pub const TOP_INSET_M: f32 = 0.008;
+/// Gap between the screen's top edge and the island (it sits above the screen).
+pub const TOP_GAP_M: f32 = 0.012;
 /// The island floats this far in front of the screen surface.
 pub const FWD_M: f32 = 0.006;
-/// Screen zone (fractions of its size, from the top-centre) that reveals it.
-pub const REVEAL_V: f32 = 0.16;
+/// Screen zone (fractions of its size, from the top-centre) that reveals it —
+/// the top band of the image, so it pops up as the laser approaches; aiming
+/// at the island's own spot above the screen reveals it too.
+pub const REVEAL_V: f32 = 0.12;
 pub const REVEAL_HALF_U: f32 = 0.30;
 
 /// Fixed swapchain; the island's content is centred, the rest transparent.
