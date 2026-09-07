@@ -2206,6 +2206,7 @@ fn controls_card(ui: &mut egui::Ui) {
                 ("Grip + stick ▲▼", "push it away / pull it closer"),
                 ("Grip + trigger + stick ◀▶", "curve it"),
                 ("Release next to another screen", "dock to that edge (teal bar shows the spot)"),
+                ("Aim at the top-centre", "shows the swap island (also for 2 s when a screen appears) · tap another number to put that screen here"),
                 ("B while gripping", "undock"),
             ],
         ),

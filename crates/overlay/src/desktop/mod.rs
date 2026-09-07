@@ -13,6 +13,7 @@
 pub mod clipboard;
 pub mod dmabuf;
 pub mod hid;
+pub mod island;
 pub mod keyboard;
 pub mod keymap;
 pub mod outputs;
@@ -23,6 +24,7 @@ pub mod selftest;
 
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use ash::vk;
 use openxr as xr;
@@ -113,6 +115,8 @@ pub struct InputOut {
     pub dock_hint: Option<(xr::Posef, f32, String, i8, bool)>,
     /// The other hand's ray onto the keyboard (dual typing gets its own laser).
     pub secondary_ray: Option<(xr::Posef, f32)>,
+    /// Pointer on a screen's swap island: (screen index, u, v, trigger down).
+    pub island_ptr: Option<(usize, f32, f32, bool)>,
 }
 
 enum PortalState {
@@ -126,6 +130,8 @@ enum PortalState {
 enum Target {
     Screen(usize),
     Keyboard,
+    /// The swap island hanging from a screen's top edge.
+    Island(usize),
 }
 
 pub struct DesktopViewer {
@@ -682,6 +688,85 @@ impl DesktopViewer {
         self.layout_untouched = !layout.recenter_on_toggle;
     }
 
+    /// The swap island's quad for screen `si`: hanging from the top edge, a
+    /// touch in front of the surface (the top-centre is the pose + up·h/2 for
+    /// flat and curved screens alike).
+    pub fn island_pose(&self, si: usize) -> (xr::Posef, (f32, f32)) {
+        let s = &self.screens[si];
+        let (_, h) = s.size_m();
+        let isz = island::size_m();
+        (offset_pose(&s.pose, 0.0, h / 2.0 - island::TOP_INSET_M - isz.1 / 2.0, island::FWD_M), isz)
+    }
+
+    /// (screen index, name) in bar order — the island's buttons.
+    pub fn island_items(&self) -> Vec<(usize, String)> {
+        self.ordered_screens().into_iter().map(|i| (i, self.screens[i].name.clone())).collect()
+    }
+
+    pub fn island_alpha(&self, si: usize) -> f32 {
+        self.screens.get(si).map_or(0.0, |s| if s.shown && s.has_content { island::alpha(s.island_until, Instant::now()) } else { 0.0 })
+    }
+
+    pub fn screen_count(&self) -> usize {
+        self.screens.len()
+    }
+
+    /// Put screen `to` where screen `from` is (pose, size, curve, opacity,
+    /// docking, keyboard attachment) and hide `from`. If `to` is already up,
+    /// the two trade places instead.
+    pub fn swap_screen(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.screens.len() || to >= self.screens.len() {
+            return;
+        }
+        self.layout_untouched = false;
+        let both = self.screens[to].shown;
+        let snap = |s: &ScreenPanel| (s.pose, s.width_m, s.curve, s.opacity, s.custom_size, s.dock_parent);
+        let a = snap(&self.screens[from]);
+        let b = snap(&self.screens[to]);
+        let put = |s: &mut ScreenPanel, v: (xr::Posef, f32, f32, f32, bool, Option<(usize, i8)>)| {
+            s.pose = v.0;
+            s.width_m = v.1;
+            s.curve = v.2;
+            s.opacity = v.3;
+            s.custom_size = v.4;
+            s.dock_parent = v.5;
+            s.placed = true;
+        };
+        // Children docked onto either screen follow the swap.
+        for s in &mut self.screens {
+            match s.dock_parent {
+                Some((p, side)) if p == from => s.dock_parent = Some((to, side)),
+                Some((p, side)) if p == to && both => s.dock_parent = Some((from, side)),
+                _ => {}
+            }
+        }
+        put(&mut self.screens[to], a);
+        if both {
+            put(&mut self.screens[from], b);
+        } else {
+            self.screens[from].dock_parent = None;
+            self.screens[from].hide();
+            self.screens[to].show(&self.caps);
+        }
+        // A parent link pointing at itself after the swap means the two were
+        // docked to each other: keep the relation, flipped.
+        for i in [from, to] {
+            if let Some((p, side)) = self.screens[i].dock_parent {
+                if p == i {
+                    self.screens[i].dock_parent = Some((if i == from { to } else { from }, side));
+                }
+            }
+        }
+        match self.keyboard.attached {
+            Some(k) if k == from => self.dock_keyboard(Some(to)),
+            Some(k) if k == to && both => self.dock_keyboard(Some(from)),
+            _ => {}
+        }
+        self.screens[to].island_until = Some(Instant::now() + island::LINGER);
+        self.derive_docked_poses(&[]);
+        log::info!("desktop: swapped {} -> {}", self.screens[from].name, self.screens[to].name);
+    }
+
     /// Move every placed screen and the keyboard by `d` (LOCAL-space metres):
     /// the playspace drag carries the overlays along with you.
     pub fn shift_world(&mut self, d: [f32; 3]) {
@@ -1201,6 +1286,8 @@ impl DesktopViewer {
         let mut out = InputOut::default();
         self.pointing = None;
         let curved_ok = self.caps.curved;
+        let now = Instant::now();
+        let n_items = self.screens.len();
 
         // Continue grabs first (the grabbed thing follows the hand). While
         // gripping: trigger + push/pull the hand resizes, trigger + stick ◀▶
@@ -1330,6 +1417,7 @@ impl DesktopViewer {
         // freely. A hand that hits both takes the closer one.
         let mut kb_hits: [Option<(f32, f32, f32)>; 2] = [None, None];
         let mut scr_hits: [Option<(usize, f32, f32, f32)>; 2] = [None, None];
+        let mut isl_hits: [Option<(usize, f32, f32, f32)>; 2] = [None, None];
         self.keyboard.secondary_hover = None;
         if !grabbing {
             for (hi, h) in hands.iter().enumerate().take(2).filter(|(_, h)| h.active) {
@@ -1356,6 +1444,33 @@ impl DesktopViewer {
                 }
                 kb_hits[hi] = kb;
                 scr_hits[hi] = scr;
+                // Island: aiming near a screen's top-centre reveals its pill; a
+                // hit on a visible pill takes this hand off the screen (and the
+                // keyboard) so the tap goes to the pill, not the desktop.
+                if let Some((si, u, v, _)) = scr {
+                    if v < island::REVEAL_V && (u - 0.5).abs() < island::REVEAL_HALF_U {
+                        self.screens[si].island_until = Some(now + island::LINGER);
+                    }
+                }
+                for si in 0..self.screens.len() {
+                    let s = &self.screens[si];
+                    if !s.shown || !s.has_content || island::alpha(s.island_until, now) <= 0.0 {
+                        continue;
+                    }
+                    let (ip, isz) = self.island_pose(si);
+                    if let Some((u, v, t)) = raycast(&h.aim, &ip, isz) {
+                        if max_t.is_some_and(|m| t >= m) {
+                            continue;
+                        }
+                        if (u - 0.5).abs() <= island::content_frac(n_items) / 2.0 {
+                            isl_hits[hi] = Some((si, u, v, t));
+                            scr_hits[hi] = None;
+                            kb_hits[hi] = None;
+                            self.screens[si].island_until = Some(now + island::LINGER);
+                            break;
+                        }
+                    }
+                }
             }
         }
         // Keyboard pointer hand: sticky while it still hits the keyboard.
@@ -1427,6 +1542,18 @@ impl DesktopViewer {
                             self.keyboard.press(k);
                         }
                     }
+                }
+            }
+            // Island: the first hand on a pill drives its egui pointer (its
+            // laser is the main one unless a mouse hand has it).
+            if let Some(hi) = (0..hands.len().min(2)).find(|&i| isl_hits[i].is_some()) {
+                let (si, u, v, t) = isl_hits[hi].unwrap();
+                out.island_ptr = Some((si, u, v, hands[hi].select));
+                if mouse_hand.is_none() && out.ray.is_none() {
+                    out.ray = Some((hands[hi].aim, t));
+                    self.pointing = Some((Target::Island(si), hi));
+                } else {
+                    out.secondary_ray = Some((hands[hi].aim, t));
                 }
             }
             // Mouse.

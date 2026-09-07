@@ -577,6 +577,14 @@ fn run() -> Result<()> {
         &session, &device, allocator.clone(), render_pass, format, srgb,
         kb_px, desktop::keyboard::size_m(), anchor,
     )?;
+    // Screen-swap islands: one small panel per approved screen, made on demand.
+    let mut island_panels: Vec<Option<gfx::PanelGfx>> = Vec::new();
+    let mk_island = || {
+        make_panel(
+            &session, &device, allocator.clone(), render_pass, format, srgb,
+            desktop::island::PANEL_PX, desktop::island::size_m(), xr::Posef::IDENTITY,
+        )
+    };
     desktop.set_width(ov_cfg.screen_width_m);
     desktop.caps.curved = curved;
     desktop.caps.color_scale = color_scale;
@@ -1811,6 +1819,11 @@ fn run() -> Result<()> {
                 desktop.keyboard.clicked = false;
                 audio.key();
             }
+            let (island_qs, island_swap) = render_islands(&mut desktop, &mut island_panels, d_in.island_ptr, &mk_island, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+            if let Some((from, to)) = island_swap {
+                desktop.swap_screen(from, to);
+                audio.tab();
+            }
             let laser_alpha = screen_laser_alpha(desktop.pointing_screen(), &mut screen_laser_since);
             let laser_q = match (d_ray, hmd) {
                 (Some((aim, t)), Some(h)) if laser_alpha > 0.0 => {
@@ -1842,6 +1855,9 @@ fn run() -> Result<()> {
             }
             for c in &screen_cyls {
                 layers.push(c);
+            }
+            for q in &island_qs {
+                layers.push(q);
             }
             if let Some(q) = &dock_q {
                 layers.push(q);
@@ -2023,6 +2039,11 @@ fn run() -> Result<()> {
             desktop.keyboard.clicked = false;
             audio.key();
         }
+        let (island_qs, island_swap) = render_islands(&mut desktop, &mut island_panels, d_in.island_ptr, &mk_island, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+        if let Some((from, to)) = island_swap {
+            desktop.swap_screen(from, to);
+            audio.tab();
+        }
         // Feed the Desktop page.
         st.desktop_rows = desktop.rows();
         st.desktop_status = desktop.status();
@@ -2178,6 +2199,9 @@ fn run() -> Result<()> {
         }
         for c in &screen_cyls {
             layers.push(c);
+        }
+        for q in &island_qs {
+            layers.push(q);
         }
         if let Some(q) = &dock_q {
             layers.push(q);
@@ -2531,6 +2555,57 @@ fn render_keyboard<'a>(
         return Ok(None);
     }
     Ok(Some(quad_layer(panel, space, true)))
+}
+
+/// Draw every visible screen-swap island (one panel per screen, created on
+/// first use) and return their quads plus a requested swap (from, to).
+#[allow(clippy::too_many_arguments)]
+fn render_islands<'a>(
+    desktop: &mut desktop::DesktopViewer,
+    panels: &'a mut Vec<Option<gfx::PanelGfx>>,
+    ptr: Option<(usize, f32, f32, bool)>,
+    mk: &dyn Fn() -> Result<gfx::PanelGfx>,
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    cmd: vk::CommandBuffer,
+    cmd_pool: vk::CommandPool,
+    queue: vk::Queue,
+    fence: vk::Fence,
+    elapsed: f64,
+    space: &'a xr::Space,
+) -> Result<(Vec<xr::CompositionLayerQuad<'a, xr::Vulkan>>, Option<(usize, usize)>)> {
+    let n = desktop.screen_count();
+    if panels.len() < n {
+        panels.resize_with(n, || None);
+    }
+    let items = desktop.island_items();
+    let mut active = Vec::new();
+    let mut swap = None;
+    for si in 0..n {
+        let alpha = desktop.island_alpha(si);
+        if alpha <= 0.0 {
+            continue;
+        }
+        if panels[si].is_none() {
+            panels[si] = Some(mk()?);
+        }
+        let p = panels[si].as_mut().expect("island panel");
+        let (pose, size) = desktop.island_pose(si);
+        p.pose = pose;
+        p.size_m = size;
+        let pointer = ptr.filter(|(s, _, _, _)| *s == si).map(|(_, u, v, d)| (u, v, d));
+        let mut picked = None;
+        render_panel(p, device, render_pass, cmd, cmd_pool, queue, fence, true, pointer, (0.0, 0.0), elapsed, |ctx| {
+            picked = desktop::island::build(ctx, &items, si, alpha);
+        })?;
+        if let Some(t) = picked {
+            swap = Some((si, t));
+        }
+        active.push(si);
+    }
+    let panels: &'a Vec<Option<gfx::PanelGfx>> = panels;
+    let quads = active.iter().map(|&si| quad_layer(panels[si].as_ref().expect("island panel"), space, true)).collect();
+    Ok((quads, swap))
 }
 
 /// The persisted overlay preferences, from live UI state.

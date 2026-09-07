@@ -47,6 +47,8 @@ pub struct ScreenPanel {
     /// Capture paused because nobody's looking at it.
     pub gaze_paused: bool,
     pub unseen_since: Option<Instant>,
+    /// The screen-swap island stays visible until then (None = hidden).
+    pub island_until: Option<Instant>,
     /// Chained onto the layer for opacity; lives here so the pointer stays valid.
     scale_bias: xr::sys::CompositionLayerColorScaleBiasKHR,
     pub capture: Option<Capture>,
@@ -81,6 +83,7 @@ impl ScreenPanel {
             opacity: 1.0,
             gaze_paused: false,
             unseen_since: None,
+            island_until: None,
             scale_bias: xr::sys::CompositionLayerColorScaleBiasKHR {
                 ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
                 next: std::ptr::null(),
@@ -143,6 +146,7 @@ impl ScreenPanel {
 
     pub fn show(&mut self, caps: &Caps) {
         self.shown = true;
+        self.island_until = Some(Instant::now() + super::island::LINGER);
         match &self.capture {
             Some(c) => c.set_active(true),
             None => {
