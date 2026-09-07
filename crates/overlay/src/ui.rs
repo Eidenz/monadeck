@@ -657,30 +657,30 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 // rects so they never push the content around.
                 {
                     let r = ui.max_rect();
-                    let mut x = r.right();
-                    // `minimal`: tint the glyph only (no fill) — for the music icon.
-                    let mut corner_btn = |ui: &mut egui::Ui, glyph: String, on: bool, hot: bool, tip: &str, minimal: bool| -> bool {
-                        x -= 28.0;
+                    // Tinted glyphs only (no fill): music top-right, bell top-left.
+                    // `on` = its view is open (tap again to close); `badge` = a
+                    // small count bubble on the glyph's shoulder.
+                    let corner_btn = |ui: &mut egui::Ui, left: bool, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
+                        let x = if left { r.left() + 2.0 } else { r.right() - 28.0 };
                         let rect = egui::Rect::from_min_size(egui::pos2(x, r.top() - 2.0), egui::vec2(26.0, 22.0));
-                        let (fg, fill) = if minimal {
-                            let fg = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
-                            (fg, egui::Color32::TRANSPARENT)
-                        } else {
-                            let fg = if on { egui::Color32::BLACK } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
-                            let fill = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgba_unmultiplied(150, 190, 255, 30) } else { egui::Color32::TRANSPARENT };
-                            (fg, fill)
-                        };
+                        let fg = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
                         // A child ui at a fixed rect: nothing is allocated in the
                         // card's own layout, so the clock doesn't move.
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                        child
-                            .add(egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(fill).corner_radius(8).min_size(rect.size()))
-                            .on_hover_text(tip)
-                            .clicked()
+                        let resp = child
+                            .add(egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(egui::Color32::TRANSPARENT).corner_radius(8).min_size(rect.size()))
+                            .on_hover_text(tip);
+                        if badge > 0 {
+                            let c = egui::pos2(rect.right() - 5.0, rect.top() + 4.0);
+                            let p = child.painter();
+                            p.circle_filled(c, 6.5, egui::Color32::from_rgb(150, 190, 255));
+                            p.text(c, egui::Align2::CENTER_CENTER, badge.min(9).to_string(), egui::FontId::proportional(9.0), egui::Color32::BLACK);
+                        }
+                        resp.clicked()
                     };
                     if st.media.is_some() {
                         let playing = st.media.as_ref().is_some_and(|m| m.playing);
-                        if corner_btn(ui, icon::MUSIC_NOTES.to_string(), st.watch_media_menu, playing, "Now playing", true) {
+                        if corner_btn(ui, false, icon::MUSIC_NOTES, st.watch_media_menu, playing, 0, "Now playing") {
                             st.watch_media_menu = !st.watch_media_menu;
                             st.watch_history_menu = false;
                             st.watch_layout_menu = false;
@@ -690,8 +690,8 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         st.watch_media_menu = false;
                     }
                     if !st.notif_history.is_empty() {
-                        let label = if st.notif_unseen > 0 { format!("{}{}", icon::BELL_RINGING, st.notif_unseen) } else { icon::BELL.to_string() };
-                        if corner_btn(ui, label, st.watch_history_menu, st.notif_unseen > 0, "Recent notifications", false) {
+                        let glyph = if st.notif_unseen > 0 { icon::BELL_RINGING } else { icon::BELL };
+                        if corner_btn(ui, true, glyph, st.watch_history_menu, st.notif_unseen > 0, st.notif_unseen, "Recent notifications") {
                             st.watch_history_menu = !st.watch_history_menu;
                             st.watch_media_menu = false;
                             st.watch_layout_menu = false;
@@ -737,9 +737,6 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{}  Recent", icon::BELL)).size(14.0).strong().color(egui::Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(egui::RichText::new(icon::X).size(13.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
-                                st.watch_history_menu = false;
-                            }
                             if ui.add(egui::Button::new(egui::RichText::new(icon::TRASH).size(13.0)).min_size(egui::vec2(26.0, 22.0))).on_hover_text("Clear").clicked() {
                                 st.notif_clear_request = true;
                                 st.watch_history_menu = false;
