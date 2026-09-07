@@ -97,8 +97,8 @@
   </div>
 
   <div class="list">
-    <!-- Built-in in-headset library overlay: ships in the bundle, always
-         present, toggle-only (no remove / no path edit). -->
+    <!-- Built-in in-headset overlay (dashboard, desktop viewer, watch…): ships
+         in the bundle, always present, toggle-only (no remove / no path edit). -->
     <div class="row glass builtin" class:off={!app.config?.overlay_enabled}>
       <label class="en">
         <input
@@ -109,10 +109,10 @@
       </label>
       <div class="fields">
         <div class="name-row">
-          <span class="name static">In-headset library</span>
+          <span class="name static">Monadeck overlay</span>
           <span class="badge">built-in</span>
         </div>
-        <div class="path app">VR game-library launcher · ships with Monadeck · launches with the service</div>
+        <div class="path app">Dashboard, game library, desktop screens & keyboard, wrist watch, notifications · ships with Monadeck · launches with the service</div>
       </div>
     </div>
 
