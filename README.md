@@ -14,8 +14,8 @@ Built for a Monado + xrizer workflow.
 </tr>
 <tr>
 <td align="center" valign="top"><img src="screenshots/photos.jpg" width="260" alt="Screenshots in the headset"><br><sub>Screenshots & photos</sub></td>
-<td align="center" valign="top"><img src="screenshots/playspace.png" width="260" alt="Playspace tools"><br><sub>Playspace tools</sub></td>
-<td align="center" valign="top"><img src="screenshots/desktop.png" width="260" alt="Desktop control panel"><br><sub>Desktop control panel</sub></td>
+<td align="center" valign="top"><img src="screenshots/playspace.jpg" width="260" alt="Playspace tools"><br><sub>Playspace tools</sub></td>
+<td align="center" valign="top"><img src="screenshots/desktop.jpg" width="260" alt="Desktop control panel"><br><sub>Desktop control panel</sub></td>
 </tr>
 </table>
 
