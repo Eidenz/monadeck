@@ -112,7 +112,7 @@
           <span class="name static">Monadeck overlay</span>
           <span class="badge">built-in</span>
         </div>
-        <div class="path app">Dashboard, game library, desktop screens & keyboard, wrist watch, notifications · ships with Monadeck · launches with the service</div>
+        <div class="path app">Dashboard, desktop, wrist watch, notifications · ships with Monadeck</div>
       </div>
     </div>
 
