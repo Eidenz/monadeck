@@ -20,12 +20,19 @@
   const killSteamvrOn = $derived(app.config?.kill_steamvr_on_start ?? true);
 
   const isWivrn = $derived(app.config?.backend === "wivrn");
+  // Pick the runtime first: the rows below adapt to it (the status poll picks
+  // the new backend up within a tick).
+  function setBackend(b: "monado" | "wivrn") {
+    if (!app.config || app.config.backend === b) return;
+    app.config.backend = b;
+    saveConfig();
+  }
   const runtimeDone = $derived(app.caps !== "no_binary");
   const capsDone = $derived(app.caps === "set" || app.caps === "not_needed");
   const preflightDone = $derived(!!app.preflight?.all_ok);
   const protonDone = $derived(app.importOpenxr);
-  // Floor calibration only applies to the SteamVR Lighthouse driver.
-  const showFloor = $derived(app.config?.lighthouse_driver === "steamvr");
+  // Floor calibration only applies to the SteamVR Lighthouse driver (Monado).
+  const showFloor = $derived(!isWivrn && app.config?.lighthouse_driver === "steamvr");
   const floorDone = $derived(!!app.floorCal?.calibrated);
 
   const steps = $derived([
@@ -56,6 +63,29 @@
         finish them later from the notices and Settings.
       </p>
       <div class="progress">{doneCount} / {steps.length} done</div>
+    </div>
+
+    <div class="picker" role="radiogroup" aria-label="Runtime">
+      <button
+        class="choice"
+        class:active={!isWivrn}
+        role="radio"
+        aria-checked={!isWivrn}
+        onclick={() => setBackend("monado")}
+      >
+        <span class="ct">Monado</span>
+        <span class="cd">Wired headset: Lighthouse, Bigscreen Beyond, Index…</span>
+      </button>
+      <button
+        class="choice"
+        class:active={isWivrn}
+        role="radio"
+        aria-checked={isWivrn}
+        onclick={() => setBackend("wivrn")}
+      >
+        <span class="ct">WiVRn</span>
+        <span class="cd">Standalone headset streamed over Wi-Fi: Quest, Pico…</span>
+      </button>
     </div>
 
     <div class="list">
@@ -251,6 +281,39 @@
     font-size: 11px;
     font-weight: 600;
     color: hsl(var(--primary));
+  }
+  .picker {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .choice {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    text-align: left;
+    padding: 10px 12px;
+    background: hsl(var(--surface) / 0.6);
+    border: 1px solid hsl(var(--border) / 0.7);
+    border-radius: var(--radius);
+    color: hsl(var(--foreground));
+  }
+  .choice.active {
+    border-color: hsl(var(--primary));
+    background: hsl(var(--primary) / 0.12);
+  }
+  .choice .ct {
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .choice.active .ct {
+    color: hsl(var(--primary));
+  }
+  .choice .cd {
+    font-size: 11px;
+    line-height: 1.4;
+    color: hsl(var(--muted));
   }
   .list {
     display: flex;
