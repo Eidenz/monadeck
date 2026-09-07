@@ -671,8 +671,9 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                             .add(egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(egui::Color32::TRANSPARENT).corner_radius(8).min_size(rect.size()))
                             .on_hover_text(tip);
                         if badge > 0 {
-                            let c = egui::pos2(rect.right() - 5.0, rect.top() + 4.0);
-                            let p = child.painter();
+                            // Beside the glyph (outside the button's rect), not over it.
+                            let c = if left { egui::pos2(rect.right() + 6.0, rect.center().y) } else { egui::pos2(rect.left() - 6.0, rect.center().y) };
+                            let p = ui.painter();
                             p.circle_filled(c, 6.5, egui::Color32::from_rgb(150, 190, 255));
                             p.text(c, egui::Align2::CENTER_CENTER, badge.min(9).to_string(), egui::FontId::proportional(9.0), egui::Color32::BLACK);
                         }
