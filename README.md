@@ -81,7 +81,7 @@ libmonado is loaded through the `wayvr-org/libmonado-rs` pin, which `dlopen`s wh
 
 ## Credits
 
-**Monado** (OpenXR runtime) and **xrizer** by Supreeeme (OpenVR on OpenXR); **WayVR** by galister and the wlx team, whose desktop overlay, watch and playspace drag this borrows from, plus the `libmonado-rs` pin; **UEVR** by praydog and the **chihuahua** injector by keton, run through **protontricks**; **go-bsb-cams** by Red-M (Beyond eye cameras); **Envision** for the ground it covered first. Default background: "Table Mountain 2" by Greg Zaal, Poly Haven (CC0). Icons: Phosphor.
+[**Monado**](https://gitlab.freedesktop.org/monado/monado) (OpenXR runtime) and [**xrizer**](https://github.com/Supreeeme/xrizer) by Supreeeme (OpenVR on OpenXR); [**WayVR**](https://github.com/wlx-team/wayvr) by galister and the wlx team, whose desktop overlay, watch and playspace drag this borrows from, plus the [`libmonado-rs`](https://github.com/wayvr-org/libmonado-rs) pin; [**UEVR**](https://github.com/praydog/UEVR) by praydog and the [**chihuahua**](https://github.com/keton/chihuahua) injector by keton, run through [**protontricks**](https://github.com/Matoking/protontricks); [**go-bsb-cams**](https://github.com/Red-M/go-bsb-cams) by Red-M (Beyond eye cameras); [**Envision**](https://gitlab.com/gabmus/envision) for the ground it covered first. Default background: ["Table Mountain 2"](https://polyhaven.com/a/table_mountain_2) by Greg Zaal, Poly Haven (CC0). Icons: [Phosphor](https://phosphoricons.com).
 
 ## License
 
