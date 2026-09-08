@@ -63,6 +63,8 @@ pub enum Kind {
 pub enum Source {
     Desktop,
     XsOverlay,
+    /// Sent over the OSC control port (a game or tool).
+    Osc,
 }
 
 /// How much card a kind gets.
@@ -434,6 +436,7 @@ fn draw(ctx: &egui::Context, t: &Toast, now: Instant, queued: usize) {
         let glyph = match t.source {
             Some(Source::Desktop) => icon::DESKTOP,
             Some(Source::XsOverlay) => icon::GOGGLES,
+            Some(Source::Osc) => icon::BROADCAST,
             None => icon::SPARKLE,
         };
         ctx.fonts(|f| f.layout_job(job(&format!("{glyph}  {}", t.app), 13.0, accent, 1)))

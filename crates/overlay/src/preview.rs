@@ -12,6 +12,8 @@ use crate::toast::{Kind, Source, Toast, Toasts};
 
 /// The toast panel's pixel size (see `make_panel` in main).
 const PX: (usize, usize) = (960, 280);
+/// The minimal watch's.
+const MINI_PX: (usize, usize) = (420, 160);
 
 /// (name, toast, extra queued, frames as (suffix, seconds since shown)).
 type Case = (&'static str, Toast, usize, Vec<(&'static str, f32)>);
@@ -35,7 +37,7 @@ pub fn run(dir: &Path) -> Result<()> {
     let mut textures: HashMap<egui::TextureId, Tex> = HashMap::new();
     // egui applies the pixel scale on its first pass (that frame lays out on a
     // default 10000-point screen): warm the context up like the overlay does.
-    let out = ctx.run(screen_input(0.0), |_| {});
+    let out = ctx.run(screen_input(PX, 0.0), |_| {});
     for (id, delta) in &out.textures_delta.set {
         apply_delta(&mut textures, *id, delta);
     }
@@ -106,12 +108,12 @@ pub fn run(dir: &Path) -> Result<()> {
             let secs = secs.min(lifetime - 0.001);
             let now = start + Duration::from_secs_f32(secs);
             let queued = toasts.update(&ctx, None).map_or(0, |(_, q)| q);
-            let out = ctx.run(screen_input(secs as f64), |ctx| toasts.draw(ctx, now, queued));
+            let out = ctx.run(screen_input(PX, secs as f64), |ctx| toasts.draw(ctx, now, queued));
             for (id, delta) in &out.textures_delta.set {
                 apply_delta(&mut textures, *id, delta);
             }
             let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
-            let img = rasterise(&prims, &textures, out.pixels_per_point);
+            let img = rasterise(&prims, &textures, out.pixels_per_point, PX);
             let path = dir.join(format!("{name}-{suffix}.png"));
             img.save(&path)?;
             println!("{}", path.display());
@@ -124,20 +126,34 @@ pub fn run(dir: &Path) -> Result<()> {
     let mut toasts = Toasts::new();
     let start = Instant::now();
     toasts.readout("Screen 1", "1.20 m  ·  2.1 m away  ·  curve 30°", pose);
-    let out = ctx.run(screen_input(0.5), |ctx| toasts.draw(ctx, start + Duration::from_millis(500), 0));
+    let out = ctx.run(screen_input(PX, 0.5), |ctx| toasts.draw(ctx, start + Duration::from_millis(500), 0));
     for (id, delta) in &out.textures_delta.set {
         apply_delta(&mut textures, *id, delta);
     }
     let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
     let path = dir.join("readout-open.png");
-    rasterise(&prims, &textures, out.pixels_per_point).save(&path)?;
+    rasterise(&prims, &textures, out.pixels_per_point, PX).save(&path)?;
     println!("{}", path.display());
+    // The minimal watch (its own, smaller panel), idle and pointed at.
+    let mut st = crate::ui::LibState::new();
+    st.clock = "9:41 PM".into();
+    st.notif_unseen = 2;
+    for (name, hot) in [("watch-mini", false), ("watch-mini-hot", true)] {
+        let out = ctx.run(screen_input(MINI_PX, 1.0), |ctx| crate::ui::build_watch_mini(ctx, &st, hot));
+        for (id, delta) in &out.textures_delta.set {
+            apply_delta(&mut textures, *id, delta);
+        }
+        let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+        let path = dir.join(format!("{name}.png"));
+        rasterise(&prims, &textures, out.pixels_per_point, MINI_PX).save(&path)?;
+        println!("{}", path.display());
+    }
     Ok(())
 }
 
-fn screen_input(time: f64) -> egui::RawInput {
+fn screen_input(px: (usize, usize), time: f64) -> egui::RawInput {
     egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(PX.0 as f32 / PPP, PX.1 as f32 / PPP))),
+        screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(px.0 as f32 / PPP, px.1 as f32 / PPP))),
         time: Some(time),
         ..Default::default()
     }
@@ -183,8 +199,8 @@ fn apply_delta(textures: &mut HashMap<egui::TextureId, Tex>, id: egui::TextureId
 }
 
 /// Premultiplied-alpha triangle rasteriser over a dim scene-like backdrop.
-fn rasterise(prims: &[egui::ClippedPrimitive], textures: &HashMap<egui::TextureId, Tex>, ppp: f32) -> image::RgbaImage {
-    let (w, h) = PX;
+fn rasterise(prims: &[egui::ClippedPrimitive], textures: &HashMap<egui::TextureId, Tex>, ppp: f32, px: (usize, usize)) -> image::RgbaImage {
+    let (w, h) = px;
     // Backdrop: a soft vertical gradient standing in for whatever's behind the card.
     let mut buf: Vec<[f32; 4]> = (0..w * h)
         .map(|i| {

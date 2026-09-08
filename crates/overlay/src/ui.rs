@@ -134,6 +134,14 @@ pub struct LibState {
     /// Last few notifications (title, body, "3 min ago") + unseen count.
     pub notif_history: Vec<(String, String, String)>,
     pub notif_unseen: usize,
+    // Minimal (clock-only) watch, typing haptics, OSC control.
+    pub watch_mini: bool,
+    pub keyboard_haptics: bool,
+    pub osc_enabled: bool,
+    /// Port as a float for the stepper (1024..=65535).
+    pub osc_port: f32,
+    /// The listener is bound (else its port is busy).
+    pub osc_ok: bool,
     pub watch_history_menu: bool,
     pub watch_media_menu: bool,
     pub notif_clear_request: bool,
@@ -370,6 +378,11 @@ impl LibState {
             notif_test_request: false,
             notif_history: Vec::new(),
             notif_unseen: 0,
+            watch_mini: false,
+            keyboard_haptics: true,
+            osc_enabled: false,
+            osc_port: 9001.0,
+            osc_ok: false,
             watch_history_menu: false,
             watch_media_menu: false,
             notif_clear_request: false,
@@ -1044,6 +1057,23 @@ pub const ZONE_PRESETS: &[&str] = &[
 
 /// Everything a watch quick button can do, in cycle order.
 pub const WATCH_BUTTON_IDS: [&str; 9] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos"];
+
+/// The minimal watch: a clock-only pill that takes the wrist spot when the
+/// full watch is folded away. `hot` = the right hand points at it (a tap peeks
+/// at the full watch). Same skin as the watch, so they read as one thing.
+pub fn build_watch_mini(ctx: &egui::Context, st: &LibState, hot: bool) {
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let rect = ctx.screen_rect().shrink(3.0);
+    let radius = egui::CornerRadius::same((rect.height() / 2.0) as u8);
+    let stroke = if hot { theme::PRIMARY } else { egui::Color32::from_rgb(40, 110, 120) };
+    painter.rect_filled(rect, radius, egui::Color32::from_rgba_unmultiplied(14, 18, 24, 235));
+    painter.rect_stroke(rect, radius, egui::Stroke::new(1.5, stroke), egui::StrokeKind::Inside);
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, &st.clock, egui::FontId::proportional(rect.height() * 0.52), egui::Color32::WHITE);
+    // Unread notifications: a small dot by the rim, nothing more.
+    if st.notif_unseen > 0 {
+        painter.circle_filled(egui::pos2(rect.right() - 16.0, rect.top() + 14.0), 4.5, egui::Color32::from_rgb(150, 190, 255));
+    }
+}
 
 pub fn watch_button_info(id: &str) -> (&'static str, &'static str) {
     match id {
@@ -3175,6 +3205,10 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 stepper_inline(ui, &mut st.keyboard_scale, 0.6, 1.6, 0.1, |v| format!("{:.0}%", v * 100.0));
             });
             divider(ui);
+            setting_row(ui, "Keyboard haptics", Some("A light tick on each key, a lighter one sliding between keys"), |ui| {
+                t |= seg_toggle(ui, &mut st.keyboard_haptics);
+            });
+            divider(ui);
             setting_row(ui, "Scroll speed", Some("Thumbstick scrolling on a screen"), |ui| {
                 modern_slider(ui, &mut st.scroll_speed, 0.25..=4.0, 300.0, |v| format!("{v:.2}×"));
             });
@@ -3232,6 +3266,10 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
             let mut t = false;
             setting_row(ui, "Show the watch", Some("Clock, time zones, batteries and quick buttons on your left controller"), |ui| {
                 t |= seg_toggle(ui, &mut st.watch_enabled);
+            });
+            divider(ui);
+            setting_row(ui, "Minimal watch", Some("Just the clock, tucked toward the wrist · tap it to peek at the full watch · also over OSC"), |ui| {
+                t |= seg_toggle(ui, &mut st.watch_mini);
             });
             divider(ui);
             setting_row(ui, "24-hour clock", Some("Also the bottom bar clock"), |ui| {
@@ -3316,6 +3354,35 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                     st.notif_test_request = true;
                 }
             });
+            if t {
+                st.sound_tab = true;
+            }
+        });
+        section(ui, "OSC control", |ui| {
+            let mut t = false;
+            let port = st.osc_port as u16;
+            let status = if !st.osc_enabled {
+                "off".to_string()
+            } else if st.osc_ok {
+                format!("listening on udp/{port}")
+            } else {
+                format!("udp/{port} is busy — pick another port or route through an OSC router")
+            };
+            setting_row(ui, "Listen for OSC", Some(&format!("Games and tools (VRChat avatar parameters, VRCOSC…) toggle the watch, dashboard, screens and keyboard, or send a toast · {status}")), |ui| {
+                t |= seg_toggle(ui, &mut st.osc_enabled);
+            });
+            divider(ui);
+            setting_row(ui, "Port", Some("VRChat sends avatar parameters to 9001; takes effect a second after the last change"), |ui| {
+                stepper_inline(ui, &mut st.osc_port, 1024.0, 65535.0, 1.0, |v| format!("{}", v as u16));
+            });
+            divider(ui);
+            ui.label(
+                egui::RichText::new(
+                    "/monadeck/watch · /monadeck/watch/mini · /monadeck/dashboard · /monadeck/screens · /monadeck/keyboard · /monadeck/notify \"title\" \"body\"\nAvatar parameters: MonadeckWatch · MonadeckWatchMini · MonadeckDashboard · MonadeckScreens · MonadeckKeyboard (bool; no argument = toggle)",
+                )
+                .size(12.0)
+                .color(theme::ON_SURFACE_VAR),
+            );
             if t {
                 st.sound_tab = true;
             }

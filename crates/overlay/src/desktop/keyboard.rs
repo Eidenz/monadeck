@@ -132,6 +132,8 @@ pub struct KeyboardState {
     pub attach_request: bool,
     /// Which key is pressed this frame (for the click sound / haptics).
     pub clicked: bool,
+    /// The hand that pressed it, when it wasn't the egui pointer's hand.
+    pub click_hand: Option<usize>,
     /// Last modifier latched + when (double-tap detection).
     latch_at: Option<(u8, Instant)>,
     /// Clipboard text preview for the top bar (set by the viewer).
@@ -168,6 +170,7 @@ impl KeyboardState {
             detach_request: false,
             attach_request: false,
             clicked: false,
+            click_hand: None,
             latch_at: None,
             clipboard: None,
             layout_switch_request: None,

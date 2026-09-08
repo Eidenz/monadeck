@@ -16,6 +16,7 @@ mod mathx;
 mod media;
 mod monado;
 mod notifications;
+mod osc;
 mod photos;
 mod preview;
 mod shots;
@@ -436,6 +437,21 @@ fn run() -> Result<()> {
         &session, &device, allocator.clone(), render_pass, format, srgb,
         WATCH_PX, (WATCH_W, WATCH_W * WATCH_PX.1 as f32 / WATCH_PX.0 as f32), anchor,
     )?;
+    // The minimal watch: a clock-only pill that replaces the watch when asked,
+    // tucked this much further toward the wrist (past the watch's left edge).
+    const MINI_W: f32 = 0.058;
+    const MINI_PX: (u32, u32) = (420, 160);
+    const MINI_SHIFT: f32 = 0.03;
+    /// A tap on the mini watch shows the full watch for this long (kept open
+    /// while the hand stays on it).
+    const WATCH_PEEK_SECS: f32 = 3.0;
+    let mut mini_panel = make_panel(
+        &session, &device, allocator.clone(), render_pass, format, srgb,
+        MINI_PX, (MINI_W, MINI_W * MINI_PX.1 as f32 / MINI_PX.0 as f32), anchor,
+    )?;
+    render_panel(&mut mini_panel, &device, render_pass, cmd, cmd_pool, queue, fence, true, None, (0.0, 0.0), 0.0, |_| {})?;
+    let mut watch_peek: Option<Instant> = None;
+    let mut mini_select_prev = false;
     // Default wrist spot = the user's tuned position (relative to the left aim pose).
     let watch_default = xr::Posef {
         position: xr::Vector3f { x: -0.041_881_38, y: -0.054_545_76, z: 0.110_306_92 },
@@ -615,7 +631,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow))),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow, ov_cfg.watch_mini, ov_cfg.keyboard_haptics, ov_cfg.osc_enabled, ov_cfg.osc_port))),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -703,6 +719,15 @@ fn run() -> Result<()> {
     st.watch_enabled = ov_cfg.watch_enabled;
     st.watch_24h = ov_cfg.watch_24h;
     st.watch_locked = ov_cfg.watch_locked;
+    st.watch_mini = ov_cfg.watch_mini;
+    st.keyboard_haptics = ov_cfg.keyboard_haptics;
+    st.osc_enabled = ov_cfg.osc_enabled;
+    st.osc_port = ov_cfg.osc_port as f32;
+    // OSC control (VRChat avatar parameters and friends). Restarted a second
+    // after its settings stop changing (the port stepper clicks through values).
+    let mut osc: Option<osc::Osc> = st.osc_enabled.then(|| osc::Osc::start(st.osc_port as u16));
+    st.osc_ok = osc.as_ref().is_some_and(|o| o.ok);
+    let mut osc_dirty_since: Option<Instant> = None;
     st.keyboard_scale = ov_cfg.keyboard_scale;
     st.layout_active = layouts.last_used.clone();
     st.layouts = layouts.layouts.iter().map(|l| (l.name.clone(), l.screens.iter().filter(|s| s.shown).count())).collect();
@@ -759,6 +784,7 @@ fn run() -> Result<()> {
     let mut pad_suppressed = [false; 2]; // held after a double press: no drag until release
     let mut glove_mode = [false; 2]; // this hand drags with A+B (its A/B clicks are then ignored)
     let mut hover_prev: Option<usize> = None; // haptic hover edge
+    let mut kb_hover_prev: [Option<usize>; 2] = [None, None]; // key under each hand (typing haptics)
     // Re-scan to refresh last-played ordering when a game starts/stops.
     let mut running_app_prev: Option<String> = None;
     let mut refresh_rx: Option<std::sync::mpsc::Receiver<Vec<monadeck_core::steam::LibraryGame>>> = None;
@@ -1002,6 +1028,48 @@ fn run() -> Result<()> {
                     .source(toast::Source::Desktop)
                     .secs(5.0),
             );
+        }
+        // OSC control: (re)bind when its settings settle, then apply commands.
+        let osc_want = st.osc_enabled.then_some(st.osc_port as u16);
+        if osc_want != osc.as_ref().map(|o| o.port) {
+            let since = *osc_dirty_since.get_or_insert(now);
+            if since.elapsed().as_secs_f32() > 1.0 {
+                drop(osc.take()); // unbinds first (joins the listener)
+                osc = osc_want.map(osc::Osc::start);
+                st.osc_ok = osc.as_ref().is_some_and(|o| o.ok);
+                osc_dirty_since = None;
+            }
+        } else {
+            osc_dirty_since = None;
+        }
+        for cmd in osc.as_ref().map(|o| o.drain()).unwrap_or_default() {
+            match cmd {
+                osc::Cmd::Watch(v) => st.watch_enabled = v.unwrap_or(!st.watch_enabled),
+                osc::Cmd::WatchMini(v) => st.watch_mini = v.unwrap_or(!st.watch_mini),
+                osc::Cmd::Dashboard(v) => {
+                    let want = v.unwrap_or(!visible);
+                    if want != visible {
+                        visible = want;
+                        if visible {
+                            recenter = true;
+                            summon_at = Some(Instant::now());
+                        }
+                    }
+                }
+                osc::Cmd::Screens(v) => {
+                    if v.is_none_or(|v| v != (desktop.shown_count() > 0)) {
+                        st.screens_toggle_request = true;
+                    }
+                }
+                osc::Cmd::Keyboard(v) => {
+                    if v.is_none_or(|v| v != desktop.keyboard.visible) {
+                        st.keyboard_toggle_request = true;
+                    }
+                }
+                osc::Cmd::Notify { title, body } => {
+                    toasts.push(toast::Toast::new(toast::Kind::Notification, title, body).app("OSC").source(toast::Source::Osc));
+                }
+            }
         }
         if !welcomed {
             if let Some(h) = hmd {
@@ -1510,8 +1578,23 @@ fn run() -> Result<()> {
         let right_hand = hands.get(1).filter(|h| h.active);
         // Repositioning: while gripped by the right hand the watch follows it;
         // on release the new left-hand-relative offset is remembered.
-        let mut watch_pose = if st.watch_enabled { left_aim_pose.map(|p| pose_compose(&p, &watch_offset)) } else { None };
+        let wrist_pose = if st.watch_enabled { left_aim_pose.map(|p| pose_compose(&p, &watch_offset)) } else { None };
+        // Minimal watch: the clock-only pill takes the wrist spot, shifted past
+        // the watch's left edge toward the wrist. A tap on it peeks at the full
+        // watch for a few seconds (re-armed while the hand points at it).
+        let peeking = watch_peek.is_some_and(|t| t.elapsed().as_secs_f32() < WATCH_PEEK_SECS);
+        if !peeking {
+            watch_peek = None;
+        }
+        let mini_mode = st.watch_mini && !peeking && watch_grab.is_none();
+        let mut watch_pose = if mini_mode { None } else { wrist_pose };
+        let mini_pose = if mini_mode {
+            wrist_pose.map(|wp| offset_pose(&wp, -((WATCH_W - MINI_W) / 2.0 + MINI_SHIFT) * watch_scale, 0.0, 0.0))
+        } else {
+            None
+        };
         watch_panel.size_m = (WATCH_W * watch_scale, WATCH_W * watch_scale * WATCH_PX.1 as f32 / WATCH_PX.0 as f32);
+        mini_panel.size_m = (MINI_W * watch_scale, MINI_W * watch_scale * MINI_PX.1 as f32 / MINI_PX.0 as f32);
         if let Some((off, last)) = watch_grab {
             match right_hand {
                 Some(h) if h.grip >= GRAB_RELEASE => {
@@ -1563,8 +1646,37 @@ fn run() -> Result<()> {
             }
         }
         let watch_hit = if watch_grab.is_some() { None } else { watch_hit };
-        let watch_busy = watch_hit.is_some() || watch_grab.is_some();
+        if watch_hit.is_some() && watch_peek.is_some() {
+            watch_peek = Some(Instant::now());
+        }
+        // The right hand on the mini watch: (hit distance, trigger, aim); a
+        // trigger press peeks at the full watch.
+        let mini_hit = match (&mini_pose, right_hand) {
+            (Some(mp), Some(h)) => raycast(&h.aim, mp, mini_panel.size_m).map(|(_, _, t)| (t, h.select, h.aim)),
+            _ => None,
+        };
+        match mini_hit {
+            Some((_, sel, _)) => {
+                if sel && !mini_select_prev {
+                    watch_peek = Some(Instant::now());
+                    pulse(&session, &haptic_action, right_path, 0.3, 20);
+                    audio.tab();
+                }
+                mini_select_prev = sel;
+            }
+            None => mini_select_prev = false,
+        }
+        let watch_busy = watch_hit.is_some() || watch_grab.is_some() || mini_hit.is_some();
         let watch_active = watch_pose.is_some();
+        let mini_active = mini_pose.is_some();
+        if let Some(mp) = mini_pose {
+            mini_panel.pose = mp;
+            render_panel(
+                &mut mini_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
+                true, None, (0.0, 0.0), start.elapsed().as_secs_f64(),
+                |ctx| ui::build_watch_mini(ctx, &st, mini_hit.is_some()),
+            )?;
+        }
         if let Some(wp) = watch_pose {
             watch_panel.pose = wp;
             let ptr = watch_hit.map(|(u, v, _, d, _)| (u, v, d));
@@ -1729,7 +1841,7 @@ fn run() -> Result<()> {
             let p_in = photos.update_input(&hands, watch_busy.then_some(0.0));
             let d_in = desktop.update_input(&hands, if watch_busy { Some(0.0) } else { p_in.hit_t }, hmd.as_ref());
             photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
-            let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
+            let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t))).or(mini_hit.map(|(t, _, aim)| (aim, t)));
             if let Some(g) = d_in.gesture {
                 toasts.readout(g.title, g.body, g.pose);
             }
@@ -1739,9 +1851,25 @@ fn run() -> Result<()> {
                 blocked_prev = want_block;
             }
             let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+            // Typing feedback: the click sound, a tick on the hand that pressed, and a
+            // lighter one as the pointer slides onto another key.
+            let kb_hand = desktop.keyboard.click_hand.take().or(d_in.keyboard_hand);
             if desktop.keyboard.clicked {
                 desktop.keyboard.clicked = false;
                 audio.key();
+                if st.keyboard_haptics {
+                    if let Some(h) = hands.get(kb_hand.unwrap_or(1)) {
+                        pulse(&session, &haptic_action, h.path, 0.32, 14);
+                    }
+                }
+            }
+            for (i, hover) in d_in.keyboard_hover.iter().enumerate() {
+                if *hover != kb_hover_prev[i] {
+                    if let (Some(_), true, Some(h)) = (hover, st.keyboard_haptics, hands.get(i)) {
+                        pulse(&session, &haptic_action, h.path, 0.12, 7);
+                    }
+                    kb_hover_prev[i] = *hover;
+                }
             }
             let (island_qs, island_swap) = render_islands(&mut desktop, &mut island_panels, d_in.island_ptr, &mk_island, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
             if let Some((from, to)) = island_swap {
@@ -1769,6 +1897,7 @@ fn run() -> Result<()> {
             let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
             let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
             let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
+            let mini_q = mini_active.then(|| quad_layer(&mini_panel, &space, true));
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
             if let Some(s) = &sky_layer {
@@ -1802,6 +1931,9 @@ fn run() -> Result<()> {
                 layers.push(&toast_q);
             }
             if let Some(q) = &watch_q {
+                layers.push(q);
+            }
+            if let Some(q) = &mini_q {
                 layers.push(q);
             }
             if let Some(q) = &laser_q {
@@ -1950,7 +2082,7 @@ fn run() -> Result<()> {
             desktop.update_input(&hands, if block { Some(0.0) } else { p_in.hit_t }, hmd.as_ref())
         };
         photos.render(&device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &p_in.ptr)?;
-        let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t)));
+        let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t))).or(mini_hit.map(|(t, _, aim)| (aim, t)));
         if let Some(g) = d_in.gesture {
             toasts.readout(g.title, g.body, g.pose);
         }
@@ -1959,9 +2091,25 @@ fn run() -> Result<()> {
             scroll = (0.0, 0.0);
         }
         let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
+        // Typing feedback: the click sound, a tick on the hand that pressed, and a
+        // lighter one as the pointer slides onto another key.
+        let kb_hand = desktop.keyboard.click_hand.take().or(d_in.keyboard_hand);
         if desktop.keyboard.clicked {
             desktop.keyboard.clicked = false;
             audio.key();
+            if st.keyboard_haptics {
+                if let Some(h) = hands.get(kb_hand.unwrap_or(1)) {
+                    pulse(&session, &haptic_action, h.path, 0.32, 14);
+                }
+            }
+        }
+        for (i, hover) in d_in.keyboard_hover.iter().enumerate() {
+            if *hover != kb_hover_prev[i] {
+                if let (Some(_), true, Some(h)) = (hover, st.keyboard_haptics, hands.get(i)) {
+                    pulse(&session, &haptic_action, h.path, 0.12, 7);
+                }
+                kb_hover_prev[i] = *hover;
+            }
         }
         let (island_qs, island_swap) = render_islands(&mut desktop, &mut island_panels, d_in.island_ptr, &mk_island, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
         if let Some((from, to)) = island_swap {
@@ -2162,7 +2310,11 @@ fn run() -> Result<()> {
             layers.push(&toast_q);
         }
         let watch_q = watch_active.then(|| quad_layer(&watch_panel, &space, true));
+        let mini_q = mini_active.then(|| quad_layer(&mini_panel, &space, true));
         if let Some(q) = &watch_q {
+            layers.push(q);
+        }
+        if let Some(q) = &mini_q {
             layers.push(q);
         }
         if let Some(q) = &laser_q {
@@ -2264,7 +2416,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow))),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow, st.watch_mini, st.keyboard_haptics, st.osc_enabled, st.osc_port as u16))),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -2601,6 +2753,10 @@ fn overlay_config_from(
         ps_drag_button: st.ps_drag_button.clone(),
         ps_drag_vertical: st.ps_drag_vertical,
         ps_drag_follow: st.ps_drag_follow,
+        watch_mini: st.watch_mini,
+        keyboard_haptics: st.keyboard_haptics,
+        osc_enabled: st.osc_enabled,
+        osc_port: st.osc_port as u16,
     }
 }
 

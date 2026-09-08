@@ -108,6 +108,10 @@ pub struct InputOut {
     pub ray: Option<(xr::Posef, f32)>,
     /// Pointer on the keyboard panel: (u, v, trigger down).
     pub keyboard_ptr: Option<(f32, f32, bool)>,
+    /// The hand driving that pointer (for typing haptics).
+    pub keyboard_hand: Option<usize>,
+    /// Key under each hand's ray (typing haptics: a tick when it changes).
+    pub keyboard_hover: [Option<usize>; 2],
     /// A screen is being gripped/resized: show its numbers.
     pub gesture: Option<GestureInfo>,
     /// A gripped screen would dock here on release: (marker pose at the target's
@@ -1522,6 +1526,8 @@ impl DesktopViewer {
             if let Some(kh) = kb_hand {
                 if let Some((u, v, t)) = kb_hits[kh] {
                     out.keyboard_ptr = Some((u, v, hands[kh].select));
+                    out.keyboard_hand = Some(kh);
+                    out.keyboard_hover[kh] = self.keyboard.key_at(u, v);
                     if mouse_hand.is_none() {
                         out.ray = Some((hands[kh].aim, t));
                         self.pointing = Some((Target::Keyboard, kh));
@@ -1539,8 +1545,10 @@ impl DesktopViewer {
                     out.secondary_ray = Some((hands[hi].aim, t));
                     let key = self.keyboard.key_at(u, v);
                     self.keyboard.secondary_hover = key;
+                    out.keyboard_hover[hi] = key;
                     if hands[hi].select && !self.select_prev[hi] {
                         if let Some(k) = key {
+                            self.keyboard.click_hand = Some(hi);
                             self.keyboard.press(k);
                         }
                     }
