@@ -1,14 +1,21 @@
 //! Desktop + XSOverlay notifications in the headset (the role WayVR played):
+//!
 //! - D-Bus: a monitor on `org.freedesktop.Notifications.Notify` (BecomeMonitor,
 //!   so the desktop's own notification daemon keeps working untouched);
 //! - XSOverlay protocol: JSON over UDP on 127.0.0.1:42069 — what VRCX and other
 //!   VR tools send to XSOverlay.
-//! Both feed a queue the overlay turns into toasts.
+//!
+//! Both feed a queue the overlay turns into toasts. Desktop notifications bring
+//! their app icon along when it can be found: inline `image-data`, an image
+//! path, or an icon name resolved through the hicolor theme (and the sender's
+//! `.desktop` entry when the hint is a desktop id).
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use base64::Engine;
+use zbus::zvariant::Value;
 
 pub struct Incoming {
     pub app: String,
@@ -16,7 +23,7 @@ pub struct Incoming {
     pub body: String,
     /// Seconds to show.
     pub timeout: f32,
-    /// Decoded icon (XSOverlay base64), small.
+    /// Decoded icon (XSOverlay base64 / freedesktop image hints), small.
     pub icon: Option<egui::ColorImage>,
     pub source: Source,
 }
@@ -71,6 +78,7 @@ fn start_dbus(tx: mpsc::Sender<Incoming>) -> bool {
     std::thread::Builder::new()
         .name("notif-dbus".into())
         .spawn(move || {
+            let mut icons = IconCache::default();
             let iter = zbus::blocking::MessageIterator::from(&conn);
             for msg in iter {
                 let Ok(msg) = msg else { continue };
@@ -81,12 +89,13 @@ fn start_dbus(tx: mpsc::Sender<Incoming>) -> bool {
                     continue;
                 }
                 type Body = (String, u32, String, String, String, Vec<String>, HashMap<String, zbus::zvariant::OwnedValue>, i32);
-                let Ok((app, _replaces, _icon, summary, body, _actions, _hints, expire)) = msg.body().deserialize::<Body>() else {
+                let Ok((app, _replaces, app_icon, summary, body, _actions, hints, expire)) = msg.body().deserialize::<Body>() else {
                     continue;
                 };
                 let title = if summary.is_empty() { app.clone() } else { summary };
                 let timeout = if expire > 0 { (expire as f32 / 1000.0).clamp(2.0, 15.0) } else { 5.0 };
-                let _ = tx.send(Incoming { app, title, body: strip_markup(&body), timeout, icon: None, source: Source::Desktop });
+                let icon = desktop_icon(&app_icon, &hints, &mut icons);
+                let _ = tx.send(Incoming { app, title, body: strip_markup(&body), timeout, icon, source: Source::Desktop });
             }
             log::warn!("notifications: D-Bus monitor ended");
         })
@@ -108,6 +117,189 @@ fn strip_markup(s: &str) -> String {
         }
     }
     out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&quot;", "\"")
+}
+
+// --- desktop icons -------------------------------------------------------------
+
+/// Resolved icon names / paths, so a chatty app doesn't hit the disk per toast.
+#[derive(Default)]
+struct IconCache(Vec<(String, Option<egui::ColorImage>)>);
+
+impl IconCache {
+    fn get(&mut self, key: &str, load: impl FnOnce() -> Option<egui::ColorImage>) -> Option<egui::ColorImage> {
+        if let Some((_, img)) = self.0.iter().find(|(k, _)| k == key) {
+            return img.clone();
+        }
+        let img = load();
+        if self.0.len() >= 32 {
+            self.0.remove(0);
+        }
+        self.0.push((key.to_string(), img.clone()));
+        img
+    }
+}
+
+/// The icon a desktop notification wants shown, in the spec's priority order:
+/// `image-data` (pixels inline), `image-path`, the `app_icon` argument, then
+/// the icon of the `desktop-entry` it names.
+fn desktop_icon(app_icon: &str, hints: &HashMap<String, zbus::zvariant::OwnedValue>, cache: &mut IconCache) -> Option<egui::ColorImage> {
+    let hint = |k: &str| hints.get(k).map(|v| &**v);
+    if let Some(img) = hint("image-data").or_else(|| hint("image_data")).or_else(|| hint("icon_data")).and_then(image_data) {
+        return Some(img);
+    }
+    if let Some(Value::Str(p)) = hint("image-path").or_else(|| hint("image_path")) {
+        if let Some(img) = cache.get(p, || resolve_icon(p)) {
+            return Some(img);
+        }
+    }
+    if !app_icon.trim().is_empty() {
+        if let Some(img) = cache.get(app_icon, || resolve_icon(app_icon)) {
+            return Some(img);
+        }
+    }
+    if let Some(Value::Str(id)) = hint("desktop-entry") {
+        let key = format!("desktop:{id}");
+        return cache.get(&key, || desktop_entry_icon(id).and_then(|name| resolve_icon(&name)));
+    }
+    None
+}
+
+/// The spec's `iiibiiay` image: width, height, rowstride, has_alpha,
+/// bits_per_sample, channels, data.
+fn image_data(v: &Value) -> Option<egui::ColorImage> {
+    let Value::Structure(s) = v else { return None };
+    let f = s.fields();
+    if f.len() != 7 {
+        return None;
+    }
+    let int = |v: &Value| match v {
+        Value::I32(x) => Some(*x),
+        _ => None,
+    };
+    let (w, h, stride) = (int(&f[0])? as usize, int(&f[1])? as usize, int(&f[2])? as usize);
+    let has_alpha = matches!(f[3], Value::Bool(true));
+    let channels = int(&f[5])? as usize;
+    if int(&f[4])? != 8 || !(3..=4).contains(&channels) || w == 0 || h == 0 || w > 1024 || h > 1024 {
+        return None;
+    }
+    let Value::Array(a) = &f[6] else { return None };
+    let data: Vec<u8> = a.inner().iter().map(|b| if let Value::U8(b) = b { *b } else { 0 }).collect();
+    if data.len() < stride * (h - 1) + w * channels {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * stride + x * channels;
+            rgba.extend_from_slice(&data[i..i + 3]);
+            rgba.push(if has_alpha && channels == 4 { data[i + 3] } else { 255 });
+        }
+    }
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
+    Some(to_color_image(image::DynamicImage::ImageRgba8(img)))
+}
+
+/// Down to chip size (never up: a 16 px tray icon stays crisp at 16 px).
+fn to_color_image(img: image::DynamicImage) -> egui::ColorImage {
+    let img = if img.width() > 64 || img.height() > 64 { img.thumbnail(64, 64) } else { img };
+    let img = img.to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw())
+}
+
+/// An icon spec as apps send it: an absolute path, a `file://` URI, or a theme
+/// icon name (sometimes with a stray extension).
+fn resolve_icon(spec: &str) -> Option<egui::ColorImage> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let path = spec.strip_prefix("file://").unwrap_or(spec);
+    if path.starts_with('/') {
+        return load_icon_file(Path::new(path));
+    }
+    let name = match path.rsplit_once('.') {
+        Some((n, "png" | "svg" | "xpm" | "jpg")) => n,
+        _ => path,
+    };
+    icon_by_name(name)
+}
+
+fn load_icon_file(p: &Path) -> Option<egui::ColorImage> {
+    if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+        return None; // no SVG rasteriser on board
+    }
+    let bytes = std::fs::read(p).ok()?;
+    image::load_from_memory(&bytes).ok().map(to_color_image)
+}
+
+/// The XDG data roots that hold `icons/` and `applications/`, user first.
+fn data_roots() -> Vec<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut roots = vec![
+        PathBuf::from(format!("{home}/.local/share")),
+        PathBuf::from(format!("{home}/.local/share/flatpak/exports/share")),
+        PathBuf::from("/var/lib/flatpak/exports/share"),
+    ];
+    if let Ok(dirs) = std::env::var("XDG_DATA_DIRS") {
+        roots.extend(dirs.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+    }
+    for d in ["/usr/local/share", "/usr/share"] {
+        roots.push(PathBuf::from(d));
+    }
+    roots
+}
+
+/// A theme icon by name: hicolor's app icons at a toast-friendly size (PNG
+/// only), then the pixmaps fallback.
+pub(crate) fn icon_by_name(name: &str) -> Option<egui::ColorImage> {
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let roots = data_roots();
+    for size in [64, 48, 128, 96, 256, 72, 32, 512] {
+        for root in &roots {
+            for sub in ["apps", "status", "devices", "categories"] {
+                let p = root.join(format!("icons/hicolor/{size}x{size}/{sub}/{name}.png"));
+                if p.is_file() {
+                    return load_icon_file(&p);
+                }
+            }
+        }
+    }
+    for root in &roots {
+        for cand in [root.join(format!("pixmaps/{name}.png")), root.join(format!("icons/{name}.png"))] {
+            if cand.is_file() {
+                return load_icon_file(&cand);
+            }
+        }
+    }
+    log::debug!("notifications: no PNG icon for {name:?}");
+    None
+}
+
+/// `Icon=` of the desktop entry `id` (with or without `.desktop`).
+fn desktop_entry_icon(id: &str) -> Option<String> {
+    let file = if id.ends_with(".desktop") { id.to_string() } else { format!("{id}.desktop") };
+    if file.contains('/') {
+        return None;
+    }
+    for root in data_roots() {
+        let p = root.join("applications").join(&file);
+        let Ok(txt) = std::fs::read_to_string(&p) else { continue };
+        let mut in_entry = false;
+        for line in txt.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_entry = line == "[Desktop Entry]";
+            } else if in_entry {
+                if let Some(v) = line.strip_prefix("Icon=") {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 // --- XSOverlay (UDP JSON) --------------------------------------------------------
@@ -175,6 +367,8 @@ fn start_udp(tx: mpsc::Sender<Incoming>) -> bool {
                 if msg.messageType != 1 {
                     continue; // 2 = media player info: not a toast
                 }
+                // Base64 pixels, or one of XSOverlay's built-in icon names
+                // (`default`, `error`, `warning`) which map to our own glyphs.
                 let icon = msg
                     .icon
                     .as_deref()
@@ -198,7 +392,58 @@ fn start_udp(tx: mpsc::Sender<Incoming>) -> bool {
 
 fn decode_icon(b64: &str) -> Option<egui::ColorImage> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
-    let img = image::load_from_memory(&bytes).ok()?.thumbnail(64, 64).to_rgba8();
-    let size = [img.width() as usize, img.height() as usize];
-    Some(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
+    image::load_from_memory(&bytes).ok().map(to_color_image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markup_is_stripped() {
+        assert_eq!(strip_markup("<b>hi</b> &amp; <a href='x'>there</a>"), "hi & there");
+    }
+
+    #[test]
+    fn image_data_decodes_rgb_and_rgba() {
+        let px = |w: usize, h: usize, ch: usize, stride: usize| {
+            let mut data = vec![0u8; stride * h];
+            for y in 0..h {
+                for x in 0..w {
+                    let i = y * stride + x * ch;
+                    data[i] = 200;
+                    data[i + 1] = 30;
+                    data[i + 2] = 30;
+                    if ch == 4 {
+                        data[i + 3] = 255;
+                    }
+                }
+            }
+            Value::Structure(
+                zbus::zvariant::StructureBuilder::new()
+                    .add_field(w as i32)
+                    .add_field(h as i32)
+                    .add_field(stride as i32)
+                    .add_field(ch == 4)
+                    .add_field(8i32)
+                    .add_field(ch as i32)
+                    .add_field(data)
+                    .build()
+                    .unwrap(),
+            )
+        };
+        let rgb = image_data(&px(4, 3, 3, 16)).unwrap();
+        assert_eq!(rgb.size, [4, 3]);
+        assert_eq!(rgb.pixels[0], egui::Color32::from_rgb(200, 30, 30));
+        let rgba = image_data(&px(2, 2, 4, 8)).unwrap();
+        assert_eq!(rgba.pixels[3].a(), 255);
+        assert!(image_data(&Value::I32(3)).is_none());
+    }
+
+    #[test]
+    fn icon_specs() {
+        assert!(resolve_icon("").is_none());
+        assert!(resolve_icon("/definitely/not/here.png").is_none());
+        assert!(icon_by_name("../etc/passwd").is_none());
+    }
 }

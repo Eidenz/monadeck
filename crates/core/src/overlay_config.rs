@@ -58,6 +58,14 @@ pub struct OverlayConfig {
     pub watch_offset: Option<[f32; 7]>,
     /// Watch size multiplier (grip + trigger + push/pull, like screens).
     pub watch_scale: f32,
+    /// Minimal watch: a clock-only pill tucked toward the wrist (tap to peek at
+    /// the full watch). Also togglable over OSC.
+    pub watch_mini: bool,
+    /// Controller ticks while typing on the VR keyboard.
+    pub keyboard_haptics: bool,
+    /// OSC control listener (VRChat avatar parameters, VRCOSC…) on udp/`osc_port`.
+    pub osc_enabled: bool,
+    pub osc_port: u16,
     /// Pause a screen's capture after a couple of seconds out of view.
     pub gaze_pause: bool,
     /// Double-B restore: bring screens back centred in view (one screen / one
@@ -166,6 +174,10 @@ impl Default for OverlayConfig {
             ps_drag_button: "auto".into(),
             ps_drag_vertical: true,
             ps_drag_follow: true,
+            watch_mini: false,
+            keyboard_haptics: true,
+            osc_enabled: false,
+            osc_port: 9001,
         }
     }
 }

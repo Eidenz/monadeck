@@ -134,6 +134,14 @@ pub struct LibState {
     /// Last few notifications (title, body, "3 min ago") + unseen count.
     pub notif_history: Vec<(String, String, String)>,
     pub notif_unseen: usize,
+    // Minimal (clock-only) watch, typing haptics, OSC control.
+    pub watch_mini: bool,
+    pub keyboard_haptics: bool,
+    pub osc_enabled: bool,
+    /// Port as a float for the stepper (1024..=65535).
+    pub osc_port: f32,
+    /// The listener is bound (else its port is busy).
+    pub osc_ok: bool,
     pub watch_history_menu: bool,
     pub watch_media_menu: bool,
     pub notif_clear_request: bool,
@@ -370,6 +378,11 @@ impl LibState {
             notif_test_request: false,
             notif_history: Vec::new(),
             notif_unseen: 0,
+            watch_mini: false,
+            keyboard_haptics: true,
+            osc_enabled: false,
+            osc_port: 9001.0,
+            osc_ok: false,
             watch_history_menu: false,
             watch_media_menu: false,
             notif_clear_request: false,
@@ -1044,6 +1057,23 @@ pub const ZONE_PRESETS: &[&str] = &[
 
 /// Everything a watch quick button can do, in cycle order.
 pub const WATCH_BUTTON_IDS: [&str; 9] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos"];
+
+/// The minimal watch: a clock-only pill that takes the wrist spot when the
+/// full watch is folded away. `hot` = the right hand points at it (a tap peeks
+/// at the full watch). Same skin as the watch, so they read as one thing.
+pub fn build_watch_mini(ctx: &egui::Context, st: &LibState, hot: bool) {
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let rect = ctx.screen_rect().shrink(3.0);
+    let radius = egui::CornerRadius::same((rect.height() / 2.0) as u8);
+    let stroke = if hot { theme::PRIMARY } else { egui::Color32::from_rgb(40, 110, 120) };
+    painter.rect_filled(rect, radius, egui::Color32::from_rgba_unmultiplied(14, 18, 24, 235));
+    painter.rect_stroke(rect, radius, egui::Stroke::new(1.5, stroke), egui::StrokeKind::Inside);
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, &st.clock, egui::FontId::proportional(rect.height() * 0.52), egui::Color32::WHITE);
+    // Unread notifications: a small dot by the rim, nothing more.
+    if st.notif_unseen > 0 {
+        painter.circle_filled(egui::pos2(rect.right() - 16.0, rect.top() + 14.0), 4.5, egui::Color32::from_rgb(150, 190, 255));
+    }
+}
 
 pub fn watch_button_info(id: &str) -> (&'static str, &'static str) {
     match id {
@@ -2188,7 +2218,7 @@ fn controls_card(ui: &mut egui::Ui) {
             &[
                 ("Left system button", "summon / dismiss the dashboard (it re-centres in front of you)"),
                 ("Double-B (left hand)", "hide every screen + the keyboard, or bring them back"),
-                ("Hold trackpad, move hand", "drag the playspace (A + B on a UdCap glove) · System → Playspace → Drag"),
+                ("Hold trackpad, move hand", "drag the playspace (A + B on a UdCap glove) · System › Playspace › Drag"),
                 ("Trackpad twice", "snap the playspace back (A + B twice on a glove)"),
                 ("Trigger", "click on the dashboard, the watch, the keyboard, photo windows"),
             ],
@@ -2200,7 +2230,7 @@ fn controls_card(ui: &mut egui::Ui) {
                 ("Trigger", "left click · keep holding and move past the drag threshold to drag"),
                 ("A", "right click"),
                 ("B", "left click without moving the cursor (fiddly targets)"),
-                ("Thumbstick", "scroll (speed in Desktop → Behaviour)"),
+                ("Thumbstick", "scroll (speed in Desktop › Behaviour)"),
                 ("Grip", "move the screen (a docked group moves as one)"),
                 ("Grip + trigger, push / pull", "resize"),
                 ("Grip + stick ▲▼", "push it away / pull it closer"),
@@ -2435,95 +2465,6 @@ fn reset_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         .corner_radius(10)
         .min_size(egui::vec2(200.0, 42.0)),
     )
-}
-
-/// Per-notification icon + accent colour.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // `Info` is the generic fallback for future toasts.
-pub enum ToastKind {
-    Timer,
-    Battery,
-    Info,
-    /// A desktop / XSOverlay notification.
-    Notification,
-    /// "Done" feedback for an action taken while the dashboard was hidden.
-    Confirm,
-    /// The boot greeting.
-    Welcome,
-}
-
-impl ToastKind {
-    fn style(self) -> (&'static str, egui::Color32) {
-        match self {
-            ToastKind::Timer => (icon::TIMER, theme::PRIMARY),
-            ToastKind::Battery => (icon::BATTERY_WARNING, FAV_GOLD),
-            ToastKind::Info => (icon::BELL_RINGING, theme::PRIMARY),
-            ToastKind::Notification => (icon::BELL, egui::Color32::from_rgb(150, 190, 255)),
-            ToastKind::Confirm => (icon::CHECK_CIRCLE, theme::PRIMARY),
-            ToastKind::Welcome => (icon::HAND_WAVING, theme::PRIMARY),
-        }
-    }
-}
-
-/// The floating notification card (its own layer; shows over a game too). The
-/// quad is cleared transparent, so the card hugs its content and floats centred.
-pub fn build_toast(ctx: &egui::Context, title: &str, body: &str, kind: ToastKind, icon_tex: Option<&egui::TextureHandle>) {
-    let (glyph, accent) = kind.style();
-    let card = egui::Frame::default()
-        .fill(egui::Color32::from_rgb(24, 28, 35))
-        .corner_radius(20)
-        .inner_margin(egui::Margin::symmetric(20, 16))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(46, 54, 64)));
-    egui::Area::new(egui::Id::new("toast-card"))
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .show(ctx, |ui| {
-            card.show(ui, |ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    // Tinted icon chip.
-                    let (chip, _) = ui.allocate_exact_size(egui::vec2(52.0, 52.0), egui::Sense::hover());
-                    ui.painter().rect_filled(
-                        chip,
-                        egui::CornerRadius::same(14),
-                        egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38),
-                    );
-                    match icon_tex {
-                        Some(t) => {
-                            egui::Image::new(egui::load::SizedTexture::new(t.id(), egui::vec2(44.0, 44.0)))
-                                .corner_radius(10)
-                                .paint_at(ui, egui::Rect::from_center_size(chip.center(), egui::vec2(44.0, 44.0)));
-                        }
-                        None => {
-                            ui.painter().text(
-                                chip.center(),
-                                egui::Align2::CENTER_CENTER,
-                                glyph,
-                                egui::FontId::proportional(27.0),
-                                accent,
-                            );
-                        }
-                    }
-                    ui.add_space(16.0);
-                    ui.vertical(|ui| {
-                        const TEXT_W: f32 = 780.0;
-                        ui.set_max_width(TEXT_W);
-                        // Hard row caps + break-anywhere so a long title, a
-                        // multi-line body or an unbroken URL can't spill past the
-                        // panel's edges (Discord loves all three).
-                        let clamp = |text: &str, size: f32, color: egui::Color32, rows: usize| {
-                            let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                            let mut job = egui::text::LayoutJob::simple(one_line, egui::FontId::proportional(size), color, TEXT_W);
-                            job.wrap = egui::text::TextWrapping { max_width: TEXT_W, max_rows: rows, break_anywhere: true, overflow_character: Some('…') };
-                            job
-                        };
-                        ui.add(egui::Label::new(clamp(title, 21.0, egui::Color32::WHITE, 1)));
-                        if !body.is_empty() {
-                            ui.add_space(3.0);
-                            ui.add(egui::Label::new(clamp(body, 15.0, theme::ON_SURFACE_VAR, 2)));
-                        }
-                    });
-                });
-            });
-        });
 }
 
 /// The game-launch popup (its own composition layer, SteamVR-style): the game's
@@ -3264,6 +3205,10 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 stepper_inline(ui, &mut st.keyboard_scale, 0.6, 1.6, 0.1, |v| format!("{:.0}%", v * 100.0));
             });
             divider(ui);
+            setting_row(ui, "Keyboard haptics", Some("A light tick on each key, a lighter one sliding between keys"), |ui| {
+                t |= seg_toggle(ui, &mut st.keyboard_haptics);
+            });
+            divider(ui);
             setting_row(ui, "Scroll speed", Some("Thumbstick scrolling on a screen"), |ui| {
                 modern_slider(ui, &mut st.scroll_speed, 0.25..=4.0, 300.0, |v| format!("{v:.2}×"));
             });
@@ -3321,6 +3266,10 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
             let mut t = false;
             setting_row(ui, "Show the watch", Some("Clock, time zones, batteries and quick buttons on your left controller"), |ui| {
                 t |= seg_toggle(ui, &mut st.watch_enabled);
+            });
+            divider(ui);
+            setting_row(ui, "Minimal watch", Some("Just the clock, tucked toward the wrist · tap it to peek at the full watch · also over OSC"), |ui| {
+                t |= seg_toggle(ui, &mut st.watch_mini);
             });
             divider(ui);
             setting_row(ui, "24-hour clock", Some("Also the bottom bar clock"), |ui| {
@@ -3405,6 +3354,35 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                     st.notif_test_request = true;
                 }
             });
+            if t {
+                st.sound_tab = true;
+            }
+        });
+        section(ui, "OSC control", |ui| {
+            let mut t = false;
+            let port = st.osc_port as u16;
+            let status = if !st.osc_enabled {
+                "off".to_string()
+            } else if st.osc_ok {
+                format!("listening on udp/{port}")
+            } else {
+                format!("udp/{port} is busy — pick another port or route through an OSC router")
+            };
+            setting_row(ui, "Listen for OSC", Some(&format!("Games and tools (VRChat avatar parameters, VRCOSC…) toggle the watch, dashboard, screens and keyboard, or send a toast · {status}")), |ui| {
+                t |= seg_toggle(ui, &mut st.osc_enabled);
+            });
+            divider(ui);
+            setting_row(ui, "Port", Some("VRChat sends avatar parameters to 9001; takes effect a second after the last change"), |ui| {
+                stepper_inline(ui, &mut st.osc_port, 1024.0, 65535.0, 1.0, |v| format!("{}", v as u16));
+            });
+            divider(ui);
+            ui.label(
+                egui::RichText::new(
+                    "/monadeck/watch · /monadeck/watch/mini · /monadeck/dashboard · /monadeck/screens · /monadeck/keyboard · /monadeck/notify \"title\" \"body\"\nAvatar parameters: MonadeckWatch · MonadeckWatchMini · MonadeckDashboard · MonadeckScreens · MonadeckKeyboard (bool; no argument = toggle)",
+                )
+                .size(12.0)
+                .color(theme::ON_SURFACE_VAR),
+            );
             if t {
                 st.sound_tab = true;
             }
