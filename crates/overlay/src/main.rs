@@ -585,12 +585,16 @@ fn run() -> Result<()> {
     desktop.caps.color_scale = color_scale;
     desktop.gaze_pause = ov_cfg.gaze_pause;
     desktop.set_capture_limits(ov_cfg.capture_max_fps, ov_cfg.capture_max_height);
-    // Controllers and gloves each remember their own wrist spot (a glove's aim
-    // pose sits nowhere near a controller's). The glove spot starts from the
-    // controller one so nothing moves until it's tuned with gloves on.
-    let mut watch_offsets = WatchOffsets {
-        controllers: ov_cfg.watch_offset.map(arr_to_pose).unwrap_or(watch_default),
-        gloves: ov_cfg.watch_offset_gloves.or(ov_cfg.watch_offset).map(arr_to_pose).unwrap_or(watch_default),
+    // Each wrist, with controllers and with gloves, remembers its own spot (a
+    // glove's aim pose sits nowhere near a controller's). Untuned spots fall
+    // back: gloves → that wrist's controller spot; right wrist → the left one
+    // mirrored. So nothing moves until a combination is tuned.
+    let mut watch_offsets = {
+        let left = ov_cfg.watch_offset.map(arr_to_pose).unwrap_or(watch_default);
+        let left_gloves = ov_cfg.watch_offset_gloves.map(arr_to_pose).unwrap_or(left);
+        let right = ov_cfg.watch_offset_right.map(arr_to_pose).unwrap_or_else(|| mathx::pose_mirror_x(&left));
+        let right_gloves = ov_cfg.watch_offset_right_gloves.map(arr_to_pose).unwrap_or_else(|| mathx::pose_mirror_x(&left_gloves));
+        WatchOffsets { spots: [[left, left_gloves], [right, right_gloves]] }
     };
     watch_scale = ov_cfg.watch_scale.clamp(0.5, 2.0);
     // Watch time zones (bad names are skipped with a warning).
@@ -637,7 +641,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow, ov_cfg.watch_mini, ov_cfg.keyboard_haptics, ov_cfg.osc_enabled, ov_cfg.osc_port))),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow, ov_cfg.watch_mini, ov_cfg.keyboard_haptics, ov_cfg.osc_enabled, ov_cfg.osc_port, ov_cfg.watch_right_hand))),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -726,6 +730,7 @@ fn run() -> Result<()> {
     st.watch_24h = ov_cfg.watch_24h;
     st.watch_locked = ov_cfg.watch_locked;
     st.watch_mini = ov_cfg.watch_mini;
+    st.watch_right_hand = ov_cfg.watch_right_hand;
     st.keyboard_haptics = ov_cfg.keyboard_haptics;
     st.osc_enabled = ov_cfg.osc_enabled;
     st.osc_port = ov_cfg.osc_port as f32;
@@ -1573,21 +1578,27 @@ fn run() -> Result<()> {
         }
         if st.watch_reset_request {
             st.watch_reset_request = false;
-            *watch_offsets.get_mut(st.gloves.0) = watch_default;
-            st.flash(format!("Watch back at its default spot for {}", WatchOffsets::label(st.gloves.0)));
+            let (wh, glove) = watch_hand(&st);
+            *watch_offsets.get_mut(wh, glove) = if wh == 1 { mathx::pose_mirror_x(&watch_default) } else { watch_default };
+            st.flash(format!("Watch back at its default spot for {}", WatchOffsets::label(wh, glove)));
             overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         st.watch_freeze_client = running.as_ref().and_then(|app| {
             st.monado_clients.iter().find(|c| name_matches(&c.name, app)).map(|c| (c.id, c.frozen))
         });
-        let left_aim_pose = locate_pose(&aim_left, &space, time);
-        let right_hand = hands.get(1).filter(|h| h.active);
-        // Repositioning: while gripped by the right hand the watch follows it;
-        // on release the new left-hand-relative offset is remembered.
-        let wrist_pose = if st.watch_enabled { left_aim_pose.map(|p| pose_compose(&p, watch_offsets.get(st.gloves.0))) } else { None };
+        // The watch sits on one wrist (left by default); the other hand points
+        // at it, grips it to move it, taps the mini watch.
+        let (wh, watch_glove) = watch_hand(&st);
+        let wrist_aim_pose = locate_pose(if wh == 1 { &aim_right } else { &aim_left }, &space, time);
+        let pointer_path = if wh == 1 { left_path } else { right_path };
+        let pointer_hand = hands.get(1 - wh).filter(|h| h.active);
+        // Repositioning: while gripped by the pointer hand the watch follows it;
+        // on release the new wrist-relative offset is remembered.
+        let wrist_pose = if st.watch_enabled { wrist_aim_pose.map(|p| pose_compose(&p, watch_offsets.get(wh, watch_glove))) } else { None };
         // Minimal watch: the clock-only pill takes the wrist spot, shifted past
-        // the watch's left edge toward the wrist. A tap on it peeks at the full
-        // watch for a few seconds (re-armed while the hand points at it).
+        // the watch's edge toward the wrist (left edge on the left hand, right
+        // edge on the right). A tap on it peeks at the full watch for a few
+        // seconds (re-armed while the hand points at it).
         let peeking = watch_peek.is_some_and(|t| t.elapsed().as_secs_f32() < WATCH_PEEK_SECS);
         if !peeking {
             watch_peek = None;
@@ -1595,14 +1606,15 @@ fn run() -> Result<()> {
         let mini_mode = st.watch_mini && !peeking && watch_grab.is_none();
         let mut watch_pose = if mini_mode { None } else { wrist_pose };
         let mini_pose = if mini_mode {
-            wrist_pose.map(|wp| offset_pose(&wp, -((WATCH_W - MINI_W) / 2.0 + MINI_SHIFT) * watch_scale, 0.0, 0.0))
+            let toward_wrist = if wh == 1 { 1.0 } else { -1.0 };
+            wrist_pose.map(|wp| offset_pose(&wp, toward_wrist * ((WATCH_W - MINI_W) / 2.0 + MINI_SHIFT) * watch_scale, 0.0, 0.0))
         } else {
             None
         };
         watch_panel.size_m = (WATCH_W * watch_scale, WATCH_W * watch_scale * WATCH_PX.1 as f32 / WATCH_PX.0 as f32);
         mini_panel.size_m = (MINI_W * watch_scale, MINI_W * watch_scale * MINI_PX.1 as f32 / MINI_PX.0 as f32);
         if let Some((off, last)) = watch_grab {
-            match right_hand {
+            match pointer_hand {
                 Some(h) if h.grip >= GRAB_RELEASE => {
                     if h.select {
                         // Trigger while gripping: push/pull resizes, position holds.
@@ -1627,24 +1639,24 @@ fn run() -> Result<()> {
                     }
                 }
                 _ => {
-                    // Released: remember where it ended up, relative to the left hand.
+                    // Released: remember where it ended up, relative to the wrist.
                     watch_grab = None;
                     watch_resize_ref = None;
-                    if let Some(l) = left_aim_pose {
-                        *watch_offsets.get_mut(st.gloves.0) = pose_compose(&pose_invert(&l), &last);
+                    if let Some(l) = wrist_aim_pose {
+                        *watch_offsets.get_mut(wh, watch_glove) = pose_compose(&pose_invert(&l), &last);
                         watch_pose = Some(last);
                         overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
-                        log::info!("watch: position/size saved for {}", WatchOffsets::label(st.gloves.0));
+                        log::info!("watch: position/size saved for {}", WatchOffsets::label(wh, watch_glove));
                     }
                 }
             }
         }
-        // The right hand points at the watch; it wins over everything behind it.
-        let watch_hit = match (&watch_pose, hands.get(1)) {
-            (Some(wp), Some(h)) if h.active => raycast(&h.aim, wp, watch_panel.size_m).map(|(u, v, t)| (u, v, t, h.select, h.aim)),
+        // The pointer hand points at the watch; it wins over everything behind it.
+        let watch_hit = match (&watch_pose, pointer_hand) {
+            (Some(wp), Some(h)) => raycast(&h.aim, wp, watch_panel.size_m).map(|(u, v, t)| (u, v, t, h.select, h.aim)),
             _ => None,
         };
-        if let (Some((_, _, _, _, _)), Some(h)) = (watch_hit, right_hand) {
+        if let (Some((_, _, _, _, _)), Some(h)) = (watch_hit, pointer_hand) {
             if !st.watch_locked && watch_grab.is_none() && h.grip > GRAB_START {
                 if let Some(wp) = watch_pose {
                     watch_grab = Some((pose_compose(&pose_invert(&h.aim), &wp), wp));
@@ -1655,9 +1667,9 @@ fn run() -> Result<()> {
         if watch_hit.is_some() && watch_peek.is_some() {
             watch_peek = Some(Instant::now());
         }
-        // The right hand on the mini watch: (hit distance, trigger, aim); a
+        // The pointer hand on the mini watch: (hit distance, trigger, aim); a
         // trigger press peeks at the full watch.
-        let mini_hit = match (&mini_pose, right_hand) {
+        let mini_hit = match (&mini_pose, pointer_hand) {
             (Some(mp), Some(h)) => raycast(&h.aim, mp, mini_panel.size_m).map(|(_, _, t)| (t, h.select, h.aim)),
             _ => None,
         };
@@ -1665,7 +1677,7 @@ fn run() -> Result<()> {
             Some((_, sel, _)) => {
                 if sel && !mini_select_prev {
                     watch_peek = Some(Instant::now());
-                    pulse(&session, &haptic_action, right_path, 0.3, 20);
+                    pulse(&session, &haptic_action, pointer_path, 0.3, 20);
                     audio.tab();
                 }
                 mini_select_prev = sel;
@@ -2422,7 +2434,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow, st.watch_mini, st.keyboard_haptics, st.osc_enabled, st.osc_port as u16))),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow, st.watch_mini, st.keyboard_haptics, st.osc_enabled, st.osc_port as u16, st.watch_right_hand))),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -2699,26 +2711,31 @@ fn arr_to_pose(a: [f32; 7]) -> xr::Posef {
     }
 }
 
-/// The watch's wrist spot (relative to the left aim pose), one per kind of
-/// left-hand device: moving it with controllers leaves the glove spot alone
-/// and vice versa.
+/// The watch's wrist spot (relative to that hand's aim pose), one per wrist
+/// and kind of device on it — `spots[hand][glove]`, hand 0 = left. Moving the
+/// watch in one combination leaves the other three alone.
 struct WatchOffsets {
-    controllers: xr::Posef,
-    gloves: xr::Posef,
+    spots: [[xr::Posef; 2]; 2],
 }
 
 impl WatchOffsets {
-    fn get(&self, glove: bool) -> &xr::Posef {
-        if glove { &self.gloves } else { &self.controllers }
+    fn get(&self, hand: usize, glove: bool) -> &xr::Posef {
+        &self.spots[hand][glove as usize]
     }
 
-    fn get_mut(&mut self, glove: bool) -> &mut xr::Posef {
-        if glove { &mut self.gloves } else { &mut self.controllers }
+    fn get_mut(&mut self, hand: usize, glove: bool) -> &mut xr::Posef {
+        &mut self.spots[hand][glove as usize]
     }
 
-    fn label(glove: bool) -> &'static str {
-        if glove { "gloves" } else { "controllers" }
+    fn label(hand: usize, glove: bool) -> String {
+        format!("the {} {}", if hand == 1 { "right" } else { "left" }, if glove { "glove" } else { "controller" })
     }
+}
+
+/// Which hand wears the watch (0 = left, 1 = right) and whether that hand is
+/// a glove right now.
+fn watch_hand(st: &ui::LibState) -> (usize, bool) {
+    if st.watch_right_hand { (1, st.gloves.1) } else { (0, st.gloves.0) }
 }
 
 fn overlay_config_from(
@@ -2754,8 +2771,11 @@ fn overlay_config_from(
         watch_timezones: watch_timezones.to_vec(),
         watch_24h: st.watch_24h,
         watch_locked: st.watch_locked,
-        watch_offset: Some(pose_to_arr(&watch.controllers)),
-        watch_offset_gloves: Some(pose_to_arr(&watch.gloves)),
+        watch_right_hand: st.watch_right_hand,
+        watch_offset: Some(pose_to_arr(watch.get(0, false))),
+        watch_offset_gloves: Some(pose_to_arr(watch.get(0, true))),
+        watch_offset_right: Some(pose_to_arr(watch.get(1, false))),
+        watch_offset_right_gloves: Some(pose_to_arr(watch.get(1, true))),
         watch_scale,
         gaze_pause: st.gaze_pause,
         recenter_on_toggle: st.recenter_on_toggle,

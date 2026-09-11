@@ -236,6 +236,15 @@ pub fn facing_head(pos: &xr::Vector3f, h: &xr::Posef) -> xr::Quaternionf {
     quatf(quat_from_axes(x, y, z))
 }
 
+/// The same pose for the other hand: mirrored across the aim frame's YZ plane
+/// (`M·P·M`, still a proper rotation, so a panel reads the right way round).
+pub fn pose_mirror_x(p: &xr::Posef) -> xr::Posef {
+    xr::Posef {
+        position: xr::Vector3f { x: -p.position.x, y: p.position.y, z: p.position.z },
+        orientation: xr::Quaternionf { x: p.orientation.x, y: -p.orientation.y, z: -p.orientation.z, w: p.orientation.w },
+    }
+}
+
 /// A pose offset from `anchor` in the anchor's own frame (+X right, +Y up, +Z
 /// toward the viewer), keeping the anchor's orientation. Places the floating
 /// rail/bottom panels relative to the main panel.
