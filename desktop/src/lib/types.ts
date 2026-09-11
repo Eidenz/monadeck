@@ -132,6 +132,11 @@ export interface FreezeRecovery {
   // Outputs the watch told kwin to drop (the wrongly adopted HMD connector).
   // Empty means the freeze was detected but the output couldn't be identified.
   disabled_outputs: string[];
+  // The spam kept going a second after the output step (the second variant of
+  // the freeze, where nothing can be disabled): the watch stopped the service
+  // to release the headset, and is starting it once more if `restarting`.
+  service_stopped: boolean;
+  restarting: boolean;
 }
 
 export interface RuntimeStatus {

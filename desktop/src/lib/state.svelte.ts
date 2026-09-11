@@ -242,7 +242,13 @@ export async function refreshStatus() {
     app.caps = await api.capabilitiesStatus();
     // The backend reports a freeze recovery exactly once; latch it here so the
     // toast survives subsequent polls until dismissed.
-    if (app.service.freeze_recovery) app.freeze = app.service.freeze_recovery;
+    if (app.service.freeze_recovery) {
+      app.freeze = app.service.freeze_recovery;
+      // A stop by the freeze watch is deliberate, not a crash.
+      if (app.freeze.service_stopped) intendedStop = true;
+    }
+    // Running again (the watch's restart): a pending suppression is stale.
+    if (!wasRunning && app.service.running) intendedStop = false;
     // The service went from running to stopped — if we didn't ask for it, it
     // crashed (or failed to bring up a system); surface a toast.
     if (wasRunning && !app.service.running) {

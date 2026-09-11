@@ -23,6 +23,7 @@ use monadeck_core::wivrn::{self, WivrnStatus};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::State;
 
@@ -323,6 +324,8 @@ fn register_openvr(cfg: &MonadeckConfig) -> CmdResult<()> {
 pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
+        // A start by hand renews the freeze watch's one automatic retry.
+        st.freeze_auto_restarted.store(false, Ordering::SeqCst);
         let cfg = st.config.lock().unwrap().clone();
         match cfg.backend {
             Backend::Monado => start_monado(&st, cfg),
@@ -420,8 +423,9 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     // display: a cold-started HMD can serve corrupt EDID, which makes kwin
     // adopt it as a desktop monitor and freeze every output retrying a
     // failing modeset. The watch spots the spam and drops the output so
-    // the desktop survives without unplugging. See core::kwin_freeze.
-    st.freeze_watch.lock().unwrap().spawn();
+    // the desktop survives without unplugging; if the desktop is still
+    // stuck a second later, it stops the service instead. See core::kwin_freeze.
+    arm_freeze_watch(st);
 
     let bin = cfg.monado_service_bin();
     st.runner
@@ -500,52 +504,88 @@ fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     Ok(())
 }
 
+/// Arm the kwin freeze watch with the stuck hook: when the compositor is
+/// still retrying a failing commit a second after the output step, stop the
+/// service (the only thing that clears the second variant of the freeze: it
+/// releases the headset's DRM lease) and start it once more — the observed
+/// pattern is that the retry comes up fine. The hook only decides and hands
+/// the work to a thread: the stop path tears the watch (and its reader thread,
+/// which is the caller) down. Never fires on a healthy launch: that logs no
+/// commit failures at all.
+fn arm_freeze_watch(st: &AppState) {
+    let hook_st = st.clone();
+    let hook: monadeck_core::kwin_freeze::StuckHook = Box::new(move || {
+        let restart = !hook_st.freeze_auto_restarted.swap(true, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            log::warn!(
+                "freeze recovery: stopping monado-service{}",
+                if restart { ", then starting it again" } else { " (already retried once; not again)" }
+            );
+            stop_blocking(&hook_st);
+            if restart {
+                std::thread::sleep(Duration::from_secs(2));
+                let cfg = hook_st.config.lock().unwrap().clone();
+                if let Err(e) = start_monado(&hook_st, cfg) {
+                    log::warn!("freeze recovery: restart failed: {e}");
+                }
+            }
+        });
+        restart
+    });
+    st.freeze_watch.lock().unwrap().spawn(Some(hook));
+}
+
 #[tauri::command]
 pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
-        let cfg = st.config.lock().unwrap().clone();
-        st.freeze_watch.lock().unwrap().stop_watch();
-        st.wivrn_watch.lock().unwrap().stop_watch();
-        // Stop the plugins/overlay we launched (WayVR, etc.) so they don't
-        // outlive the service and collide with the next start.
-        kill_plugins(&st);
-
-        if cfg.backend == Backend::Wivrn && st.runner.lock().unwrap().is_running() {
-            // Ask nicely over the bus first: Quit tears down a live headset
-            // session and any app WiVRn launched before exiting. The runner's
-            // terminate() below then reaps it (or SIGTERMs it if Quit failed).
-            if let Err(e) = wivrn::quit() {
-                log::warn!("WiVRn Quit over D-Bus failed ({e}); falling back to SIGTERM");
-            } else {
-                for _ in 0..30 {
-                    if !st.runner.lock().unwrap().is_running() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-        st.runner.lock().unwrap().terminate();
-
-        let env = service_env(&cfg);
-        for p in cfg
-            .plugins
-            .iter()
-            .filter(|p| p.enabled && p.when == ExecWhen::AfterStop)
-        {
-            if let Err(e) = p.launch(&env) {
-                log::warn!("after-stop plugin '{}' failed: {e}", p.name);
-            }
-        }
-
-        // Hand the runtimes back so SteamVR keeps working when we're off.
-        let _ = active_runtime::restore_backup();
-        let _ = openvr_paths::restore_backup();
+        stop_blocking(&st);
         Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The stop itself (shared by the Stop button and the freeze recovery).
+fn stop_blocking(st: &AppState) {
+    let cfg = st.config.lock().unwrap().clone();
+    st.freeze_watch.lock().unwrap().stop_watch();
+    st.wivrn_watch.lock().unwrap().stop_watch();
+    // Stop the plugins/overlay we launched (WayVR, etc.) so they don't
+    // outlive the service and collide with the next start.
+    kill_plugins(&st);
+
+    if cfg.backend == Backend::Wivrn && st.runner.lock().unwrap().is_running() {
+        // Ask nicely over the bus first: Quit tears down a live headset
+        // session and any app WiVRn launched before exiting. The runner's
+        // terminate() below then reaps it (or SIGTERMs it if Quit failed).
+        if let Err(e) = wivrn::quit() {
+            log::warn!("WiVRn Quit over D-Bus failed ({e}); falling back to SIGTERM");
+        } else {
+            for _ in 0..30 {
+                if !st.runner.lock().unwrap().is_running() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    st.runner.lock().unwrap().terminate();
+
+    let env = service_env(&cfg);
+    for p in cfg
+        .plugins
+        .iter()
+        .filter(|p| p.enabled && p.when == ExecWhen::AfterStop)
+    {
+        if let Err(e) = p.launch(&env) {
+            log::warn!("after-stop plugin '{}' failed: {e}", p.name);
+        }
+    }
+
+    // Hand the runtimes back so SteamVR keeps working when we're off.
+    let _ = active_runtime::restore_backup();
+    let _ = openvr_paths::restore_backup();
 }
 
 // --- WiVRn -------------------------------------------------------------------
