@@ -585,7 +585,13 @@ fn run() -> Result<()> {
     desktop.caps.color_scale = color_scale;
     desktop.gaze_pause = ov_cfg.gaze_pause;
     desktop.set_capture_limits(ov_cfg.capture_max_fps, ov_cfg.capture_max_height);
-    let mut watch_offset = ov_cfg.watch_offset.map(arr_to_pose).unwrap_or(watch_default);
+    // Controllers and gloves each remember their own wrist spot (a glove's aim
+    // pose sits nowhere near a controller's). The glove spot starts from the
+    // controller one so nothing moves until it's tuned with gloves on.
+    let mut watch_offsets = WatchOffsets {
+        controllers: ov_cfg.watch_offset.map(arr_to_pose).unwrap_or(watch_default),
+        gloves: ov_cfg.watch_offset_gloves.or(ov_cfg.watch_offset).map(arr_to_pose).unwrap_or(watch_default),
+    };
     watch_scale = ov_cfg.watch_scale.clamp(0.5, 2.0);
     // Watch time zones (bad names are skipped with a warning).
     let mut watch_zones = parse_zones(&ov_cfg.watch_timezones);
@@ -1082,7 +1088,7 @@ fn run() -> Result<()> {
                         let turned = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs() < 0.9976; // ~8°
                         if moved || turned {
                             welcomed = true;
-                            toasts.push(toast::Toast::new(toast::Kind::Welcome, "Monadeck is ready", "Left system button opens the dashboard · Settings › Controllers › Help lists every gesture").follow());
+                            toasts.push(toast::Toast::new(toast::Kind::Welcome, "Monadeck is ready", "Left system button opens the dashboard · Settings › Controllers › Help lists every gesture"));
                             audio.confirm();
                         } else if t0.elapsed().as_secs() > 150 {
                             welcomed = true;
@@ -1099,7 +1105,7 @@ fn run() -> Result<()> {
             }
         }
         let toast_active = toasts.active();
-        if let Some((pose, queued)) = toasts.update(&toast_panel.ctx, hmd.as_ref()) {
+        if let Some((pose, queued)) = toasts.update(&toast_panel.ctx, now, hmd.as_ref()) {
             toast_panel.pose = pose;
             render_panel(
                 &mut toast_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
@@ -1368,7 +1374,7 @@ fn run() -> Result<()> {
         desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
         if let Some(tok) = desktop.take_token_change() {
             screencast_token = tok;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         st.keyboard_shown = desktop.keyboard_visible();
         st.desktop_bar = desktop.bar_items();
@@ -1425,7 +1431,7 @@ fn run() -> Result<()> {
         };
         if pc != photo_cfg {
             photo_cfg = pc;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
 
         // --- 360° background: upload once, show only while no game runs ------
@@ -1511,7 +1517,7 @@ fn run() -> Result<()> {
                 let label = ui::watch_button_info(cur).1;
                 st.flash(format!("Button {} › {label}", slot + 1));
             }
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         if st.watch_photos_request {
             st.watch_photos_request = false;
@@ -1562,14 +1568,14 @@ fn run() -> Result<()> {
                 watch_zones = parse_zones(&ov_cfg.watch_timezones);
                 st.watch_zone_ids = ov_cfg.watch_timezones.clone();
                 st.sound_tab = true;
-                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
             }
         }
         if st.watch_reset_request {
             st.watch_reset_request = false;
-            watch_offset = watch_default;
-            st.flash("Watch back at its default spot");
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+            *watch_offsets.get_mut(st.gloves.0) = watch_default;
+            st.flash(format!("Watch back at its default spot for {}", WatchOffsets::label(st.gloves.0)));
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         st.watch_freeze_client = running.as_ref().and_then(|app| {
             st.monado_clients.iter().find(|c| name_matches(&c.name, app)).map(|c| (c.id, c.frozen))
@@ -1578,7 +1584,7 @@ fn run() -> Result<()> {
         let right_hand = hands.get(1).filter(|h| h.active);
         // Repositioning: while gripped by the right hand the watch follows it;
         // on release the new left-hand-relative offset is remembered.
-        let wrist_pose = if st.watch_enabled { left_aim_pose.map(|p| pose_compose(&p, &watch_offset)) } else { None };
+        let wrist_pose = if st.watch_enabled { left_aim_pose.map(|p| pose_compose(&p, watch_offsets.get(st.gloves.0))) } else { None };
         // Minimal watch: the clock-only pill takes the wrist spot, shifted past
         // the watch's left edge toward the wrist. A tap on it peeks at the full
         // watch for a few seconds (re-armed while the hand points at it).
@@ -1625,10 +1631,10 @@ fn run() -> Result<()> {
                     watch_grab = None;
                     watch_resize_ref = None;
                     if let Some(l) = left_aim_pose {
-                        watch_offset = pose_compose(&pose_invert(&l), &last);
+                        *watch_offsets.get_mut(st.gloves.0) = pose_compose(&pose_invert(&l), &last);
                         watch_pose = Some(last);
-                        overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
-                        log::info!("watch: position/size saved");
+                        overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+                        log::info!("watch: position/size saved for {}", WatchOffsets::label(st.gloves.0));
                     }
                 }
             }
@@ -2429,7 +2435,7 @@ fn run() -> Result<()> {
             desktop.scroll_speed = st.scroll_speed;
             desktop.drag_threshold_px = st.drag_threshold_px as f64;
             settings_prev = settings_now;
-            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
         // effective offset is pushed to libmonado at the top of the loop (which
@@ -2549,7 +2555,7 @@ fn run() -> Result<()> {
         }
         if let Some((i, d)) = st.desktop_move_request.take() {
             if desktop.move_order(i, d) {
-                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, Some(pose_to_arr(&watch_offset)), &ov_cfg.skybox_path, watch_scale).save();
+                overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
             }
         }
         if let Some((i, o)) = st.desktop_opacity_request.take() {
@@ -2693,12 +2699,34 @@ fn arr_to_pose(a: [f32; 7]) -> xr::Posef {
     }
 }
 
+/// The watch's wrist spot (relative to the left aim pose), one per kind of
+/// left-hand device: moving it with controllers leaves the glove spot alone
+/// and vice versa.
+struct WatchOffsets {
+    controllers: xr::Posef,
+    gloves: xr::Posef,
+}
+
+impl WatchOffsets {
+    fn get(&self, glove: bool) -> &xr::Posef {
+        if glove { &self.gloves } else { &self.controllers }
+    }
+
+    fn get_mut(&mut self, glove: bool) -> &mut xr::Posef {
+        if glove { &mut self.gloves } else { &mut self.controllers }
+    }
+
+    fn label(glove: bool) -> &'static str {
+        if glove { "gloves" } else { "controllers" }
+    }
+}
+
 fn overlay_config_from(
     st: &ui::LibState,
     screencast_token: &Option<String>,
     screen_order: &[String],
     watch_timezones: &[String],
-    watch_offset: Option<[f32; 7]>,
+    watch: &WatchOffsets,
     skybox_path: &Option<String>,
     watch_scale: f32,
 ) -> monadeck_core::overlay_config::OverlayConfig {
@@ -2726,7 +2754,8 @@ fn overlay_config_from(
         watch_timezones: watch_timezones.to_vec(),
         watch_24h: st.watch_24h,
         watch_locked: st.watch_locked,
-        watch_offset,
+        watch_offset: Some(pose_to_arr(&watch.controllers)),
+        watch_offset_gloves: Some(pose_to_arr(&watch.gloves)),
         watch_scale,
         gaze_pause: st.gaze_pause,
         recenter_on_toggle: st.recenter_on_toggle,

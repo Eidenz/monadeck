@@ -5,10 +5,12 @@
 //! the live readout while a screen is gripped.
 //!
 //! Every toast goes through [`Toasts`]: one card at a time, queued in arrival
-//! order, alarms cutting in front, and the card placed in the lower view the
-//! moment it starts showing (so it's read at a glance without blocking what
-//! you're looking at). A card unfolds from a thin accent line — the line grows
-//! out from its centre, then the card opens up and down from it — and folds
+//! order, alarms cutting in front, and the card sitting in the lower view (so
+//! it's read at a glance without blocking what you're looking at). It follows
+//! the head with a little drag rather than being glued to it, so a turn of the
+//! head reads as the card catching up. A card unfolds from a thin accent line —
+//! the line grows out from its centre, then the card opens up and down from it
+//! — and folds
 //! back the same way when it's done; a hairline along the bottom edge drains
 //! toward the centre while it dwells.
 use std::collections::VecDeque;
@@ -23,6 +25,10 @@ use crate::mathx;
 /// Where a card sits: this far ahead of the head, this far below the gaze.
 const DIST: f32 = 1.3;
 const DROP: f32 = 0.42;
+/// How far a card trails the head: the time constant (s) of its ease toward
+/// the spot in front of you. Small enough to stay in the lower view through a
+/// head turn, large enough that it visibly catches up rather than sticking.
+const FOLLOW_TAU: f32 = 0.12;
 /// Entrance: the line grows, then the card unfolds (they overlap a little).
 const LINE_IN: f32 = 0.14;
 const OPEN_DELAY: f32 = 0.10;
@@ -145,9 +151,9 @@ pub struct Toast {
     /// `pose` was given by the caller (a readout floats over its screen) —
     /// don't place it in front of the head.
     placed: bool,
-    /// Re-place in front of the head every frame (the boot greeting must find
-    /// you even if you put the headset on late).
-    pub follow: bool,
+    /// Trails the head every frame — set once the card has been placed in
+    /// front of it (a readout stays over its screen instead).
+    follow: bool,
     shown_at: Option<Instant>,
     until: Instant,
 }
@@ -193,11 +199,6 @@ impl Toast {
             self.accent = accent_from_icon(img);
         }
         self.icon = icon;
-        self
-    }
-
-    pub fn follow(mut self) -> Self {
-        self.follow = true;
         self
     }
 
@@ -279,11 +280,13 @@ fn accent_from_icon(img: &egui::ColorImage) -> Option<egui::Color32> {
 pub struct Toasts {
     current: Option<Toast>,
     queue: VecDeque<Toast>,
+    /// Last `update` time, for the follow easing's frame delta.
+    last_update: Option<Instant>,
 }
 
 impl Toasts {
     pub fn new() -> Self {
-        Self { current: None, queue: VecDeque::new() }
+        Self { current: None, queue: VecDeque::new(), last_update: None }
     }
 
     /// Queue a card. Alarms go to the front and hurry whatever is showing; the
@@ -350,6 +353,7 @@ impl Toasts {
         let mut t = self.queue.pop_front()?;
         if !t.placed {
             t.pose = mathx::toast_pose(hmd.expect("checked above"), DIST, DROP);
+            t.follow = true;
         }
         t.start(now);
         let kind = t.kind;
@@ -362,8 +366,10 @@ impl Toasts {
     }
 
     /// Per-frame upkeep for the showing card: upload a pending icon into the
-    /// toast panel's context, ease a following card toward the head.
-    pub fn update(&mut self, ctx: &egui::Context, hmd: Option<&xr::Posef>) -> Option<(xr::Posef, usize)> {
+    /// toast panel's context, ease a head-placed card after the head.
+    pub fn update(&mut self, ctx: &egui::Context, now: Instant, hmd: Option<&xr::Posef>) -> Option<(xr::Posef, usize)> {
+        let dt = self.last_update.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f32()).min(0.1);
+        self.last_update = Some(now);
         let queued = self.queue.len();
         let t = self.current.as_mut()?;
         if let Some(img) = t.icon.take() {
@@ -371,13 +377,14 @@ impl Toasts {
         }
         if t.follow {
             if let Some(h) = hmd {
-                // Ease toward the spot in front of the head rather than sticking to it.
+                // Exponential ease toward the spot in front of the head (frame-rate
+                // independent), always facing the head from wherever it is now.
                 let target = mathx::toast_pose(h, DIST, DROP);
-                let k = 0.08;
+                let k = 1.0 - (-dt / FOLLOW_TAU).exp();
                 t.pose.position.x += (target.position.x - t.pose.position.x) * k;
                 t.pose.position.y += (target.position.y - t.pose.position.y) * k;
                 t.pose.position.z += (target.position.z - t.pose.position.z) * k;
-                t.pose.orientation = target.orientation;
+                t.pose.orientation = mathx::facing_head(&t.pose.position, h);
             }
         }
         Some((t.pose, queued))

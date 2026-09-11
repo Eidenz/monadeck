@@ -3292,7 +3292,7 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                 });
             }
             divider(ui);
-            setting_row(ui, "Reset position", Some("Back to the default wrist spot"), |ui| {
+            setting_row(ui, "Reset position", Some("Back to the default wrist spot · controllers and gloves each remember their own"), |ui| {
                 if action_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Reset").clicked() {
                     st.watch_reset_request = true;
                     st.sound_tab = true;

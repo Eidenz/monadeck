@@ -223,10 +223,17 @@ pub fn toast_pose(h: &xr::Posef, dist: f32, drop: f32) -> xr::Posef {
         o[1] + fwd[1] * dist - up[1] * drop,
         o[2] + fwd[2] * dist - up[2] * drop,
     ];
-    let z = normalize([o[0] - pos[0], o[1] - pos[1], o[2] - pos[2]]); // face head
+    xr::Posef { orientation: facing_head(&vec3f(pos), h), position: vec3f(pos) }
+}
+
+/// Orientation for a panel at `pos` that faces the head, tilted to match it
+/// (the head's own up).
+pub fn facing_head(pos: &xr::Vector3f, h: &xr::Posef) -> xr::Quaternionf {
+    let up = normalize(quat_rotate(qf(&h.orientation), [0.0, 1.0, 0.0]));
+    let z = normalize([h.position.x - pos.x, h.position.y - pos.y, h.position.z - pos.z]);
     let x = normalize(cross(up, z));
     let y = cross(z, x);
-    xr::Posef { orientation: quatf(quat_from_axes(x, y, z)), position: vec3f(pos) }
+    quatf(quat_from_axes(x, y, z))
 }
 
 /// A pose offset from `anchor` in the anchor's own frame (+X right, +Y up, +Z
