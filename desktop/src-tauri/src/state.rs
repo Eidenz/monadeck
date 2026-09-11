@@ -9,6 +9,7 @@ use monadeck_core::kwin_freeze::KwinFreezeWatch;
 use monadeck_core::monado_conn::MonadoConn;
 use monadeck_core::MonadeckConfig;
 use std::process::Child;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -27,6 +28,9 @@ pub struct AppState {
     /// Short-lived watch for the kwin cold-start HMD-adoption freeze, armed
     /// around each service launch. See core::kwin_freeze.
     pub freeze_watch: Arc<Mutex<KwinFreezeWatch>>,
+    /// The freeze watch already restarted the service once since the last
+    /// manual start: a second stuck launch is stopped but not retried again.
+    pub freeze_auto_restarted: Arc<AtomicBool>,
     /// WiVRn backend only: tracks the server's headset session and launches /
     /// stops the plugins + overlay per session. See `wivrn_watch`.
     pub wivrn_watch: Arc<Mutex<WivrnSessionWatch>>,
@@ -44,6 +48,7 @@ impl AppState {
             plugin_children: Arc::new(Mutex::new(Vec::new())),
             monado: Arc::new(MonadoConn::new()),
             freeze_watch: Arc::new(Mutex::new(KwinFreezeWatch::default())),
+            freeze_auto_restarted: Arc::new(AtomicBool::new(false)),
             wivrn_watch: Arc::new(Mutex::new(WivrnSessionWatch::default())),
         }
     }

@@ -136,6 +136,8 @@ pub struct LibState {
     pub notif_unseen: usize,
     // Minimal (clock-only) watch, typing haptics, OSC control.
     pub watch_mini: bool,
+    /// Watch on the right wrist (the left hand then points at it).
+    pub watch_right_hand: bool,
     pub keyboard_haptics: bool,
     pub osc_enabled: bool,
     /// Port as a float for the stepper (1024..=65535).
@@ -379,6 +381,7 @@ impl LibState {
             notif_history: Vec::new(),
             notif_unseen: 0,
             watch_mini: false,
+            watch_right_hand: false,
             keyboard_haptics: true,
             osc_enabled: false,
             osc_port: 9001.0,
@@ -688,7 +691,7 @@ fn top_bar(ctx: &egui::Context, st: &mut LibState) {
     });
 }
 
-/// The wrist watch (its own layer on the left controller): batteries, clock +
+/// The wrist watch (its own layer on a controller, left by default): batteries, clock +
 /// extra time zones, quick buttons, and the menu + screen toggles like WayVR.
 pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
@@ -748,7 +751,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 let (glyph, tip) = if st.watch_locked {
                     (icon::LOCK, "Position locked · tap to unlock, then grip the watch to move it")
                 } else {
-                    (icon::LOCK_OPEN, "Grip the watch with the right hand to move it · tap to lock")
+                    (icon::LOCK_OPEN, "Grip the watch with the other hand to move it · tap to lock")
                 };
                 let fg = if st.watch_locked { theme::ON_SURFACE_VAR } else { egui::Color32::BLACK };
                 let btn = egui::Button::new(egui::RichText::new(glyph).size(15.0).color(fg))
@@ -1059,7 +1062,7 @@ pub const ZONE_PRESETS: &[&str] = &[
 pub const WATCH_BUTTON_IDS: [&str; 9] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos"];
 
 /// The minimal watch: a clock-only pill that takes the wrist spot when the
-/// full watch is folded away. `hot` = the right hand points at it (a tap peeks
+/// full watch is folded away. `hot` = the other hand points at it (a tap peeks
 /// at the full watch). Same skin as the watch, so they read as one thing.
 pub fn build_watch_mini(ctx: &egui::Context, st: &LibState, hot: bool) {
     let painter = ctx.layer_painter(egui::LayerId::background());
@@ -2252,9 +2255,9 @@ fn controls_card(ui: &mut egui::Ui) {
             ],
         ),
         (
-            "Watch (left wrist)",
+            "Watch (left wrist by default · Settings › Wrist watch)",
             &[
-                ("Point with the right hand", "it wins over whatever is behind it"),
+                ("Point with the other hand", "it wins over whatever is behind it"),
                 ("Trigger", "tap a button · corner icons switch the card (media, bell)"),
                 ("Grip (right hand, unlocked)", "move it · the spot is remembered"),
                 ("Grip + trigger, push / pull", "resize it"),
@@ -3264,8 +3267,17 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         section(ui, "Wrist watch", |ui| {
             let mut t = false;
-            setting_row(ui, "Show the watch", Some("Clock, time zones, batteries and quick buttons on your left controller"), |ui| {
+            setting_row(ui, "Show the watch", Some("Clock, time zones, batteries and quick buttons on your wrist"), |ui| {
                 t |= seg_toggle(ui, &mut st.watch_enabled);
+            });
+            divider(ui);
+            setting_row(ui, "Wrist", Some("Which hand wears it · the other hand points at it · each wrist remembers its own spot"), |ui| {
+                for (label, right) in [("Left", false), ("Right", true)] {
+                    if pill(ui, label, 74.0, st.watch_right_hand == right).clicked() && st.watch_right_hand != right {
+                        st.watch_right_hand = right;
+                        t = true;
+                    }
+                }
             });
             divider(ui);
             setting_row(ui, "Minimal watch", Some("Just the clock, tucked toward the wrist · tap it to peek at the full watch · also over OSC"), |ui| {
@@ -3276,7 +3288,7 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                 t |= seg_toggle(ui, &mut st.watch_24h);
             });
             divider(ui);
-            setting_row(ui, "Position locked", Some("Unlock, then grip the watch with the right hand to move it; the spot is remembered"), |ui| {
+            setting_row(ui, "Position locked", Some("Unlock, then grip the watch with the other hand to move it; the spot is remembered"), |ui| {
                 t |= seg_toggle(ui, &mut st.watch_locked);
             });
             divider(ui);
@@ -3292,7 +3304,7 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                 });
             }
             divider(ui);
-            setting_row(ui, "Reset position", Some("Back to the default wrist spot"), |ui| {
+            setting_row(ui, "Reset position", Some("Back to the default spot for this wrist · each wrist, with controllers or gloves, remembers its own"), |ui| {
                 if action_button(ui, icon::ARROW_COUNTER_CLOCKWISE, "Reset").clicked() {
                     st.watch_reset_request = true;
                     st.sound_tab = true;

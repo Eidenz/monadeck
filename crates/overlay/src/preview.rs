@@ -107,7 +107,7 @@ pub fn run(dir: &Path) -> Result<()> {
         for (suffix, secs) in frames {
             let secs = secs.min(lifetime - 0.001);
             let now = start + Duration::from_secs_f32(secs);
-            let queued = toasts.update(&ctx, None).map_or(0, |(_, q)| q);
+            let queued = toasts.update(&ctx, now, None).map_or(0, |(_, q)| q);
             let out = ctx.run(screen_input(PX, secs as f64), |ctx| toasts.draw(ctx, now, queued));
             for (id, delta) in &out.textures_delta.set {
                 apply_delta(&mut textures, *id, delta);

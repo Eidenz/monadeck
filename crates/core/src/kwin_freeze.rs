@@ -7,11 +7,20 @@
 //! failing atomic modeset ~56×/s forever — which blocks presentation on every
 //! output: the whole desktop visually freezes until the headset is unplugged.
 //!
+//! A second, more common variant (kwin 6.7, same headset) has no bad EDID at
+//! all: kwin keeps the HMD as non-desktop but still ends up retrying a failing
+//! commit from the moment the panel wakes until monado releases its DRM lease.
+//! Nothing can be disabled there; only stopping monado clears it.
+//!
 //! The failure is only reachable in the seconds after monado powers the panel,
 //! so this watchdog runs for a short window around service start: it snapshots
 //! kwin's desktop outputs, follows kwin's journal for the commit-failure spam,
 //! and on detection disables whichever output(s) newly appeared (the adopted
-//! HMD) via `kscreen-doctor`, unfreezing the desktop without a replug.
+//! HMD) via `kscreen-doctor`. If the spam is still running at full rate a
+//! second later, the desktop is stuck for real and the caller's `on_stuck`
+//! hook fires (the desktop app stops monado-service, then starts it once
+//! more). A healthy launch never logs a single such line, so neither step can
+//! touch a boot that is going well.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -35,6 +44,11 @@ const WATCH_WINDOW: Duration = Duration::from_secs(60);
 const SPAM_LINES: usize = 25;
 const SPAM_WINDOW: Duration = Duration::from_secs(2);
 
+/// After the first recovery attempt, the spam must still be at full rate this
+/// much later before the stuck hook fires — a fix that worked, or a burst that
+/// clears on its own, never reaches it.
+const STUCK_AFTER: Duration = Duration::from_secs(1);
+
 const KWIN_SPAM_MARKER: &str = "Atomic modeset commit failed";
 
 /// What the watchdog did, for surfacing in the UI.
@@ -44,7 +58,18 @@ pub struct FreezeRecovery {
     /// e.g. "DP-1"). Empty if the spam was detected but no new output could be
     /// identified — the desktop is likely still frozen and needs a replug.
     pub disabled_outputs: Vec<String>,
+    /// The spam kept going after the output step, so the stuck hook fired: the
+    /// service is being stopped to release the headset.
+    pub service_stopped: bool,
+    /// The hook is also starting the service again (once).
+    pub restarting: bool,
 }
+
+/// Runs when the desktop is confirmed stuck; returns whether the service will
+/// be started again after the stop. Must return promptly (do the work on
+/// another thread): the watch reports the outcome to the UI right away, and
+/// the stop path tears the watch down.
+pub type StuckHook = Box<dyn FnOnce() -> bool + Send>;
 
 /// Watches for the freeze during one service launch. Owned by the app state;
 /// `spawn` replaces any previous watch, `stop` tears it down early.
@@ -71,8 +96,8 @@ impl KwinFreezeWatch {
 
     /// Start watching. Call right before spawning monado-service so the output
     /// baseline predates the headset display powering on. No-op outside a KDE
-    /// Wayland session.
-    pub fn spawn(&mut self) {
+    /// Wayland session. A pending, untaken result survives a re-arm.
+    pub fn spawn(&mut self, on_stuck: Option<StuckHook>) {
         self.stop_watch();
         if !Self::session_applicable() {
             return;
@@ -103,14 +128,16 @@ impl KwinFreezeWatch {
         let stdout = child.stdout.take().expect("stdout was piped");
 
         self.stop = Arc::new(AtomicBool::new(false));
-        self.result = Arc::new(Mutex::new(None));
         *self.journal.lock().unwrap() = Some(child);
 
-        // Reader: counts spam lines in a sliding window, fires recovery once.
+        // Reader: counts spam lines in a sliding window, fires recovery once,
+        // then keeps counting to see whether the fix took.
         let result = self.result.clone();
         let stop = self.stop.clone();
+        let mut on_stuck = on_stuck;
         self.threads.push(std::thread::spawn(move || {
             let mut hits: Vec<Instant> = Vec::new();
+            let mut recovery: Option<(Instant, FreezeRecovery)> = None;
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 if stop.load(Ordering::Relaxed) {
@@ -122,13 +149,39 @@ impl KwinFreezeWatch {
                 let now = Instant::now();
                 hits.push(now);
                 hits.retain(|t| now.duration_since(*t) <= SPAM_WINDOW);
-                if hits.len() >= SPAM_LINES {
-                    log::warn!(
-                        "kwin freeze watch: modeset-failure spam detected, \
-                         disabling newly adopted output(s)"
-                    );
-                    *result.lock().unwrap() = Some(recover(&baseline));
-                    break; // one-shot: job done for this launch
+                if hits.len() < SPAM_LINES {
+                    continue;
+                }
+                match &recovery {
+                    None => {
+                        log::warn!(
+                            "kwin freeze watch: modeset-failure spam detected, \
+                             disabling newly adopted output(s)"
+                        );
+                        let r = recover(&baseline);
+                        *result.lock().unwrap() = Some(r.clone());
+                        recovery = Some((now, r));
+                        hits.clear();
+                    }
+                    Some((at, r)) if now.duration_since(*at) >= STUCK_AFTER => {
+                        // Still spamming at full rate: the desktop is stuck.
+                        let mut r = r.clone();
+                        match on_stuck.take() {
+                            Some(hook) => {
+                                log::warn!(
+                                    "kwin freeze watch: still stuck {:.1}s after the output step; \
+                                     stopping the service to release the headset",
+                                    now.duration_since(*at).as_secs_f32()
+                                );
+                                r.service_stopped = true;
+                                r.restarting = hook();
+                                *result.lock().unwrap() = Some(r);
+                            }
+                            None => log::warn!("kwin freeze watch: still stuck, no stuck hook installed"),
+                        }
+                        break; // one-shot: job done for this launch
+                    }
+                    Some(_) => {}
                 }
             }
         }));
@@ -232,6 +285,8 @@ fn recover(baseline: &[String]) -> FreezeRecovery {
     }
     FreezeRecovery {
         disabled_outputs: disabled,
+        service_stopped: false,
+        restarting: false,
     }
 }
 
@@ -250,7 +305,7 @@ mod tests {
             return;
         }
         let mut watch = KwinFreezeWatch::default();
-        watch.spawn();
+        watch.spawn(None);
         // Give journalctl -f a moment to start following before we emit.
         std::thread::sleep(Duration::from_millis(800));
         for _ in 0..SPAM_LINES + 5 {
@@ -273,6 +328,46 @@ mod tests {
             recovery.disabled_outputs.is_empty(),
             "no output changed during the test, none should be disabled"
         );
+        assert!(!recovery.service_stopped, "a burst that ends must not count as stuck");
+    }
+
+    /// The stuck hook fires only when the spam is still at full rate
+    /// [`STUCK_AFTER`] after the first recovery — and reports the hook's
+    /// restart decision. Same session/CI caveats as above.
+    #[test]
+    fn sustained_spam_fires_stuck_hook() {
+        if !KwinFreezeWatch::session_applicable() || desktop_output_names().is_none() {
+            return;
+        }
+        let fired = Arc::new(AtomicBool::new(false));
+        let mut watch = KwinFreezeWatch::default();
+        let f = fired.clone();
+        watch.spawn(Some(Box::new(move || {
+            f.store(true, Ordering::SeqCst);
+            true
+        })));
+        std::thread::sleep(Duration::from_millis(800));
+        // ~30 lines/s for 2.5 s: past the trigger, then past STUCK_AFTER.
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(2500) {
+            let _ = Command::new("logger")
+                .args(["-t", "kwin_wayland", "Atomic modeset commit failed! Invalid argument"])
+                .status();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let mut result = None;
+        for _ in 0..40 {
+            let r = watch.take_result();
+            if r.as_ref().is_some_and(|r| r.service_stopped) {
+                result = r;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        watch.stop_watch();
+        let r = result.expect("sustained spam should fire the stuck hook");
+        assert!(fired.load(Ordering::SeqCst));
+        assert!(r.restarting, "the hook's restart decision is reported");
     }
 
     #[test]

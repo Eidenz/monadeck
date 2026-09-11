@@ -53,9 +53,18 @@ pub struct OverlayConfig {
     pub watch_24h: bool,
     /// Watch position locked (unlock from the watch to grip-move it).
     pub watch_locked: bool,
+    /// Wear the watch on the right wrist (the left hand then points at it).
+    pub watch_right_hand: bool,
     /// Watch pose relative to the left controller's aim pose `[x,y,z,qx,qy,qz,qw]`
     /// (None = built-in default).
     pub watch_offset: Option<[f32; 7]>,
+    /// Same, for UdCap gloves: they sit on the hand very differently from a
+    /// controller, so they keep their own spot (None = `watch_offset`, so
+    /// nothing moves until the glove spot is tuned).
+    pub watch_offset_gloves: Option<[f32; 7]>,
+    /// The right-wrist spots (None = the left one mirrored).
+    pub watch_offset_right: Option<[f32; 7]>,
+    pub watch_offset_right_gloves: Option<[f32; 7]>,
     /// Watch size multiplier (grip + trigger + push/pull, like screens).
     pub watch_scale: f32,
     /// Minimal watch: a clock-only pill tucked toward the wrist (tap to peek at
@@ -147,7 +156,11 @@ impl Default for OverlayConfig {
             watch_timezones: vec!["America/New_York".into(), "Asia/Tokyo".into()],
             watch_24h: false,
             watch_locked: true,
+            watch_right_hand: false,
             watch_offset: None,
+            watch_offset_gloves: None,
+            watch_offset_right: None,
+            watch_offset_right_gloves: None,
             watch_scale: 1.0,
             gaze_pause: true,
             recenter_on_toggle: true,
