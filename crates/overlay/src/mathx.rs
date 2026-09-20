@@ -271,3 +271,25 @@ pub fn posef(p: [f32; 3]) -> xr::Posef {
         position: xr::Vector3f { x: p[0], y: p[1], z: p[2] },
     }
 }
+
+/// Normalised linear blend between two quaternions (`t` = 0 keeps `a`), taking
+/// the short way round. Good enough for easing a panel's orientation.
+pub fn quat_nlerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    let s = if dot < 0.0 { -1.0 } else { 1.0 };
+    let mut q = [
+        a[0] + (s * b[0] - a[0]) * t,
+        a[1] + (s * b[1] - a[1]) * t,
+        a[2] + (s * b[2] - a[2]) * t,
+        a[3] + (s * b[3] - a[3]) * t,
+    ];
+    let l = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if l > 1e-6 {
+        for v in &mut q {
+            *v /= l;
+        }
+    } else {
+        q = b;
+    }
+    q
+}

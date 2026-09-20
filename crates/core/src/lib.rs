@@ -25,6 +25,7 @@ pub mod desktop_layouts;
 pub mod devices;
 pub mod favorites;
 pub mod floor_calibration;
+pub mod gamepad_profiles;
 pub mod gpu;
 pub mod installer;
 pub mod kwin_freeze;

@@ -139,6 +139,23 @@ pub struct LibState {
     /// Watch on the right wrist (the left hand then points at it).
     pub watch_right_hand: bool,
     pub keyboard_haptics: bool,
+    // --- gaming mode (see gamemode.rs) ---
+    pub game_mode: bool,
+    pub game_mode_request: Option<bool>,
+    pub game_dock: crate::desktop::DockMode,
+    pub game_dock_request: Option<crate::desktop::DockMode>,
+    pub game_pointer: [bool; 2],
+    pub game_pointer_request: bool, // toggle the mouse for the hand tapping the watch
+    pub game_guide_request: bool,
+    pub game_profile: String,
+    pub game_profiles: Vec<String>,
+    pub game_profile_select: Option<usize>,
+    pub game_profiles_reload: bool,
+    pub game_rumble: bool,
+    pub game_pad_ok: bool,
+    pub game_pad_error: Option<String>,
+    pub game_handheld_width: f32,
+    pub watch_game_menu: bool, // clock card shows the profile picker
     pub osc_enabled: bool,
     /// Port as a float for the stepper (1024..=65535).
     pub osc_port: f32,
@@ -383,6 +400,22 @@ impl LibState {
             watch_mini: false,
             watch_right_hand: false,
             keyboard_haptics: true,
+            game_mode: false,
+            game_mode_request: None,
+            game_dock: crate::desktop::DockMode::World,
+            game_dock_request: None,
+            game_pointer: [false; 2],
+            game_pointer_request: false,
+            game_guide_request: false,
+            game_profile: "Xbox".into(),
+            game_profiles: vec!["Xbox".into()],
+            game_profile_select: None,
+            game_profiles_reload: false,
+            game_rumble: true,
+            game_pad_ok: false,
+            game_pad_error: None,
+            game_handheld_width: 0.6,
+            watch_game_menu: false,
             osc_enabled: false,
             osc_port: 9001.0,
             osc_ok: false,
@@ -770,7 +803,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         // Clock + zones (or the layout picker) | quick buttons — each in its own
         // card. A queued screenshot takes the whole row (bigger preview).
         // A queued screenshot or the notification history takes the whole row.
-        let wide = (st.wrist_shot.is_some() || st.watch_history_menu) && !st.watch_layout_menu && !st.watch_media_menu;
+        let wide = (st.wrist_shot.is_some() || st.watch_history_menu) && !st.watch_layout_menu && !st.watch_media_menu && !st.watch_game_menu;
         let row_w = ui.available_width();
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
@@ -909,6 +942,40 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         st.wrist_req = req;
                         st.sound_tab = true;
                     }
+                } else if st.watch_game_menu {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{}  Gaming", icon::GAME_CONTROLLER)).size(14.0).strong().color(egui::Color32::WHITE));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(egui::RichText::new(icon::X).size(13.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
+                                st.watch_game_menu = false;
+                            }
+                            let guide = egui::Button::new(egui::RichText::new("Guide").size(12.0).color(theme::ON_SURFACE))
+                                .fill(theme::SURFACE_CONTAINER_HIGH)
+                                .min_size(egui::vec2(52.0, 22.0));
+                            if ui.add(guide).on_hover_text("Press the pad's Guide button").clicked() {
+                                st.game_guide_request = true;
+                                st.sound_tab = true;
+                            }
+                        });
+                    });
+                    let mut pick = None;
+                    egui::ScrollArea::vertical().max_height(92.0).auto_shrink([false, true]).show(ui, |ui| {
+                        for (i, name) in st.game_profiles.iter().enumerate() {
+                            let active = st.game_profile == *name;
+                            let fg = if active { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                            let b = egui::Button::new(egui::RichText::new(name).size(14.0).color(fg))
+                                .fill(if active { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                                .min_size(egui::vec2(ui.available_width(), 28.0));
+                            if ui.add(b).clicked() {
+                                pick = Some(i);
+                            }
+                        }
+                    });
+                    if let Some(i) = pick {
+                        st.game_profile_select = Some(i);
+                        st.watch_game_menu = false;
+                        st.sound_tab = true;
+                    }
                 } else if st.watch_layout_menu {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{}  Layouts", icon::SQUARES_FOUR)).size(14.0).strong().color(egui::Color32::WHITE));
@@ -973,13 +1040,17 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                         .min_size(egui::vec2(b, b));
                     ui.add(btn).on_hover_text(tip).clicked()
                 };
-                let ids = st.watch_buttons.clone();
-                for row in ids.chunks(2) {
-                    ui.horizontal(|ui| {
-                        for id in row {
-                            watch_quick_button(ui, st, id, &quick);
-                        }
-                    });
+                if st.game_mode {
+                    watch_game_buttons(ui, st, &quick);
+                } else {
+                    let ids = st.watch_buttons.clone();
+                    for row in ids.chunks(2) {
+                        ui.horizontal(|ui| {
+                            for id in row {
+                                watch_quick_button(ui, st, id, &quick);
+                            }
+                        });
+                    }
                 }
             });
             }
@@ -1059,7 +1130,45 @@ pub const ZONE_PRESETS: &[&str] = &[
 ];
 
 /// Everything a watch quick button can do, in cycle order.
-pub const WATCH_BUTTON_IDS: [&str; 9] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos"];
+pub const WATCH_BUTTON_IDS: [&str; 10] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos", "gaming"];
+
+/// The gaming-mode watch: the quick buttons make way for what you need
+/// mid-game — where the screen hangs, the mouse, remap profiles, and the way
+/// out. (The clock card keeps the time and hosts the profile picker.)
+fn watch_game_buttons(ui: &mut egui::Ui, st: &mut LibState, quick: &dyn Fn(&mut egui::Ui, &str, bool, &str) -> bool) {
+    use crate::desktop::DockMode;
+    let dock_glyph = match st.game_dock {
+        DockMode::World => icon::GLOBE_HEMISPHERE_WEST,
+        DockMode::Head => icon::EYE,
+        DockMode::Handheld => icon::DEVICE_TABLET,
+    };
+    ui.horizontal(|ui| {
+        let tip = format!("Screens: {} · tap for {}", st.game_dock.label(), st.game_dock.next().label());
+        if quick(ui, dock_glyph, st.game_dock != DockMode::World, &tip) {
+            st.game_dock_request = Some(st.game_dock.next());
+            st.sound_tab = true;
+        }
+        let mouse_on = st.game_pointer.iter().any(|p| *p);
+        if quick(ui, icon::CURSOR, mouse_on, "Mouse for this hand · point at a screen · off again once it leaves") {
+            st.game_pointer_request = true;
+            st.sound_tab = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        let tip = format!("Remap profile · {}", st.game_profile);
+        if quick(ui, icon::SLIDERS, st.watch_game_menu, &tip) {
+            st.watch_game_menu = !st.watch_game_menu;
+            st.watch_layout_menu = false;
+            st.watch_history_menu = false;
+            st.watch_media_menu = false;
+            st.sound_tab = true;
+        }
+        if quick(ui, icon::SIGN_OUT, false, "Leave gaming mode") {
+            st.game_mode_request = Some(false);
+            st.sound_tab = true;
+        }
+    });
+}
 
 /// The minimal watch: a clock-only pill that takes the wrist spot when the
 /// full watch is folded away. `hot` = the other hand points at it (a tap peeks
@@ -1089,6 +1198,7 @@ pub fn watch_button_info(id: &str) -> (&'static str, &'static str) {
         "screens" => (icon::MONITOR, "Hide / restore all screens"),
         "mute" => (icon::BELL_SLASH, "Mute notifications"),
         "photos" => (icon::IMAGES, "Photos"),
+        "gaming" => (icon::GAME_CONTROLLER, "Gaming mode"),
         _ => (icon::QUESTION, "Unassigned"),
     }
 }
@@ -1099,6 +1209,12 @@ fn watch_quick_button(ui: &mut egui::Ui, st: &mut LibState, id: &str, quick: &dy
         "keyboard" => {
             if quick(ui, glyph, st.keyboard_shown, tip) {
                 st.keyboard_toggle_request = true;
+                st.sound_tab = true;
+            }
+        }
+        "gaming" => {
+            if quick(ui, glyph, st.game_mode, tip) {
+                st.game_mode_request = Some(!st.game_mode);
                 st.sound_tab = true;
             }
         }
@@ -2241,6 +2357,16 @@ fn controls_card(ui: &mut egui::Ui) {
                 ("Release next to another screen", "dock to that edge (teal bar shows the spot)"),
                 ("Aim just above the top edge", "shows the swap island (also for 2 s when a screen appears) · tap another number to put that screen here"),
                 ("B while gripping", "undock"),
+            ],
+        ),
+        (
+            "Gaming mode",
+            &[
+                ("Watch › gamepad button, or Settings", "controllers become an Xbox pad; the VR app behind stops seeing them"),
+                ("Watch › mouse button", "laser + mouse for the hand that tapped it, until it leaves the screen"),
+                ("Left system button", "dashboard as usual — every hand points while it's up"),
+                ("Watch › screen button", "World · Head (trails you) · Hands (held like a handheld)"),
+                ("Watch › sliders", "remap profile (JSON in ~/.config/monadeck/gamepad_profiles) · Guide button"),
             ],
         ),
         (
@@ -3493,6 +3619,56 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
                 );
             });
         }
+
+        section(ui, "Gaming mode", |ui| {
+            use crate::desktop::DockMode;
+            setting_row(ui, "Gaming mode", Some("Controllers become an Xbox pad · lasers stay off until the watch's Mouse button · the VR app behind gets no controller input"), |ui| {
+                let mut on = st.game_mode;
+                if seg_toggle(ui, &mut on) {
+                    st.game_mode_request = Some(on);
+                }
+            });
+            if let Some(e) = st.game_pad_error.clone() {
+                ui.label(egui::RichText::new(format!("{}  No virtual pad: {e}", icon::WARNING)).size(12.0).color(egui::Color32::from_rgb(255, 170, 90)));
+                ui.label(egui::RichText::new("Needs write access to /dev/uinput (the input group, or a udev rule). Remaps to keys and the mouse still work.").size(12.0).color(theme::ON_SURFACE_VAR));
+            } else if st.game_mode {
+                ui.label(egui::RichText::new(format!("{}  Pad plugged in as \"Microsoft X-Box 360 pad\"", icon::CHECK)).size(12.0).color(theme::ON_SURFACE_VAR));
+            }
+            divider(ui);
+            setting_row(ui, "Screens hang from", Some("World: pinned · Head: trail your view with a little drag · Hands: held between the controllers"), |ui| {
+                for m in DockMode::ALL.iter().rev() {
+                    if pill(ui, m.label(), 90.0, st.game_dock == *m).clicked() && st.game_dock != *m {
+                        st.game_dock_request = Some(*m);
+                    }
+                }
+            });
+            divider(ui);
+            setting_row(ui, "Handheld size", Some("Screen width while held between the hands · grip + trigger + push/pull resizes it too"), |ui| {
+                modern_slider(ui, &mut st.game_handheld_width, 0.3..=1.2, 360.0, |v| format!("{v:.2} m"));
+            });
+            divider(ui);
+            setting_row(ui, "Rumble", Some("Game rumble becomes controller haptics · low motor left, high motor right"), |ui| {
+                seg_toggle(ui, &mut st.game_rumble);
+            });
+            divider(ui);
+            setting_row(ui, "Remap profile", Some("JSON files in ~/.config/monadeck/gamepad_profiles · a profile's \"game\" picks it when that game launches"), |ui| {
+                if action_button(ui, icon::ARROW_CLOCKWISE, "Reload").clicked() {
+                    st.game_profiles_reload = true;
+                    st.sound_tab = true;
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(2.0);
+                let names = st.game_profiles.clone();
+                for (i, name) in names.iter().enumerate() {
+                    let w = (name.chars().count() as f32 * 8.5 + 30.0).max(74.0);
+                    if pill(ui, name, w, st.game_profile == *name).clicked() && st.game_profile != *name {
+                        st.game_profile_select = Some(i);
+                        st.sound_tab = true;
+                    }
+                }
+            });
+        });
 
         section(ui, "Controllers", |ui| {
             setting_row(

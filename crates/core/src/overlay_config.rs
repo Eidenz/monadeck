@@ -128,6 +128,15 @@ pub struct OverlayConfig {
     pub ps_drag_vertical: bool,
     /// Screens, keyboard, photos and the dashboard move with you while dragging.
     pub ps_drag_follow: bool,
+    // --- Gaming mode -------------------------------------------------------
+    /// Game rumble becomes controller haptics.
+    pub game_rumble: bool,
+    /// What the screens hang from while gaming: "world" | "head" | "handheld".
+    pub game_dock: String,
+    /// Screen width while held between the hands, metres.
+    pub game_handheld_width: f32,
+    /// Remap profile last picked (by name; None = the stock Xbox layout).
+    pub game_profile: Option<String>,
 }
 
 impl Default for OverlayConfig {
@@ -187,6 +196,10 @@ impl Default for OverlayConfig {
             ps_drag_button: "auto".into(),
             ps_drag_vertical: true,
             ps_drag_follow: true,
+            game_rumble: true,
+            game_dock: "world".into(),
+            game_handheld_width: 0.6,
+            game_profile: None,
             watch_mini: false,
             keyboard_haptics: true,
             osc_enabled: false,

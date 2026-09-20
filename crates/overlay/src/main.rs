@@ -10,6 +10,8 @@
 mod a11y;
 mod audio;
 mod desktop;
+mod gamemode;
+mod gamepad;
 mod games;
 mod gfx;
 mod mathx;
@@ -180,6 +182,14 @@ fn main() {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
         if let Err(e) = desktop::selftest::keyboard() {
             eprintln!("keyboard selftest FAILED: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args().any(|a| a == "--gamepad-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Err(e) = gamepad::selftest() {
+            eprintln!("gamepad selftest FAILED: {e:#}");
             std::process::exit(1);
         }
         return;
@@ -522,6 +532,12 @@ fn run() -> Result<()> {
     let haptic_action = action_set.create_action::<xr::Haptic>("haptic", "Haptic tick", &[left_path, right_path])?;
     // Trackpad press: playspace drag (WayVR's binding). Gloves have none → A+B.
     let pad_action = action_set.create_action::<f32>("pad", "Trackpad press", &[left_path, right_path])?;
+    // Gaming mode reads the rest of the controller: stick click, trackpad
+    // position/touch, and the grip pose (a screen held between the hands).
+    let stick_click_action = action_set.create_action::<bool>("stick_click", "Thumbstick click", &[left_path, right_path])?;
+    let trackpad_action = action_set.create_action::<xr::Vector2f>("trackpad", "Trackpad position", &[left_path, right_path])?;
+    let trackpad_touch_action = action_set.create_action::<bool>("trackpad_touch", "Trackpad touch", &[left_path, right_path])?;
+    let grip_pose_action = action_set.create_action::<xr::Posef>("grip_pose", "Grip pose", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
     xr_instance.suggest_interaction_profile_bindings(
         index_profile,
@@ -544,11 +560,21 @@ fn run() -> Result<()> {
             xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
             xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/force")?),
             xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/force")?),
+            xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick/click")?),
+            xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick/click")?),
+            xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad")?),
+            xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad")?),
+            xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/touch")?),
+            xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/touch")?),
+            xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/left/input/grip/pose")?),
+            xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/right/input/grip/pose")?),
         ],
     )?;
     session.attach_action_sets(&[&action_set])?;
     let aim_left = aim_action.create_space(&session, left_path, xr::Posef::IDENTITY)?;
     let aim_right = aim_action.create_space(&session, right_path, xr::Posef::IDENTITY)?;
+    let grip_left = grip_pose_action.create_space(&session, left_path, xr::Posef::IDENTITY)?;
+    let grip_right = grip_pose_action.create_space(&session, right_path, xr::Posef::IDENTITY)?;
 
     // --- Game scan (background, metadata only) + lazy art decoder pool ------
     let scan_rx = games::spawn_scan();
@@ -641,7 +667,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow, ov_cfg.watch_mini, ov_cfg.keyboard_haptics, ov_cfg.osc_enabled, ov_cfg.osc_port, ov_cfg.watch_right_hand))),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow, ov_cfg.watch_mini, ov_cfg.keyboard_haptics, ov_cfg.osc_enabled, ov_cfg.osc_port, ov_cfg.watch_right_hand), (ov_cfg.game_rumble, ov_cfg.game_handheld_width))),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -734,6 +760,21 @@ fn run() -> Result<()> {
     st.keyboard_haptics = ov_cfg.keyboard_haptics;
     st.osc_enabled = ov_cfg.osc_enabled;
     st.osc_port = ov_cfg.osc_port as f32;
+    // Gaming mode: off at start; the pad only exists while it's on.
+    let mut game = gamemode::GameMode::new(desktop::DockMode::parse(&ov_cfg.game_dock), ov_cfg.game_rumble, ov_cfg.game_profile.as_deref());
+    desktop.handheld_width = ov_cfg.game_handheld_width.clamp(0.3, 1.2);
+    st.game_rumble = ov_cfg.game_rumble;
+    st.game_handheld_width = desktop.handheld_width;
+    st.game_dock = game.dock;
+    st.game_profile = game.profile_name().to_string();
+    st.game_profiles = game.profile_names();
+    let mut handheld_width_prev = st.game_handheld_width;
+    // Profiles edited on the desktop (or by hand) load themselves: poll the
+    // folder's newest mtime every couple of seconds.
+    let mut profiles_check_at = Instant::now();
+    let mut profiles_mtime = monadeck_core::gamepad_profiles::dir_mtime();
+    let mut rumble_pulse_at: Option<Instant> = None;
+    let mut dock_tick_prev = Instant::now();
     // OSC control (VRChat avatar parameters and friends). Restarted a second
     // after its settings stop changing (the port stepper clicks through values).
     let mut osc: Option<osc::Osc> = st.osc_enabled.then(|| osc::Osc::start(st.osc_port as u16));
@@ -1077,6 +1118,12 @@ fn run() -> Result<()> {
                         st.keyboard_toggle_request = true;
                     }
                 }
+                osc::Cmd::Gaming(v) => {
+                    let want = v.unwrap_or(!st.game_mode);
+                    if want != st.game_mode {
+                        st.game_mode_request = Some(want);
+                    }
+                }
                 osc::Cmd::Notify { title, body } => {
                     toasts.push(toast::Toast::new(toast::Kind::Notification, title, body).app("OSC").source(toast::Source::Osc));
                 }
@@ -1254,6 +1301,30 @@ fn run() -> Result<()> {
                 });
             }
         }
+        // Gaming mode sees the whole controller (the viewer's `hands` are the
+        // laser's subset), plus the grip poses for the handheld dock.
+        let mut raw = [gamemode::RawHand::default(); 2];
+        let mut grips: [Option<xr::Posef>; 2] = [None, None];
+        if focused {
+            for (hi, (path, grip_space)) in [(left_path, &grip_left), (right_path, &grip_right)].into_iter().enumerate() {
+                let h = &hands[hi];
+                let tp = trackpad_action.state(&session, path)?.current_state;
+                let stick = scroll_action.state(&session, path)?.current_state;
+                raw[hi] = gamemode::RawHand {
+                    active: h.active,
+                    trigger: select_action.state(&session, path)?.current_state,
+                    grip: h.grip,
+                    stick: (stick.x, stick.y),
+                    stick_click: stick_click_action.state(&session, path)?.current_state,
+                    a: h.secondary,
+                    b: h.precise,
+                    pad: (tp.x, tp.y),
+                    pad_force: pad_action.state(&session, path)?.current_state,
+                    pad_touch: trackpad_touch_action.state(&session, path)?.current_state,
+                };
+                grips[hi] = locate_pose(grip_space, &space, time);
+            }
+        }
         let local_in_stage = stage_space.as_ref().and_then(|st| locate_pose(&space, st, time));
         desktop.set_local_in_stage(local_in_stage);
 
@@ -1267,6 +1338,8 @@ fn run() -> Result<()> {
                 "right" => [false, true],
                 _ => [true, true],
             };
+            // While gaming the trackpad is the d-pad / Start / Back.
+            let allowed = if game.enabled && !visible { [false, false] } else { allowed };
             let drag_button = st.ps_drag_button.clone();
             let stage_pos = |p: &xr::Posef| {
                 let q = local_in_stage.as_ref().map_or(*p, |l| pose_compose(l, p));
@@ -1719,6 +1792,120 @@ fn run() -> Result<()> {
                 summon_at = Some(Instant::now());
             }
         }
+
+        // --- Gaming mode: requests, routing, rumble, docking -----------------
+        if let Some(on) = st.game_mode_request.take() {
+            game.set_enabled(on);
+            st.game_mode = game.enabled;
+            if on {
+                // A gamepad session has no use for the VR keyboard.
+                if desktop.keyboard_visible() {
+                    desktop.toggle_keyboard();
+                }
+                desktop.set_dock_mode(game.dock, hmd.as_ref());
+                if game.pad_ok() {
+                    st.flash(format!("Gaming mode · {} · pad plugged in", game.profile_name()));
+                } else {
+                    toasts.push(
+                        toast::Toast::new(toast::Kind::Warning, "Gaming mode without a pad", game.error.clone().unwrap_or_default()).secs(6.0),
+                    );
+                }
+                log::info!("gaming: on (profile '{}', dock {})", game.profile_name(), game.dock.as_str());
+            } else {
+                desktop.set_dock_mode(desktop::DockMode::World, hmd.as_ref());
+                st.watch_game_menu = false;
+                st.flash("Gaming mode off");
+                log::info!("gaming: off");
+            }
+            audio.tab();
+        }
+        if let Some(m) = st.game_dock_request.take() {
+            game.dock = m;
+            st.game_dock = m;
+            if game.enabled {
+                desktop.set_dock_mode(m, hmd.as_ref());
+            }
+            st.flash(format!("Screens · {}", m.label()));
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+        }
+        if st.game_pointer_request {
+            st.game_pointer_request = false;
+            game.toggle_pointer(1 - wh);
+        }
+        if st.game_guide_request {
+            st.game_guide_request = false;
+            game.guide_request = true;
+        }
+        if let Some(i) = st.game_profile_select.take() {
+            game.select_profile(i);
+            st.game_profile = game.profile_name().to_string();
+            st.flash(format!("Profile · {}", st.game_profile));
+            overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+        }
+        if st.game_profiles_reload {
+            st.game_profiles_reload = false;
+            game.reload_profiles();
+            st.game_profiles = game.profile_names();
+            st.game_profile = game.profile_name().to_string();
+            st.flash(format!("{} profiles loaded", st.game_profiles.len()));
+        }
+        if profiles_check_at.elapsed().as_secs_f32() > 2.0 {
+            profiles_check_at = Instant::now();
+            let m = monadeck_core::gamepad_profiles::dir_mtime();
+            if m != profiles_mtime {
+                profiles_mtime = m;
+                game.reload_profiles();
+                st.game_profiles = game.profile_names();
+                st.game_profile = game.profile_name().to_string();
+                log::info!("gaming: profiles changed on disk, {} loaded", st.game_profiles.len());
+            }
+        }
+        // The handheld size can change from the slider or from a resize gesture.
+        if st.game_handheld_width != handheld_width_prev {
+            desktop.handheld_width = st.game_handheld_width;
+        } else {
+            st.game_handheld_width = desktop.handheld_width;
+        }
+        handheld_width_prev = st.game_handheld_width;
+        {
+            // Roles: the watch hand (on the watch), pointers, and pad hands.
+            let on_watch = {
+                let mut w = [false; 2];
+                w[1 - wh] = watch_busy;
+                w
+            };
+            let on_screen = [0, 1].map(|i| hands.get(i).is_some_and(|h| h.active && desktop.aimed_at_screen(&h.aim)));
+            let roles = game.route(&raw, on_screen, on_watch, visible, |code, down| desktop.key(code, down));
+            for code in game.take_stale_keys() {
+                desktop.key(code, false);
+            }
+            if game.enabled && !visible {
+                for (i, h) in hands.iter_mut().enumerate().take(2) {
+                    if roles[i] == gamemode::Role::Pad {
+                        h.active = false;
+                    }
+                }
+            }
+            st.game_pointer = game.pointer;
+            if st.game_profile != game.profile_name() {
+                st.game_profile = game.profile_name().to_string();
+            }
+            st.game_pad_ok = game.pad_ok();
+            st.game_pad_error = game.error.clone();
+            // Rumble → haptics: re-armed every 25 ms while a motor is on.
+            if game.enabled && game.rumble.is_on() && rumble_pulse_at.is_none_or(|t| t.elapsed().as_millis() >= 25) {
+                rumble_pulse_at = Some(Instant::now());
+                if game.rumble.strong > 0.01 {
+                    pulse(&session, &haptic_action, left_path, game.rumble.strong.min(1.0), 30);
+                }
+                if game.rumble.weak > 0.01 {
+                    pulse(&session, &haptic_action, right_path, game.rumble.weak.min(1.0), 30);
+                }
+            }
+            let dt = dock_tick_prev.elapsed().as_secs_f32();
+            dock_tick_prev = Instant::now();
+            desktop.dock_tick(hmd.as_ref(), grips, dt);
+        }
         if st.watch_timer_request {
             st.watch_timer_request = false;
             st.nav = ui::Nav::System;
@@ -1863,7 +2050,7 @@ fn run() -> Result<()> {
             if let Some(g) = d_in.gesture {
                 toasts.readout(g.title, g.body, g.pose);
             }
-            let want_block = desktop.pointing() || p_in.ray.is_some();
+            let want_block = desktop.pointing() || p_in.ray.is_some() || game.enabled;
             if want_block != blocked_prev {
                 monado.set_block(want_block);
                 blocked_prev = want_block;
@@ -2150,7 +2337,7 @@ fn run() -> Result<()> {
         let laser_ray = best.map(|h| (h.aim, h.t)).or(d_ray);
 
         // Block the game's controller input while pointing at the dashboard.
-        let want_block = best.is_some() || desktop.pointing() || p_in.ray.is_some();
+        let want_block = best.is_some() || desktop.pointing() || p_in.ray.is_some() || game.enabled;
         if want_block != blocked_prev {
             monado.set_block(want_block);
             blocked_prev = want_block;
@@ -2372,6 +2559,10 @@ fn run() -> Result<()> {
                     } else {
                         launch_game(g);
                     }
+                    // A remap profile made for this game takes over.
+                    if let Some(p) = game.auto_select(&g.name) {
+                        log::info!("gaming: profile '{p}' picked for '{}'", g.name);
+                    }
                     audio.launch();
                     st.click_pulse = false; // the launch chime is the click
                     // Hand off to the standalone launch popup (SteamVR-style): close
@@ -2434,7 +2625,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow, st.watch_mini, st.keyboard_haptics, st.osc_enabled, st.osc_port as u16, st.watch_right_hand))),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow, st.watch_mini, st.keyboard_haptics, st.osc_enabled, st.osc_port as u16, st.watch_right_hand), (st.game_rumble, st.game_handheld_width))),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -2446,6 +2637,7 @@ fn run() -> Result<()> {
             desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
             desktop.scroll_speed = st.scroll_speed;
             desktop.drag_threshold_px = st.drag_threshold_px as f64;
+            game.rumble_enabled = st.game_rumble;
             settings_prev = settings_now;
             overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
@@ -2804,6 +2996,10 @@ fn overlay_config_from(
         ps_drag_follow: st.ps_drag_follow,
         watch_mini: st.watch_mini,
         keyboard_haptics: st.keyboard_haptics,
+        game_rumble: st.game_rumble,
+        game_dock: st.game_dock.as_str().to_string(),
+        game_handheld_width: st.game_handheld_width,
+        game_profile: Some(st.game_profile.clone()),
         osc_enabled: st.osc_enabled,
         osc_port: st.osc_port as u16,
     }

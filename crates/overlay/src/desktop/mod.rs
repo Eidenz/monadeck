@@ -29,7 +29,7 @@ use std::time::Instant;
 use ash::vk;
 use openxr as xr;
 
-use crate::mathx::{front_pose, offset_pose, pose_compose, pose_invert, qf, quat_rotate, raycast};
+use crate::mathx::{cross, facing_head, forward, front_pose, normalize, offset_pose, pose_compose, pose_invert, qf, quat_from_axes, quat_nlerp, quat_rotate, quatf, raycast, vec3f};
 use monadeck_core::desktop_layouts::{DesktopLayout, KeyboardPlacement, ScreenPlacement};
 use dmabuf::{Caps, Importer};
 use hid::UInput;
@@ -91,6 +91,85 @@ pub enum ToggleAll {
     Shown(usize),
     Nothing,
 }
+
+/// Gaming mode: what the screens are attached to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockMode {
+    /// Pinned where they are (the normal viewer).
+    World,
+    /// Trail the head with a little drag, keeping their spot in your view.
+    Head,
+    /// Held between the two hands, like a handheld console.
+    Handheld,
+}
+
+impl DockMode {
+    pub const ALL: [DockMode; 3] = [DockMode::World, DockMode::Head, DockMode::Handheld];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DockMode::World => "world",
+            DockMode::Head => "head",
+            DockMode::Handheld => "handheld",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "head" => DockMode::Head,
+            "handheld" | "hands" => DockMode::Handheld,
+            _ => DockMode::World,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DockMode::World => "World",
+            DockMode::Head => "Head",
+            DockMode::Handheld => "Hands",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            DockMode::World => DockMode::Head,
+            DockMode::Head => DockMode::Handheld,
+            DockMode::Handheld => DockMode::World,
+        }
+    }
+
+    fn idx(self) -> usize {
+        match self {
+            DockMode::World => 0,
+            DockMode::Head => 1,
+            DockMode::Handheld => 2,
+        }
+    }
+}
+
+/// Where a dock mode last had the screens: the group's anchor, its shape, and
+/// (Head) the anchor in the head's frame. Each mode keeps its own, so coming
+/// back from Handheld doesn't leave the screen at arm's length by your face.
+#[derive(Clone)]
+struct DockSave {
+    anchor: xr::Posef,
+    rels: Vec<(usize, xr::Posef)>,
+    head_local: xr::Posef,
+}
+
+/// Head mode: time constant of the ease toward the head-relative spot (the
+/// "bit of drag").
+const HEAD_FOLLOW_TAU: f32 = 0.22;
+/// Handheld: a much tighter ease, just enough to hide tracking jitter.
+const HANDS_FOLLOW_TAU: f32 = 0.05;
+/// Handheld: the screen sits this far behind the hands' midpoint (away from
+/// you), so it reads as held rather than floating in front of the controllers.
+const HANDS_PUSH: f32 = 0.15;
+/// Handheld: …and a touch above it, so the hands hold its lower half.
+const HANDS_LIFT: f32 = 0.05;
+/// Handheld: the screen leans back this much (top edge away from you), so it
+/// faces slightly up toward your eyes instead of sitting dead square to the gaze.
+const HANDS_TILT_DEG: f32 = 6.0;
 
 /// Live readout while a screen is gripped (size · distance · curve).
 pub struct GestureInfo {
@@ -214,6 +293,21 @@ pub struct DesktopViewer {
     /// head on every session start, so layouts are stored in STAGE (floor +
     /// tracking origin) and converted through this.
     local_in_stage: Option<xr::Posef>,
+    // --- gaming-mode docking (see `DockMode`) ---
+    dock_mode: DockMode,
+    /// The group's eased anchor (the primary screen's pose).
+    dock_anchor: xr::Posef,
+    /// Every shown screen's pose relative to the anchor, captured when the
+    /// mode was set (and again after a grab / a change of the shown set).
+    dock_rel: Vec<(usize, xr::Posef)>,
+    /// Head mode: the anchor in the head's frame at capture time.
+    dock_head_local: xr::Posef,
+    /// Handheld: (screen, width before, custom_size before) to put back.
+    dock_prev_widths: Vec<(usize, f32, bool)>,
+    dock_was_grabbing: bool,
+    pub handheld_width: f32,
+    /// Per mode (World / Head / Handheld): where it last had the screens.
+    dock_saved: [Option<DockSave>; 3],
 }
 
 impl DesktopViewer {
@@ -286,6 +380,219 @@ impl DesktopViewer {
             kb_auto_hidden_for: None,
             kb_primary: None,
             layout_untouched: false,
+            dock_mode: DockMode::World,
+            dock_anchor: xr::Posef::IDENTITY,
+            dock_rel: Vec::new(),
+            dock_head_local: xr::Posef::IDENTITY,
+            dock_prev_widths: Vec::new(),
+            dock_was_grabbing: false,
+            handheld_width: 0.6,
+            dock_saved: [None, None, None],
+        }
+    }
+
+    // --- Gaming-mode docking ---------------------------------------------------
+
+    /// Would this hand's laser land on a shown screen? (Gaming mode decides
+    /// roles before the viewer sees the hands.)
+    pub fn aimed_at_screen(&self, aim: &xr::Posef) -> bool {
+        let curved_ok = self.caps.curved;
+        self.screens.iter().any(|s| s.hit(aim, curved_ok).is_some())
+    }
+
+    /// The viewer's uinput keyboard (remap profiles type through it).
+    pub fn key(&mut self, code: u16, down: bool) {
+        if let Some(h) = &mut self.hid {
+            h.key(code, down);
+        }
+    }
+
+    /// Switch what the screens are attached to. Leaving Handheld puts the
+    /// screens' sizes back; every mode keeps the screens where they are now.
+    pub fn set_dock_mode(&mut self, mode: DockMode, hmd: Option<&xr::Posef>) {
+        if mode == self.dock_mode {
+            return;
+        }
+        // Remember where this mode had the screens before leaving it.
+        self.dock_capture(hmd);
+        if !self.dock_rel.is_empty() {
+            self.dock_saved[self.dock_mode.idx()] = Some(DockSave {
+                anchor: self.dock_anchor,
+                rels: self.dock_rel.clone(),
+                head_local: self.dock_head_local,
+            });
+        }
+        if self.dock_mode == DockMode::Handheld {
+            for (i, w, custom) in self.dock_prev_widths.drain(..) {
+                if let Some(s) = self.screens.get_mut(i) {
+                    s.width_m = w;
+                    s.custom_size = custom;
+                }
+            }
+            self.derive_docked_poses(&[]);
+        }
+        self.dock_mode = mode;
+        if mode == DockMode::Handheld {
+            self.dock_prev_widths = self
+                .screens
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.shown)
+                .map(|(i, s)| (i, s.width_m, s.custom_size))
+                .collect();
+            for s in self.screens.iter_mut().filter(|s| s.shown) {
+                s.width_m = self.handheld_width;
+                s.custom_size = true;
+            }
+            self.derive_docked_poses(&[]);
+        }
+        self.dock_capture(hmd);
+        // Back where this mode last had them (same set of screens only).
+        let shown: Vec<usize> = self.dock_rel.iter().map(|(i, _)| *i).collect();
+        let saved = self.dock_saved[mode.idx()].clone().filter(|s| s.rels.iter().map(|(i, _)| *i).collect::<Vec<_>>() == shown);
+        match (mode, saved) {
+            (DockMode::World, Some(s)) => {
+                self.dock_anchor = s.anchor;
+                self.dock_rel = s.rels;
+                let anchor = self.dock_anchor;
+                for (i, rel) in &self.dock_rel {
+                    if let Some(sc) = self.screens.get_mut(*i) {
+                        sc.pose = pose_compose(&anchor, rel);
+                        sc.placed = true;
+                    }
+                }
+                self.derive_docked_poses(&[]);
+            }
+            (DockMode::Head, Some(s)) => {
+                // Keep the shape and the remembered spot in view; the ease
+                // glides the group there from wherever it is now.
+                self.dock_rel = s.rels;
+                self.dock_head_local = s.head_local;
+            }
+            _ => {}
+        }
+    }
+
+    /// Remember the group's shape (and, in Head mode, where it sits in the
+    /// head's frame).
+    fn dock_capture(&mut self, hmd: Option<&xr::Posef>) {
+        self.dock_rel.clear();
+        let Some(primary) = self.order.iter().filter_map(|n| self.screens.iter().position(|s| &s.name == n && s.shown && s.placed)).next()
+            .or_else(|| self.screens.iter().position(|s| s.shown && s.placed))
+        else {
+            return;
+        };
+        self.dock_anchor = self.screens[primary].pose;
+        let inv = pose_invert(&self.dock_anchor);
+        for (i, s) in self.screens.iter().enumerate().filter(|(_, s)| s.shown && s.placed) {
+            self.dock_rel.push((i, pose_compose(&inv, &s.pose)));
+        }
+        if let Some(h) = hmd {
+            self.dock_head_local = pose_compose(&pose_invert(h), &self.dock_anchor);
+        }
+    }
+
+    /// Per frame (before `update_input`): drive the group after the head or
+    /// the hands. `grips`: both hands' grip poses this frame. `dt` seconds.
+    pub fn dock_tick(&mut self, hmd: Option<&xr::Posef>, grips: [Option<xr::Posef>; 2], dt: f32) {
+        if self.dock_mode == DockMode::World {
+            return;
+        }
+        let grabbing = self.grab_screen.is_some() || self.keyboard.grab.is_some();
+        if grabbing {
+            self.dock_was_grabbing = true;
+            return;
+        }
+        if self.dock_was_grabbing {
+            self.dock_was_grabbing = false;
+            self.dock_capture(hmd);
+        }
+        // The shown set changed (watch / bar toggles): re-capture the shape.
+        // A screen that appears while handheld takes the handheld size too.
+        let shown: Vec<usize> = self.screens.iter().enumerate().filter(|(_, s)| s.shown && s.placed).map(|(i, _)| i).collect();
+        if shown != self.dock_rel.iter().map(|(i, _)| *i).collect::<Vec<_>>() {
+            if self.dock_mode == DockMode::Handheld {
+                for &i in &shown {
+                    if !self.dock_prev_widths.iter().any(|(j, _, _)| *j == i) {
+                        let s = &mut self.screens[i];
+                        self.dock_prev_widths.push((i, s.width_m, s.custom_size));
+                        s.width_m = self.handheld_width;
+                        s.custom_size = true;
+                    }
+                }
+                self.derive_docked_poses(&[]);
+            }
+            self.dock_capture(hmd);
+        }
+        if self.dock_rel.is_empty() {
+            return;
+        }
+        let (target, tau) = match self.dock_mode {
+            DockMode::World => return,
+            DockMode::Head => match hmd {
+                Some(h) => {
+                    let t = pose_compose(h, &self.dock_head_local);
+                    (t, HEAD_FOLLOW_TAU)
+                }
+                None => return,
+            },
+            DockMode::Handheld => match (grips, hmd) {
+                ([Some(l), Some(r)], Some(h)) => {
+                    let (lp, rp) = (l.position, r.position);
+                    let mid = [(lp.x + rp.x) * 0.5, (lp.y + rp.y) * 0.5, (lp.z + rp.z) * 0.5];
+                    let across = [rp.x - lp.x, rp.y - lp.y, rp.z - lp.z];
+                    let span = (across[0] * across[0] + across[1] * across[1] + across[2] * across[2]).sqrt();
+                    if span < 0.08 {
+                        return; // hands together: hold still
+                    }
+                    // Centred between the hands, squared to the head (the
+                    // panel faces back along your gaze, like a tablet held
+                    // level with your view), rolled along the hands' line.
+                    let fwd = normalize(forward(h));
+                    let z = [-fwd[0], -fwd[1], -fwd[2]];
+                    let d = across[0] * z[0] + across[1] * z[1] + across[2] * z[2];
+                    let x = normalize([across[0] - z[0] * d, across[1] - z[1] * d, across[2] - z[2] * d]);
+                    if x == [0.0, 0.0, 1.0] {
+                        return; // degenerate (hands stacked along the gaze)
+                    }
+                    let y = cross(z, x);
+                    let pos = [
+                        mid[0] - z[0] * HANDS_PUSH + y[0] * HANDS_LIFT,
+                        mid[1] - z[1] * HANDS_PUSH + y[1] * HANDS_LIFT,
+                        mid[2] - z[2] * HANDS_PUSH + y[2] * HANDS_LIFT,
+                    ];
+                    // Lean back about the panel's own right axis (the spot
+                    // above was placed with the untilted axes, so it stays put).
+                    let (sin, cos) = HANDS_TILT_DEG.to_radians().sin_cos();
+                    let zt = [z[0] * cos + y[0] * sin, z[1] * cos + y[1] * sin, z[2] * cos + y[2] * sin];
+                    let yt = [y[0] * cos - z[0] * sin, y[1] * cos - z[1] * sin, y[2] * cos - z[2] * sin];
+                    (xr::Posef { orientation: quatf(quat_from_axes(x, yt, zt)), position: vec3f(pos) }, HANDS_FOLLOW_TAU)
+                }
+                _ => return,
+            },
+        };
+        let k = 1.0 - (-dt.max(0.0) / tau).exp();
+        let a = &mut self.dock_anchor;
+        a.position.x += (target.position.x - a.position.x) * k;
+        a.position.y += (target.position.y - a.position.y) * k;
+        a.position.z += (target.position.z - a.position.z) * k;
+        a.orientation = match self.dock_mode {
+            // Always square to the head from wherever the ease has it.
+            DockMode::Head => facing_head(&a.position, hmd.unwrap()),
+            _ => quatf(quat_nlerp(qf(&a.orientation), qf(&target.orientation), k)),
+        };
+        let anchor = self.dock_anchor;
+        for (i, rel) in &self.dock_rel {
+            if let Some(s) = self.screens.get_mut(*i) {
+                s.pose = pose_compose(&anchor, rel);
+                s.placed = true;
+            }
+        }
+        // A resize while handheld becomes the new handheld size.
+        if self.dock_mode == DockMode::Handheld {
+            if let Some(w) = self.dock_rel.first().and_then(|(i, _)| self.screens.get(*i)).map(|s| s.width_m) {
+                self.handheld_width = w;
+            }
         }
     }
 
