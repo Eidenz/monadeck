@@ -10,6 +10,7 @@
 //! - `/monadeck/dashboard`     the dashboard
 //! - `/monadeck/screens`       the desktop screens
 //! - `/monadeck/keyboard`      the keyboard
+//! - `/monadeck/gaming`        gaming mode (controllers → gamepad)
 //! - `/monadeck/notify "title" ["body"]`  a toast
 //!
 //! VRChat sends changed avatar parameters as `/avatar/parameters/<name>`; a
@@ -27,6 +28,7 @@ pub enum Cmd {
     Dashboard(Option<bool>),
     Screens(Option<bool>),
     Keyboard(Option<bool>),
+    Gaming(Option<bool>),
     Notify { title: String, body: String },
 }
 
@@ -119,6 +121,7 @@ fn command(addr: &str, args: &[Arg]) -> Option<Cmd> {
         "dashboard" => Some(Cmd::Dashboard(flag())),
         "screens" | "desktop" => Some(Cmd::Screens(flag())),
         "keyboard" => Some(Cmd::Keyboard(flag())),
+        "gaming" | "gamemode" | "gamingmode" | "gamepad" => Some(Cmd::Gaming(flag())),
         "notify" | "toast" => {
             let mut strs = args.iter().filter_map(|a| if let Arg::Str(s) = a { Some(s.trim()) } else { None }).filter(|s| !s.is_empty());
             let title = strs.next()?.to_string();
@@ -307,6 +310,8 @@ mod tests {
         assert_eq!(command("/avatar/parameters/Monadeck/Watch_Mini", &[Arg::Float(1.0)]), Some(Cmd::WatchMini(Some(true))));
         assert_eq!(command("/avatar/parameters/monadeck_dashboard", &[Arg::Float(0.0)]), Some(Cmd::Dashboard(Some(false))));
         assert_eq!(command("/avatar/parameters/SomethingElse", &[Arg::Bool(true)]), None);
+        assert_eq!(command("/monadeck/gaming", &[Arg::Bool(true)]), Some(Cmd::Gaming(Some(true))));
+        assert_eq!(command("/avatar/parameters/MonadeckGameMode", &[]), Some(Cmd::Gaming(None)));
         assert_eq!(command("/monadeck/nope", &[]), None);
         assert_eq!(
             command("/monadeck/notify", &[Arg::Str("Raid".into()), Arg::Str("starting now".into())]),

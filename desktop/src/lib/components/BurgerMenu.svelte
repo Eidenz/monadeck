@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { openSettings, openBindings } from "$lib/windows";
+  import { openSettings, openBindings, openGamepad } from "$lib/windows";
   import { beyondPresent } from "$lib/api";
   import { app } from "$lib/state.svelte";
 
@@ -11,6 +11,7 @@
   const baseItems = [
     { label: "Settings", run: () => openSettings() },
     { label: "Binding editor", run: () => openBindings() },
+    { label: "Gamepad remaps", run: () => openGamepad() },
     { label: "Logs", run: () => openSettings("logs") },
   ];
 

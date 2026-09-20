@@ -14,6 +14,8 @@ use crate::toast::{Kind, Source, Toast, Toasts};
 const PX: (usize, usize) = (960, 280);
 /// The minimal watch's.
 const MINI_PX: (usize, usize) = (420, 160);
+/// The dashboard's bottom bar.
+const BOTTOM_PX: (usize, usize) = (1640, 151);
 
 /// (name, toast, extra queued, frames as (suffix, seconds since shown)).
 type Case = (&'static str, Toast, usize, Vec<(&'static str, f32)>);
@@ -146,6 +148,51 @@ pub fn run(dir: &Path) -> Result<()> {
         let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
         let path = dir.join(format!("{name}.png"));
         rasterise(&prims, &textures, out.pixels_per_point, MINI_PX).save(&path)?;
+        println!("{}", path.display());
+    }
+    // The dashboard's bottom bar with three screens up, under a growing pile of
+    // devices: the batteries must fold into per-kind chips before they reach
+    // the screen pills.
+    use crate::monado::{BatteryInfo, BatteryKind};
+    let bat = |kind, charge| BatteryInfo { kind, charge, charging: false };
+    let rigs: [(&str, Vec<BatteryInfo>); 3] = [
+        ("bottom-bar-controllers", vec![bat(BatteryKind::Controller, 0.86), bat(BatteryKind::Controller, 0.83)]),
+        (
+            "bottom-bar-five-devices",
+            vec![
+                bat(BatteryKind::Controller, 0.86),
+                bat(BatteryKind::Controller, 0.83),
+                bat(BatteryKind::Tracker, 0.67),
+                bat(BatteryKind::Glove, 0.72),
+                bat(BatteryKind::Other, 0.65),
+            ],
+        ),
+        (
+            "bottom-bar-full-body",
+            vec![
+                bat(BatteryKind::Controller, 0.86),
+                bat(BatteryKind::Controller, 0.83),
+                bat(BatteryKind::Tracker, 0.67),
+                bat(BatteryKind::Tracker, 0.41),
+                bat(BatteryKind::Tracker, 0.12),
+                bat(BatteryKind::Glove, 0.72),
+                bat(BatteryKind::Glove, 0.70),
+                bat(BatteryKind::Other, 0.65),
+            ],
+        ),
+    ];
+    for (name, batteries) in rigs {
+        let mut st = crate::ui::LibState::new();
+        st.clock = "10:45 AM".into();
+        st.desktop_bar = vec![("DP-1".into(), true), ("DP-2".into(), false), ("HDMI-A-1".into(), false)];
+        st.batteries = batteries;
+        let out = ctx.run(screen_input(BOTTOM_PX, 1.0), |ctx| crate::ui::build_bottom(ctx, &mut st));
+        for (id, delta) in &out.textures_delta.set {
+            apply_delta(&mut textures, *id, delta);
+        }
+        let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+        let path = dir.join(format!("{name}.png"));
+        rasterise(&prims, &textures, out.pixels_per_point, BOTTOM_PX).save(&path)?;
         println!("{}", path.display());
     }
     Ok(())
