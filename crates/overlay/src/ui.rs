@@ -1343,6 +1343,7 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
             }
             // Mirrored screens + keyboard, centred in the bar (fixed order so a
             // screen is always in the same spot — the WayVR wrist-bar problem).
+            let mut pills_right: Option<f32> = None;
             if !st.desktop_bar.is_empty() {
                 let count = st.desktop_bar.len();
                 let pill_w = 64.0;
@@ -1350,6 +1351,7 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                 let total = count as f32 * pill_w + kb_w + count as f32 * 8.0;
                 let bar = ui.max_rect();
                 let rect = egui::Rect::from_center_size(bar.center(), egui::vec2(total, 40.0));
+                pills_right = Some(rect.right());
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
                 child.spacing_mut().item_spacing.x = 8.0;
                 let mut toggle = None;
@@ -1379,15 +1381,79 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                     st.sound_tab = true;
                 }
             }
-            // Clock + batteries on the right.
+            // Clock + batteries on the right. The batteries only get the room
+            // between the (fixed, centred) screen pills and the clock: a full-body
+            // rig's worth of devices would otherwise run over the pills. They wrap
+            // onto a second row first (every device stays readable), and only fold
+            // into one chip per kind — the watch's trick — when two rows aren't
+            // enough: trackers / gloves / others first, the controllers last.
+            use crate::monado::{BatteryInfo, BatteryKind};
+            enum Chip<'a> {
+                One(&'a BatteryInfo),
+                Group(BatteryKind, Vec<&'a BatteryInfo>),
+            }
+            let measure = |ui: &egui::Ui, text: String, size: f32| -> f32 {
+                ui.fonts(|f| f.layout_no_wrap(text, egui::FontId::proportional(size), egui::Color32::WHITE).size().x)
+            };
+            let limit = pills_right.unwrap_or(0.0).max(ui.cursor().min.x) + 14.0;
+            let clock_w = if st.clock.is_empty() { 0.0 } else { measure(ui, st.clock.clone(), 20.0) + 8.0 };
+            let avail = (ui.max_rect().right() - limit - clock_w - 16.0).max(0.0);
+            // Widest a chip gets ("100%", and "×N" for a group), plus its spacing.
+            let w_single = measure(ui, format!("{} {} 100%", icon::GAME_CONTROLLER, icon::BATTERY_FULL), 14.0) + 18.0;
+            let w_group = measure(ui, format!("{} {} 100% ×9", icon::GAME_CONTROLLER, icon::BATTERY_FULL), 14.0) + 18.0;
+            let of_kind = |k: BatteryKind| -> Vec<&BatteryInfo> { st.batteries.iter().filter(|b| b.kind == k).collect() };
+            let others = [BatteryKind::Glove, BatteryKind::Tracker, BatteryKind::Other];
+            let groups = |kinds: &[BatteryKind]| -> Vec<Chip> {
+                kinds.iter().filter_map(|k| Some(of_kind(*k)).filter(|g| !g.is_empty()).map(|g| Chip::Group(*k, g))).collect()
+            };
+            // Candidate layouts, most detailed first: (chips, widest chip).
+            let candidates: [(Vec<Chip>, f32); 3] = [
+                (st.batteries.iter().map(Chip::One).collect(), w_single),
+                (of_kind(BatteryKind::Controller).into_iter().map(Chip::One).chain(groups(&others)).collect(), w_group),
+                (groups(&[BatteryKind::Controller, BatteryKind::Glove, BatteryKind::Tracker, BatteryKind::Other]), w_group),
+            ];
+            let mut chosen: Option<(Vec<Chip>, usize)> = None; // (chips, chips per row)
+            let mut last = None;
+            for (chips, w) in candidates {
+                let per_row = ((avail / w).floor() as usize).max(1);
+                if chips.len() <= per_row * 2 {
+                    chosen = Some((chips, per_row));
+                    break;
+                }
+                last = Some((chips, per_row));
+            }
+            // Nothing fits even folded: show what two rows can hold.
+            let (mut chips, per_row) = chosen.or(last).unwrap_or((Vec::new(), 1));
+            chips.truncate(per_row * 2);
+            let draw = |ui: &mut egui::Ui, chip: &Chip| match chip {
+                Chip::One(b) => battery_widget(ui, b),
+                Chip::Group(kind, group) => battery_group_widget(ui, *kind, group),
+            };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !st.clock.is_empty() {
                     ui.label(egui::RichText::new(&st.clock).size(20.0).strong().color(egui::Color32::WHITE));
                 }
                 ui.add_space(16.0);
-                for b in &st.batteries {
-                    battery_widget(ui, b);
-                    ui.add_space(10.0);
+                if chips.len() <= per_row {
+                    for chip in &chips {
+                        draw(ui, chip);
+                        ui.add_space(10.0);
+                    }
+                } else {
+                    // Two rows, split evenly (the first devices stay top-right).
+                    let top = chips.len().div_ceil(2);
+                    let block_w = avail.min(top as f32 * w_single.max(w_group));
+                    ui.allocate_ui_with_layout(egui::vec2(block_w, 44.0), egui::Layout::top_down(egui::Align::Max), |ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        for row in [&chips[..top], &chips[top..]] {
+                            ui.allocate_ui_with_layout(egui::vec2(block_w, 18.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                for chip in row {
+                                    draw(ui, chip);
+                                    ui.add_space(10.0);
+                                }
+                            });
+                        }
+                    });
                 }
             });
         });
