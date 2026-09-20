@@ -50,6 +50,19 @@
         "resizable": true,
         "center": true,
         "visible": false
+      },
+      {
+        "label": "gamepad",
+        "title": "Monadeck Gamepad Remaps",
+        "url": "/gamepad",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 860,
+        "minHeight": 540,
+        "decorations": false,
+        "resizable": true,
+        "center": true,
+        "visible": false
       }
     ],
     "security": {

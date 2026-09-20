@@ -26,6 +26,17 @@ export async function openBindings() {
 }
 
 
+/// The gamepad remap editor (gaming mode profiles) — same show/focus dance
+/// as the binding editor; it reloads its list on focus-gain.
+export async function openGamepad() {
+  const win = await Window.getByLabel("gamepad");
+  if (win) {
+    await win.show();
+    await win.unminimize();
+    await win.setFocus();
+  }
+}
+
 export async function openSettings(section: SettingsSection = "general") {
   const win = await Window.getByLabel("settings");
 

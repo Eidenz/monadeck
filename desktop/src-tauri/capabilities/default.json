@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capabilities for the deck + settings windows",
-  "windows": ["main", "settings", "bindings"],
+  "windows": ["main", "settings", "bindings", "gamepad"],
   "permissions": [
     "core:default",
     "opener:default",

@@ -6,6 +6,7 @@
 mod beyond;
 mod bindings;
 mod commands;
+mod gamepad;
 mod overlay;
 mod state;
 mod wivrn_watch;
@@ -150,6 +151,10 @@ pub fn run() {
             bindings::remove_custom_cover,
             bindings::get_custom_paths,
             bindings::set_custom_paths,
+            gamepad::gamepad_profiles_list,
+            gamepad::gamepad_profiles_dir,
+            gamepad::gamepad_profile_save,
+            gamepad::gamepad_profile_delete,
             beyond::beyond_present,
             beyond::eyetracking_status,
             beyond::eyetracking_start,
