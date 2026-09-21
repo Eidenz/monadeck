@@ -79,8 +79,13 @@
   // Now Playing (a game is running). WiVRn idles until a headset connects over
   // the network, so it gets a "Waiting for headset" stage (and "Running
   // elsewhere" when a server we didn't start owns the bus).
+  // A freeze recovery stops and restarts Monado on its own: that reads as one
+  // long "Warming up…", not Stopped → Warming up.
+  const recovering = $derived(app.service.recovering);
   const heading = $derived(
-    !app.service.running
+    recovering
+      ? "Warming up…"
+      : !app.service.running
       ? isWivrn && app.service.external
         ? "Running elsewhere"
         : "Stopped"
@@ -214,8 +219,8 @@
             <div class="heading">{heading}</div>
             {#if subline}<div class="game" title={subline}>{subline}</div>{/if}
           </div>
-          {#if app.service.running}
-            <button class="pwr stop" onclick={stop} disabled={app.busy}>Stop</button>
+          {#if app.service.running || recovering}
+            <button class="pwr stop" onclick={stop} disabled={app.busy} title={recovering ? "Recovering from a display freeze · Stop keeps it stopped" : undefined}>Stop</button>
           {:else}
             <button
               class="pwr start"

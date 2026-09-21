@@ -123,12 +123,21 @@ export interface ServiceStatus {
   external: boolean;
   wivrn: WivrnStatus | null;
   exit_code: number | null;
-  // One-shot: set on the poll right after the kwin freeze watch recovered the
-  // desktop from a cold-start HMD adoption (see core::kwin_freeze).
+  // What the kwin freeze watch did (see core::kwin_freeze), until the next
+  // manual start. The same for every window and every poll.
   freeze_recovery: FreezeRecovery | null;
+  // The freeze watch is stopping + restarting the service right now.
+  recovering: boolean;
+  // The last stop was ours (Stop button / freeze recovery), not a crash.
+  deliberate_stop: boolean;
 }
 
 export interface FreezeRecovery {
+  // Bumped per freeze event, so a dismissal can be remembered.
+  seq: number;
+  // The automatic restart: none | pending | ok | failed.
+  restart: "none" | "pending" | "ok" | "failed";
+  restart_error: string | null;
   // Outputs the watch told kwin to drop (the wrongly adopted HMD connector).
   // Empty means the freeze was detected but the output couldn't be identified.
   disabled_outputs: string[];

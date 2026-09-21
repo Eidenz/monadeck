@@ -27,6 +27,8 @@ export const app = $state({
     wivrn: null,
     exit_code: null,
     freeze_recovery: null,
+    recovering: false,
+    deliberate_stop: false,
   } as ServiceStatus,
   runtime: { openxr: "none", openvr: "none" } as RuntimeStatus,
   caps: "no_binary" as CapStatus,
@@ -74,6 +76,17 @@ export const app = $state({
 // Crash detection: a running→stopped transition we didn't initiate.
 let wasRunning = false;
 let intendedStop = false;
+// The freeze notice this window dismissed (the backend keeps the report until
+// the next manual start), and when a successful recovery was first seen (it
+// needs no action, so it clears itself).
+let dismissedFreezeSeq = 0;
+let freezeOkSince: { seq: number; at: number } | null = null;
+const FREEZE_OK_LINGER_MS = 20000;
+
+export function dismissFreeze() {
+  if (app.freeze) dismissedFreezeSeq = app.freeze.seq;
+  app.freeze = null;
+}
 
 export async function loadInitial() {
   app.version = await api.appVersion();
@@ -240,19 +253,28 @@ export async function refreshStatus() {
     app.service = await api.serviceStatus();
     app.runtime = await api.runtimeStatus();
     app.caps = await api.capabilitiesStatus();
-    // The backend reports a freeze recovery exactly once; latch it here so the
-    // toast survives subsequent polls until dismissed.
-    if (app.service.freeze_recovery) {
-      app.freeze = app.service.freeze_recovery;
-      // A stop by the freeze watch is deliberate, not a crash.
-      if (app.freeze.service_stopped) intendedStop = true;
+    // The backend holds the freeze report for every window and every poll, so
+    // the notice follows it live (pending → ok / failed) unless dismissed here.
+    const f = app.service.freeze_recovery;
+    if (f && f.seq !== dismissedFreezeSeq) {
+      if (f.restart === "ok") {
+        if (freezeOkSince?.seq !== f.seq) freezeOkSince = { seq: f.seq, at: Date.now() };
+        if (Date.now() - freezeOkSince.at > FREEZE_OK_LINGER_MS) dismissedFreezeSeq = f.seq;
+      }
+      app.freeze = f.seq !== dismissedFreezeSeq ? f : null;
+    } else {
+      app.freeze = null;
     }
-    // Running again (the watch's restart): a pending suppression is stale.
+    // A freeze recovery that brought Monado back is not a crash: drop a crash
+    // notice raised before the report reached this window.
+    if (app.crash && (app.service.recovering || f?.restart === "ok")) app.crash = null;
     if (!wasRunning && app.service.running) intendedStop = false;
-    // The service went from running to stopped — if we didn't ask for it, it
-    // crashed (or failed to bring up a system); surface a toast.
+    // The service went from running to stopped — if nobody asked for it (the
+    // Stop button here or in another window, or the freeze recovery), it
+    // crashed or failed to bring up a system; surface a notice.
     if (wasRunning && !app.service.running) {
-      if (!intendedStop) app.crash = { code: app.service.exit_code };
+      const ours = intendedStop || app.service.deliberate_stop || app.service.recovering;
+      if (!ours) app.crash = { code: app.service.exit_code };
       intendedStop = false;
     }
     wasRunning = app.service.running;
@@ -369,6 +391,7 @@ export async function start() {
   app.error = "";
   app.crash = null;
   app.freeze = null;
+  freezeOkSince = null;
   try {
     await api.startService();
   } catch (e) {
