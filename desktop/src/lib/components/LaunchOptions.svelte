@@ -22,7 +22,9 @@
       <div class="lo-title">Steam launch options</div>
       <div class="lo-sub">
         Paste into a game's <b>Properties → Launch Options</b> so it picks up
-        monado + xrizer through the Proton sandbox.
+        monado + xrizer through the Proton sandbox. The two SDL variables keep
+        gaming mode's virtual gamepad out of the VR game (needed on Valve's
+        Proton; GE-Proton games get it automatically).
       </div>
     </div>
     <button class="copy" onclick={copy}>{copied ? "Copied ✓" : "Copy"}</button>

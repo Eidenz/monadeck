@@ -16,6 +16,8 @@ const PX: (usize, usize) = (960, 280);
 const MINI_PX: (usize, usize) = (420, 160);
 /// The dashboard's bottom bar.
 const BOTTOM_PX: (usize, usize) = (1640, 151);
+/// The launch popup.
+const LAUNCH_PX: (usize, usize) = (840, 480);
 
 /// (name, toast, extra queued, frames as (suffix, seconds since shown)).
 type Case = (&'static str, Toast, usize, Vec<(&'static str, f32)>);
@@ -148,6 +150,22 @@ pub fn run(dir: &Path) -> Result<()> {
         let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
         let path = dir.join(format!("{name}.png"));
         rasterise(&prims, &textures, out.pixels_per_point, MINI_PX).save(&path)?;
+        println!("{}", path.display());
+    }
+    // The launch popup: loading, then the outcome it shows before closing.
+    for (name, status, glyph) in [
+        ("launch-loading", "Loading…", crate::ui::LaunchGlyph::Spinner),
+        ("launch-done", "", crate::ui::LaunchGlyph::Done),
+        ("launch-failed", "Failed to launch", crate::ui::LaunchGlyph::Failed),
+    ] {
+        let hero = crate::games::ArtState::Missing;
+        let out = ctx.run(screen_input(LAUNCH_PX, 1.0), |ctx| crate::ui::build_launch_popup(ctx, "VaM VR", status, &hero, glyph));
+        for (id, delta) in &out.textures_delta.set {
+            apply_delta(&mut textures, *id, delta);
+        }
+        let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+        let path = dir.join(format!("{name}.png"));
+        rasterise(&prims, &textures, out.pixels_per_point, LAUNCH_PX).save(&path)?;
         println!("{}", path.display());
     }
     // The dashboard's bottom bar with three screens up, under a growing pile of

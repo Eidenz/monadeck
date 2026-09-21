@@ -44,6 +44,7 @@ pub mod steam;
 pub mod steamvr;
 pub mod survive_calibration;
 pub mod uevr;
+pub mod vr_games;
 pub mod wivrn;
 
 pub use config::MonadeckConfig;

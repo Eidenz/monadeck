@@ -49,6 +49,11 @@ pub struct LibGame {
     pub start_dir: Option<String>,
     /// The game looks like an Unreal Engine title UEVR can inject (gates the toggle).
     pub uevr_capable: bool,
+    /// A VR game as far as Steam's data says (the overlay also learns from
+    /// games it sees as XR clients — see `vr_games`).
+    pub vr: bool,
+    /// Its Steam launch options already hide gaming mode's pad.
+    pub pad_hidden_by_options: bool,
     pub last_played: Option<u64>,
     pub size_on_disk: Option<u64>,
     /// Steam's own playtime, if known.
@@ -117,6 +122,8 @@ pub fn to_games(rows: Vec<steam::LibraryGame>) -> Vec<LibGame> {
                 exe: g.exe,
                 start_dir: g.start_dir,
                 uevr_capable: g.uevr_capable,
+                vr: g.vr_hint,
+                pad_hidden_by_options: g.pad_hidden_by_options,
                 last_played: g.last_played,
                 size_on_disk: g.size_on_disk,
                 playtime_minutes: g.playtime_minutes,

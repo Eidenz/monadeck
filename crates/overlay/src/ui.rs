@@ -152,6 +152,8 @@ pub struct LibState {
     pub game_profile_select: Option<usize>,
     pub game_profiles_reload: bool,
     pub game_rumble: bool,
+    pub game_hide_pad: bool,       // keep the virtual pad out of VR games (protonfixes local fix)
+    pub game_protonfixes_ok: bool, // a GE-style Proton is installed (the fix is only read by those)
     pub game_pad_ok: bool,
     pub game_pad_error: Option<String>,
     pub game_handheld_width: f32,
@@ -412,6 +414,8 @@ impl LibState {
             game_profile_select: None,
             game_profiles_reload: false,
             game_rumble: true,
+            game_hide_pad: true,
+            game_protonfixes_ok: true,
             game_pad_ok: false,
             game_pad_error: None,
             game_handheld_width: 0.6,
@@ -2433,6 +2437,7 @@ fn controls_card(ui: &mut egui::Ui) {
                 ("Left system button", "dashboard as usual — every hand points while it's up"),
                 ("Watch › screen button", "World · Head (trails you) · Hands (held like a handheld)"),
                 ("Watch › sliders", "remap profile (JSON in ~/.config/monadeck/gamepad_profiles) · Guide button"),
+                ("VR game behind reacts to the pad", "a VR game reads the virtual pad as its own gamepad (VRChat mutes, opens menus). Once Monadeck has seen a game running in VR it hides the pad from it on GE-style Protons, from that game's next launch. On Valve's Proton only launch options work: paste the ones from Monadeck's desktop app (they carry SDL_GAMECONTROLLER_IGNORE_DEVICES=0x045e/0x028e) into the game in Steam"),
             ],
         ),
         (
@@ -2667,7 +2672,17 @@ fn reset_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 /// spinner, title, and status line. Shown while a game starts up, independent of
 /// the dashboard, so closing the overlay doesn't hide it. The panel is cleared
 /// transparent, so the rounded card is the whole visible popup.
-pub fn build_launch_popup(ctx: &egui::Context, name: &str, status: &str, hero: &ArtState) {
+/// What sits above the title on the launch popup.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LaunchGlyph {
+    Spinner,
+    /// The game is up (shown briefly before the popup closes).
+    Done,
+    /// It didn't make it.
+    Failed,
+}
+
+pub fn build_launch_popup(ctx: &egui::Context, name: &str, status: &str, hero: &ArtState, glyph: LaunchGlyph) {
     egui::Area::new(egui::Id::new("launch-popup")).fixed_pos(egui::pos2(0.0, 0.0)).show(ctx, |ui| {
         let rect = ctx.screen_rect().shrink(5.0);
         let radius = egui::CornerRadius::same(26);
@@ -2697,7 +2712,15 @@ pub fn build_launch_popup(ctx: &egui::Context, name: &str, status: &str, hero: &
         // Centred content: spinner, title, status.
         let c = rect.center();
         let spin = egui::Rect::from_center_size(egui::pos2(c.x, c.y - 66.0), egui::vec2(46.0, 46.0));
-        ui.put(spin, egui::Spinner::new().size(44.0).color(theme::PRIMARY));
+        match glyph {
+            LaunchGlyph::Spinner => {
+                ui.put(spin, egui::Spinner::new().size(44.0).color(theme::PRIMARY));
+            }
+            LaunchGlyph::Done | LaunchGlyph::Failed => {
+                let (icon_glyph, color) = if glyph == LaunchGlyph::Done { (icon::CHECK_CIRCLE, RUNNING_GREEN) } else { (icon::X_CIRCLE, STOP_RED) };
+                painter.text(spin.center(), egui::Align2::CENTER_CENTER, icon_glyph, egui::FontId::proportional(52.0), color);
+            }
+        }
         painter.text(
             egui::pos2(c.x, c.y),
             egui::Align2::CENTER_CENTER,
@@ -3716,6 +3739,13 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
             setting_row(ui, "Rumble", Some("Game rumble becomes controller haptics · low motor left, high motor right"), |ui| {
                 seg_toggle(ui, &mut st.game_rumble);
             });
+            divider(ui);
+            setting_row(ui, "Hide the pad from VR games", Some("The VR game behind would read the pad as its own gamepad (VRChat mutes and opens menus) · for games Monadeck has seen running in VR: a small per-game Proton fix, from the game's next launch"), |ui| {
+                seg_toggle(ui, &mut st.game_hide_pad);
+            });
+            if st.game_hide_pad && !st.game_protonfixes_ok {
+                ui.label(egui::RichText::new(format!("{}  No GE-style Proton found: the fix is only read by GE-Proton and its derivatives. With Valve's Proton, paste the launch options from Monadeck's desktop app into the game (see Controls › Help).", icon::WARNING)).size(12.0).color(egui::Color32::from_rgb(255, 170, 90)));
+            }
             divider(ui);
             setting_row(ui, "Remap profile", Some("JSON files in ~/.config/monadeck/gamepad_profiles · a profile's \"game\" picks it when that game launches"), |ui| {
                 if action_button(ui, icon::ARROW_CLOCKWISE, "Reload").clicked() {
