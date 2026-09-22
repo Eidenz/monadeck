@@ -35,6 +35,10 @@ pub fn steam_launch_options(cfg: &MonadeckConfig) -> String {
     }
 
     parts.push("PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1".to_string());
+    // Keep gaming mode's virtual pad out of VR games (they'd read it as their
+    // own gamepad). GE-style Protons get this from a local fix automatically;
+    // Valve's Proton only honours launch options.
+    parts.push(crate::vr_games::pad_launch_option_vars());
     parts.push("%command%".to_string());
     parts.join(" ")
 }

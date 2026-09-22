@@ -137,6 +137,9 @@ pub struct OverlayConfig {
     pub game_handheld_width: f32,
     /// Remap profile last picked (by name; None = the stock Xbox layout).
     pub game_profile: Option<String>,
+    /// Keep gaming mode's virtual pad away from VR games (they would read it
+    /// as a gamepad behind your flat game): a per-game Proton local fix.
+    pub game_hide_pad_from_vr: bool,
 }
 
 impl Default for OverlayConfig {
@@ -200,6 +203,7 @@ impl Default for OverlayConfig {
             game_dock: "world".into(),
             game_handheld_width: 0.6,
             game_profile: None,
+            game_hide_pad_from_vr: true,
             watch_mini: false,
             keyboard_haptics: true,
             osc_enabled: false,

@@ -2,7 +2,7 @@
 //! the blocking ones (start/stop/setcap) run on `spawn_blocking` so the IPC
 //! runtime stays free.
 
-use crate::state::AppState;
+use crate::state::{AppState, FreezeReport, RestartState};
 use monadeck_core::active_runtime::{self, ActiveRuntimeKind};
 use monadeck_core::config::{Backend, MonadeckConfig, OvrRuntime};
 use monadeck_core::desktop::{self, InstalledApp};
@@ -46,9 +46,14 @@ pub struct ServiceStatus {
     /// WiVRn only: the server's exported state, while reachable.
     wivrn: Option<WivrnStatus>,
     exit_code: Option<i32>,
-    /// Set (once) when the kwin freeze watch recovered the desktop from a
-    /// cold-start HMD adoption; the UI turns it into a toast.
-    freeze_recovery: Option<monadeck_core::kwin_freeze::FreezeRecovery>,
+    /// What the kwin freeze watch did, until the next manual start. The same
+    /// for every window and every poll; the UI turns it into a notice.
+    freeze_recovery: Option<crate::state::FreezeReport>,
+    /// The freeze watch is stopping + restarting the service: show "Warming
+    /// up…", not "Stopped".
+    recovering: bool,
+    /// The last stop was ours (Stop button / freeze recovery), not a crash.
+    deliberate_stop: bool,
 }
 
 #[derive(Serialize)]
@@ -157,7 +162,12 @@ pub async fn service_status(state: State<'_, AppState>) -> CmdResult<ServiceStat
             external,
             wivrn: wivrn_status,
             exit_code,
-            freeze_recovery: st.freeze_watch.lock().unwrap().take_result(),
+            freeze_recovery: {
+                merge_freeze(&st);
+                st.freeze_report.lock().unwrap().clone()
+            },
+            recovering: st.recovering.load(Ordering::SeqCst),
+            deliberate_stop: st.deliberate_stop.load(Ordering::SeqCst),
         }
     })
     .await
@@ -324,8 +334,11 @@ fn register_openvr(cfg: &MonadeckConfig) -> CmdResult<()> {
 pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
-        // A start by hand renews the freeze watch's one automatic retry.
+        // A start by hand renews the freeze watch's one automatic retry, and
+        // closes the book on the previous freeze.
         st.freeze_auto_restarted.store(false, Ordering::SeqCst);
+        st.recovery_cancelled.store(false, Ordering::SeqCst);
+        *st.freeze_report.lock().unwrap() = None;
         let cfg = st.config.lock().unwrap().clone();
         match cfg.backend {
             Backend::Monado => start_monado(&st, cfg),
@@ -433,6 +446,8 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
         .unwrap()
         .start(&bin.to_string_lossy(), &[], &env)
         .map_err(|e| format!("failed to start monado-service: {e}"))?;
+    // From here a stop we didn't ask for is a crash again.
+    st.deliberate_stop.store(false, Ordering::SeqCst);
 
     // Wait briefly for the service to accept IPC before launching plugins.
     for _ in 0..25 {
@@ -485,6 +500,7 @@ fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
         .unwrap()
         .start(&bin.to_string_lossy(), &args, &env)
         .map_err(|e| format!("failed to start wivrn-server: {e}"))?;
+    st.deliberate_stop.store(false, Ordering::SeqCst);
 
     // The bus name appears ~1–2 s after spawn; give it a moment so the deck
     // shows live status right away, but don't fail the start if it's slow.
@@ -516,19 +532,39 @@ fn arm_freeze_watch(st: &AppState) {
     let hook_st = st.clone();
     let hook: monadeck_core::kwin_freeze::StuckHook = Box::new(move || {
         let restart = !hook_st.freeze_auto_restarted.swap(true, Ordering::SeqCst);
+        // Raised before the stop so no poll can catch "stopped" in between:
+        // the deck stays on "Warming up…" through the whole recovery.
+        hook_st.recovering.store(restart, Ordering::SeqCst);
+        hook_st.recovery_cancelled.store(false, Ordering::SeqCst);
         std::thread::spawn(move || {
             log::warn!(
                 "freeze recovery: stopping monado-service{}",
                 if restart { ", then starting it again" } else { " (already retried once; not again)" }
             );
             stop_blocking(&hook_st);
+            // The stop joined the watch's reader, so its final result is in.
+            merge_freeze(&hook_st);
             if restart {
                 std::thread::sleep(Duration::from_secs(2));
-                let cfg = hook_st.config.lock().unwrap().clone();
-                if let Err(e) = start_monado(&hook_st, cfg) {
-                    log::warn!("freeze recovery: restart failed: {e}");
+                let outcome = if hook_st.recovery_cancelled.load(Ordering::SeqCst) {
+                    log::info!("freeze recovery: Stop was pressed meanwhile; not starting again");
+                    (RestartState::None, None)
+                } else {
+                    let cfg = hook_st.config.lock().unwrap().clone();
+                    match start_monado(&hook_st, cfg) {
+                        Ok(()) => (RestartState::Ok, None),
+                        Err(e) => {
+                            log::warn!("freeze recovery: restart failed: {e}");
+                            (RestartState::Failed, Some(e))
+                        }
+                    }
+                };
+                if let Some(r) = hook_st.freeze_report.lock().unwrap().as_mut() {
+                    r.restart = outcome.0;
+                    r.restart_error = outcome.1;
                 }
             }
+            hook_st.recovering.store(false, Ordering::SeqCst);
         });
         restart
     });
@@ -539,6 +575,10 @@ fn arm_freeze_watch(st: &AppState) {
 pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || -> CmdResult<()> {
+        // Stop during a freeze recovery means "stay stopped".
+        if st.recovering.load(Ordering::SeqCst) {
+            st.recovery_cancelled.store(true, Ordering::SeqCst);
+        }
         stop_blocking(&st);
         Ok(())
     })
@@ -546,8 +586,34 @@ pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
     .map_err(|e| e.to_string())?
 }
 
+/// Fold the freeze watch's take-once result into the report every window
+/// reads. The watch reports twice per event (output step, then — if still
+/// stuck — the stop), so a fresh result updates the open report.
+fn merge_freeze(st: &AppState) {
+    let Some(r) = st.freeze_watch.lock().unwrap().take_result() else { return };
+    let mut slot = st.freeze_report.lock().unwrap();
+    let same_event = slot.as_ref().is_some_and(|e| !e.service_stopped && e.created.elapsed() < Duration::from_secs(15));
+    let seq = if same_event {
+        slot.as_ref().map_or(0, |e| e.seq)
+    } else {
+        st.freeze_seq.fetch_add(1, Ordering::SeqCst) + 1
+    };
+    let created = if same_event { slot.as_ref().map_or_else(std::time::Instant::now, |e| e.created) } else { std::time::Instant::now() };
+    *slot = Some(FreezeReport {
+        seq,
+        disabled_outputs: r.disabled_outputs,
+        service_stopped: r.service_stopped,
+        restarting: r.restarting,
+        restart: if r.restarting { RestartState::Pending } else { RestartState::None },
+        restart_error: None,
+        created,
+    });
+}
+
 /// The stop itself (shared by the Stop button and the freeze recovery).
 fn stop_blocking(st: &AppState) {
+    // Ours, not a crash — flagged before the process goes away.
+    st.deliberate_stop.store(true, Ordering::SeqCst);
     let cfg = st.config.lock().unwrap().clone();
     st.freeze_watch.lock().unwrap().stop_watch();
     st.wivrn_watch.lock().unwrap().stop_watch();

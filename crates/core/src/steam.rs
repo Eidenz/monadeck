@@ -218,6 +218,12 @@ pub struct LibraryGame {
     /// The game looks like an Unreal Engine title UEVR can inject (and, for Steam,
     /// has a Proton prefix). Gates the in-headset VR-Mod toggle to UE games only.
     pub uevr_capable: bool,
+    /// Looks like a VR game from what Steam knows: a well-known VR title, VR
+    /// wiring in its launch options, or the shortcut's VR-library flag. (The
+    /// overlay adds what it learns from games that show up as XR clients.)
+    pub vr_hint: bool,
+    /// Its launch options already hide gaming mode's virtual pad.
+    pub pad_hidden_by_options: bool,
 }
 
 /// Every installed Steam game + every non-Steam shortcut, sorted by name.
@@ -225,6 +231,7 @@ pub fn scan_library() -> Vec<LibraryGame> {
     let mut games: Vec<LibraryGame> = Vec::new();
     let mut seen_app: HashSet<String> = HashSet::new();
     let playtimes = parse_playtimes();
+    let launch_opts = parse_launch_options();
 
     let roots = find_steam_roots();
     for lib in find_library_folders(&roots) {
@@ -261,6 +268,9 @@ pub fn scan_library() -> Vec<LibraryGame> {
             });
             // Only a Proton game (start_dir set) that looks like Unreal can be modded.
             let uevr_capable = start_dir.as_deref().is_some_and(|d| looks_like_ue(Path::new(d)));
+            let vr_hint = crate::vr_games::is_known_vr(&app_id)
+                || launch_opts.get(&app_id).is_some_and(|o| crate::vr_games::launch_options_look_vr(o));
+            let pad_hidden_by_options = launch_opts.get(&app_id).is_some_and(|o| crate::vr_games::launch_options_hide_pad(o));
             games.push(LibraryGame {
                 name,
                 app_id: Some(app_id),
@@ -272,6 +282,8 @@ pub fn scan_library() -> Vec<LibraryGame> {
                 exe: None,
                 start_dir,
                 uevr_capable,
+                vr_hint,
+                pad_hidden_by_options,
             });
         }
     }
@@ -296,6 +308,8 @@ pub fn scan_library() -> Vec<LibraryGame> {
             }
         };
         let uevr_capable = looks_like_ue(&ue_dir);
+        let vr_hint = s.openvr || crate::vr_games::launch_options_look_vr(&s.launch_options);
+        let pad_hidden_by_options = crate::vr_games::launch_options_hide_pad(&s.launch_options);
         games.push(LibraryGame {
             name,
             app_id: None,
@@ -307,6 +321,8 @@ pub fn scan_library() -> Vec<LibraryGame> {
             exe: Some(s.exe),
             start_dir: Some(s.start_dir),
             uevr_capable,
+            vr_hint,
+            pad_hidden_by_options,
         });
     }
 
@@ -323,6 +339,18 @@ pub fn has_proton_prefix(appid: &str) -> bool {
     find_library_folders(&roots)
         .into_iter()
         .any(|lib| lib.join("steamapps").join("compatdata").join(appid).is_dir())
+}
+
+/// The Proton version a game's prefix was last set up by (`compatdata/<appid>/
+/// version`, e.g. "GE-Proton11-7"), across every Steam library. It changes
+/// when a launch upgrades the prefix — which is when first launches tend to die.
+pub fn prefix_version(appid: &str) -> Option<String> {
+    let roots = find_steam_roots();
+    find_library_folders(&roots).into_iter().find_map(|lib| {
+        let v = fs::read_to_string(lib.join("steamapps").join("compatdata").join(appid).join("version")).ok()?;
+        let v = v.trim().to_string();
+        (!v.is_empty()).then_some(v)
+    })
 }
 
 /// Cheap heuristic: does this install dir look like an Unreal Engine game UEVR can
@@ -408,6 +436,74 @@ fn vdf_tokens(s: &str) -> Vec<VdfTok> {
         }
     }
     toks
+}
+
+/// Per-app Steam launch options, from every user's `localconfig.vdf`
+/// (`.../apps/<appid>/LaunchOptions`). Read-only: Steam owns that file.
+pub fn parse_launch_options() -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for root in find_steam_roots() {
+        let Ok(users) = fs::read_dir(root.join("userdata")) else {
+            continue;
+        };
+        for u in users.flatten() {
+            let path = u.path().join("config").join("localconfig.vdf");
+            if let Ok(content) = fs::read_to_string(&path) {
+                parse_localconfig_launch_options(&content, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn parse_localconfig_launch_options(content: &str, out: &mut HashMap<String, String>) {
+    let toks = vdf_tokens(content);
+    let mut i = 0;
+    // `apps` appears more than once in localconfig; take every block whose
+    // children carry LaunchOptions.
+    while i + 1 < toks.len() {
+        if matches!(&toks[i], VdfTok::Str(k) if k == "apps") && matches!(toks[i + 1], VdfTok::Open) {
+            i += 2;
+            while i < toks.len() {
+                match &toks[i] {
+                    VdfTok::Close => break,
+                    VdfTok::Str(appid) if matches!(toks.get(i + 1), Some(VdfTok::Open)) => {
+                        let (value, end) = scan_block_value(&toks, i + 2, "LaunchOptions");
+                        if appid.chars().all(|c| c.is_ascii_digit()) {
+                            if let Some(v) = value.filter(|v| !v.trim().is_empty()) {
+                                out.insert(appid.clone(), v);
+                            }
+                        }
+                        i = end;
+                    }
+                    _ => i += 1,
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Scan a `{ ... }` block (starting just after its `{`) for a top-level
+/// `"<key>" "value"`; return (value, index just past the matching `}`).
+fn scan_block_value(toks: &[VdfTok], start: usize, key: &str) -> (Option<String>, usize) {
+    let mut depth = 1usize;
+    let mut value = None;
+    let mut j = start;
+    while j < toks.len() && depth >= 1 {
+        match &toks[j] {
+            VdfTok::Open => depth += 1,
+            VdfTok::Close => depth -= 1,
+            VdfTok::Str(k) if depth == 1 && k == key => {
+                if let Some(VdfTok::Str(v)) = toks.get(j + 1) {
+                    value = Some(v.clone());
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    (value, j)
 }
 
 fn parse_localconfig_playtimes(content: &str, out: &mut HashMap<String, u32>) {
@@ -638,6 +734,10 @@ pub struct Shortcut {
     pub start_dir: String,
     /// Unix timestamp last played (`LastPlayTime`), 0 if never.
     pub last_play: u32,
+    /// The shortcut's Steam launch options (env vars, `%command%`, args).
+    pub launch_options: String,
+    /// Steam's "Include in VR library" flag.
+    pub openvr: bool,
 }
 
 /// Parse every user's `shortcuts.vdf` (binary VDF). Forgiving: we scan for the
@@ -682,6 +782,8 @@ fn parse_shortcuts_bytes(data: &[u8]) -> Vec<Shortcut> {
             exe: vdf_str(seg, b"\x01Exe\x00").unwrap_or_default(),
             start_dir: vdf_str(seg, b"\x01StartDir\x00").unwrap_or_default(),
             last_play: vdf_i32(seg, b"\x02LastPlayTime\x00").unwrap_or(0),
+            launch_options: vdf_str(seg, b"\x01LaunchOptions\x00").unwrap_or_default(),
+            openvr: vdf_i32(seg, b"\x02OpenVR\x00").unwrap_or(0) != 0,
         });
     }
     shortcuts

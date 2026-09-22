@@ -14,6 +14,7 @@ mod gamemode;
 mod gamepad;
 mod games;
 mod gfx;
+mod launch;
 mod mathx;
 mod media;
 mod monado;
@@ -75,8 +76,33 @@ struct Hit {
 /// launched. Lives until the game is detected running, or `deadline` passes. The
 /// hero art is decoded on a background thread into `hero` (loaded into the popup
 /// panel's own egui context — textures are per-context).
+/// What the popup is telling you (driven by the launch tracker).
+#[derive(Clone, Copy, PartialEq)]
+enum PopupPhase {
+    /// Asked Steam; nothing running yet.
+    Starting,
+    /// The game's process is up.
+    Loading,
+    /// It died while Proton was updating its prefix; launched once more.
+    Retrying,
+    /// It's up: a green check for a moment, then the popup closes.
+    Done,
+    /// It didn't make it: a red cross and "Failed to launch", then it closes.
+    Failed,
+}
+
+/// How long the outcome stays on the popup before it closes.
+const POPUP_DONE_SECS: f32 = 2.0;
+const POPUP_FAILED_SECS: f32 = 3.0;
+
+/// The popup gives up after this long whatever happens (so it can never
+/// stick); normally the tracker dismisses it far sooner — the game is up, or
+/// it crashed / was closed.
+const POPUP_FALLBACK_SECS: u64 = 60;
+
 struct LaunchPopup {
     name: String,
+    phase: PopupPhase,
     /// VR-Mod (UEVR) launch — its status switches to the injection-wait message.
     uevr: bool,
     pose: xr::Posef,
@@ -91,10 +117,63 @@ impl LaunchPopup {
     /// The status line under the title. A UEVR launch shows a brief "Starting…"
     /// then the injection-wait message (chihuahua waits before injecting).
     fn status(&self) -> &'static str {
-        if self.uevr && self.started.elapsed().as_secs_f32() > 1.5 {
+        if self.phase == PopupPhase::Done {
+            ""
+        } else if self.phase == PopupPhase::Failed {
+            "Failed to launch"
+        } else if self.phase == PopupPhase::Retrying {
+            "Proton updated this game's files · launching again…"
+        } else if self.uevr && self.started.elapsed().as_secs_f32() > 1.5 {
             "Waiting for VR Mod injection…"
+        } else if self.phase == PopupPhase::Loading {
+            "Loading…"
         } else {
             "Starting…"
+        }
+    }
+
+    fn glyph(&self) -> ui::LaunchGlyph {
+        match self.phase {
+            PopupPhase::Done => ui::LaunchGlyph::Done,
+            PopupPhase::Failed => ui::LaunchGlyph::Failed,
+            _ => ui::LaunchGlyph::Spinner,
+        }
+    }
+
+    /// Show the outcome for a moment, then close (via the deadline).
+    fn finish(&mut self, ok: bool) {
+        self.phase = if ok { PopupPhase::Done } else { PopupPhase::Failed };
+        let secs = if ok { POPUP_DONE_SECS } else { POPUP_FAILED_SECS };
+        self.deadline = Instant::now() + std::time::Duration::from_secs_f32(secs);
+    }
+
+    fn finished(&self) -> bool {
+        matches!(self.phase, PopupPhase::Done | PopupPhase::Failed)
+    }
+
+    /// A fresh popup in front of the head; the hero art decodes on a worker and
+    /// is loaded into the popup panel's own egui context when it lands.
+    fn open(name: String, cover_id: Option<String>, uevr: bool, extra_secs: u64, hmd: Option<&xr::Posef>) -> Self {
+        let pose = match hmd {
+            Some(h) => front_pose(h, 1.25, 0.0, 0.0, false),
+            None => posef([0.0, 0.0, -1.25]),
+        };
+        let hero_rx = cover_id.map(|id| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(games::decode(&id, games::ArtKind::Hero));
+            });
+            rx
+        });
+        Self {
+            name,
+            phase: PopupPhase::Starting,
+            uevr,
+            pose,
+            started: Instant::now(),
+            deadline: Instant::now() + std::time::Duration::from_secs(POPUP_FALLBACK_SECS + extra_secs),
+            hero: games::ArtState::Idle,
+            hero_rx,
         }
     }
 }
@@ -182,6 +261,14 @@ fn main() {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
         if let Err(e) = desktop::selftest::keyboard() {
             eprintln!("keyboard selftest FAILED: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args().any(|a| a == "--launch-selftest") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Err(e) = launch::selftest() {
+            eprintln!("launch selftest FAILED: {e:#}");
             std::process::exit(1);
         }
         return;
@@ -667,7 +754,7 @@ fn run() -> Result<()> {
         ov_cfg.playspace_z,
         ov_cfg.playspace_yaw,
         ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow, ov_cfg.watch_mini, ov_cfg.keyboard_haptics, ov_cfg.osc_enabled, ov_cfg.osc_port, ov_cfg.watch_right_hand), (ov_cfg.game_rumble, ov_cfg.game_handheld_width))),
+        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow, ov_cfg.watch_mini, ov_cfg.keyboard_haptics, ov_cfg.osc_enabled, ov_cfg.osc_port, ov_cfg.watch_right_hand), (ov_cfg.game_rumble, ov_cfg.game_handheld_width, ov_cfg.game_hide_pad_from_vr))),
     );
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
@@ -764,6 +851,9 @@ fn run() -> Result<()> {
     let mut game = gamemode::GameMode::new(desktop::DockMode::parse(&ov_cfg.game_dock), ov_cfg.game_rumble, ov_cfg.game_profile.as_deref());
     desktop.handheld_width = ov_cfg.game_handheld_width.clamp(0.3, 1.2);
     st.game_rumble = ov_cfg.game_rumble;
+    st.game_hide_pad = ov_cfg.game_hide_pad_from_vr;
+    st.game_protonfixes_ok = monadeck_core::vr_games::protonfixes_available();
+    let mut hide_pad_prev = st.game_hide_pad;
     st.game_handheld_width = desktop.handheld_width;
     st.game_dock = game.dock;
     st.game_profile = game.profile_name().to_string();
@@ -813,6 +903,13 @@ fn run() -> Result<()> {
     let mut summon_at: Option<Instant> = None; // summon fade-in
     // The active launch popup (own layer; persists after the dashboard closes).
     let mut launch_popup: Option<LaunchPopup> = None;
+    // Following the last launch: is Steam's process for it up, did it die, was
+    // that a Proton prefix upgrade (then: one automatic relaunch).
+    let proc_watch = launch::ProcWatch::new();
+    let mut launch_track: Option<launch::Tracked> = None;
+    // Games seen running as XR clients (on top of what Steam's data says).
+    let mut learned_vr: HashSet<String> = monadeck_core::vr_games::load_learned();
+    let mut pad_fix_swept = false;
     // A freeze counting down before it applies: (client id, deadline).
     let mut pending_freeze: Option<(u32, Instant)> = None;
     let mut click_prev = false; // haptic click edge
@@ -892,6 +989,7 @@ fn run() -> Result<()> {
         // Drain the finished scan (metadata only; art loads lazily).
         if let Ok(rows) = scan_rx.try_recv() {
             st.games = games::to_games(rows);
+                    pad_fix_swept = false;
             apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
             st.scanning = false;
             if st.selected.is_none() && !st.games.is_empty() {
@@ -906,6 +1004,7 @@ fn run() -> Result<()> {
             if let Some(rx) = &refresh_rx {
                 if let Ok(rows) = rx.try_recv() {
                     st.games = games::to_games(rows);
+                    pad_fix_swept = false;
                     apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
                     if st.selected.map_or(false, |i| i >= st.games.len()) {
                         st.selected = (!st.games.is_empty()).then_some(0);
@@ -914,6 +1013,28 @@ fn run() -> Result<()> {
                     refresh_rx = None;
                     manual_refresh = false;
                     st.flash(format!("Library refreshed · {} games", st.games.len()));
+                }
+            }
+        }
+
+        // Games Monadeck has SEEN running in VR ignore gaming mode's pad — also
+        // when started from Steam itself. Only those: a guess from Steam's data
+        // is good enough to time the launch popup, not to write files for.
+        // Cheap (a file check per learned game), once per scan / setting-on.
+        if !pad_fix_swept && !st.games.is_empty() {
+            pad_fix_swept = true;
+            if st.game_hide_pad {
+                let mut n = 0;
+                for g in st.games.iter_mut() {
+                    let Some(id) = g.cover_id.clone() else { continue };
+                    let seen = learned_vr.contains(&id);
+                    g.vr |= seen;
+                    if seen && !g.pad_hidden_by_options && monadeck_core::vr_games::install_pad_fix(&id, &g.name) == monadeck_core::vr_games::PadFix::Installed {
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    log::info!("vr: pad fix installed for {n} VR games");
                 }
             }
         }
@@ -927,6 +1048,24 @@ fn run() -> Result<()> {
                 if secs >= 30 {
                     *playtime.entry(key).or_insert(0) += secs;
                     monadeck_core::playtime::save(&playtime);
+                }
+            }
+            // An XR client that matches a library game IS a VR game: remember it,
+            // and keep gaming mode's pad away from it from its next launch on.
+            if let Some(app) = &running {
+                if let Some(g) = st.games.iter_mut().find(|g| name_matches(&g.name, app)) {
+                    if let Some(id) = g.cover_id.clone() {
+                        g.vr = true;
+                        if learned_vr.insert(id.clone()) {
+                            monadeck_core::vr_games::save_learned(&learned_vr);
+                            log::info!("vr: learned that '{}' ({id}) is a VR game", g.name);
+                        }
+                        if st.game_hide_pad && !g.pad_hidden_by_options && monadeck_core::vr_games::install_pad_fix(&id, &g.name) == monadeck_core::vr_games::PadFix::Installed {
+                            toasts.push(
+                                toast::Toast::new(toast::Kind::Info, format!("{} · pad hidden from its next launch", g.name), "Gaming mode's gamepad stays out of this VR game once it restarts").secs(5.0),
+                            );
+                        }
+                    }
                 }
             }
             // Open a new session for the now-running game (if we can key it).
@@ -1185,19 +1324,85 @@ fn run() -> Result<()> {
                     p.hero_rx = None;
                 }
             }
-            let appeared = running.as_ref().map_or(false, |app| name_matches(&p.name, app));
-            if appeared || now >= p.deadline {
+        }
+        // The tracker decides: up (dismiss), died (dismiss + say so, or relaunch
+        // once after a Proton prefix upgrade), or still coming.
+        if let Some(t) = &mut launch_track {
+            let appeared = running.as_ref().is_some_and(|app| name_matches(&t.name, app));
+            let id = t.id.clone();
+            let outcome = t.poll(proc_watch.state(), appeared, now, || monadeck_core::steam::prefix_version(&id));
+            let ours = |p: &Option<LaunchPopup>, name: &str| p.as_ref().is_some_and(|p| p.name == name);
+            match &outcome {
+                launch::Outcome::Launched => {
+                    log::info!("launch: '{}' is up", t.name);
+                    if ours(&launch_popup, &t.name) {
+                        if let Some(p) = launch_popup.as_mut() {
+                            p.finish(true);
+                        }
+                    }
+                    proc_watch.watch(None);
+                    launch_track = None;
+                }
+                launch::Outcome::Exited { upgraded, after } => {
+                    if t.should_retry(&outcome) {
+                        log::info!("launch: '{}' died {:.0} s in during a Proton prefix upgrade — launching it once more", t.name, after.as_secs_f32());
+                        launch_game_id(&t.game_id, &t.name);
+                        t.restart(monadeck_core::steam::prefix_version(&id));
+                        let mut p = LaunchPopup::open(t.name.clone(), Some(id.clone()), false, 0, hmd.as_ref());
+                        p.phase = PopupPhase::Retrying;
+                        launch_popup = Some(p);
+                    } else {
+                        log::info!("launch: '{}' exited {:.0} s after launch (prefix upgraded: {upgraded})", t.name, after.as_secs_f32());
+                        // Say so on the popup itself (brought back if its fallback
+                        // already closed it): a red cross, then it closes.
+                        if !ours(&launch_popup, &t.name) {
+                            launch_popup = Some(LaunchPopup::open(t.name.clone(), Some(id.clone()), false, 0, hmd.as_ref()));
+                        }
+                        if let Some(p) = launch_popup.as_mut() {
+                            p.finish(false);
+                        }
+                        proc_watch.watch(None);
+                        launch_track = None;
+                    }
+                }
+                launch::Outcome::Pending => {
+                    if t.process_seen() {
+                        if let Some(p) = launch_popup.as_mut().filter(|p| p.name == t.name && p.phase == PopupPhase::Starting) {
+                            p.phase = PopupPhase::Loading;
+                        }
+                    }
+                    if t.expired(now) {
+                        proc_watch.watch(None);
+                        launch_track = None;
+                    }
+                }
+            }
+        }
+        // The deadline: an outcome has been shown long enough, or the 60 s
+        // fallback hit (the popup must never stick). A fallback with no process
+        // ever seen means Steam never started it: that's a failure to show too.
+        if launch_popup.as_ref().is_some_and(|p| now >= p.deadline) {
+            let never_started = launch_popup.as_ref().is_some_and(|p| !p.finished())
+                && launch_track.as_ref().is_some_and(|t| launch_popup.as_ref().is_some_and(|p| p.name == t.name) && !t.process_seen());
+            if never_started {
+                log::info!("launch: Steam never started it (a dialog on the desktop?)");
+                if let Some(p) = launch_popup.as_mut() {
+                    p.finish(false);
+                }
+                proc_watch.watch(None);
+                launch_track = None;
+            } else {
                 launch_popup = None;
             }
         }
         let popup_active = launch_popup.is_some();
         if let Some(p) = &launch_popup {
             launch_panel.pose = p.pose;
-            let (name, status, hero) = (&p.name, p.status(), &p.hero);
+            let (name, status, hero, glyph) = (&p.name, p.status(), &p.hero, p.glyph());
             render_panel(
                 &mut launch_panel, &device, render_pass, cmd, cmd_pool, queue, fence,
                 true, None, (0.0, 0.0), start.elapsed().as_secs_f64(),
-                |ctx| ui::build_launch_popup(ctx, name, status, hero),
+                |ctx| ui::build_launch_popup(ctx, name, status, hero, glyph),
             )?;
         }
 
@@ -2032,6 +2237,7 @@ fn run() -> Result<()> {
             if let Some(rx) = &refresh_rx {
                 if let Ok(rows) = rx.try_recv() {
                     st.games = games::to_games(rows);
+                    pad_fix_swept = false;
                     apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
                     st.selected = (!st.games.is_empty()).then_some(0);
                     last_used.clear();
@@ -2108,6 +2314,12 @@ fn run() -> Result<()> {
             if let Some(s) = &sky_layer {
                 layers.push(s);
             }
+            // The launch popup sits beneath everything of ours: screens, the
+            // keyboard, photos and the watch all cover it.
+            if popup_active {
+                popup_q = quad_layer(&launch_panel, &space, true);
+                layers.push(&popup_q);
+            }
             for q in &screen_quads {
                 layers.push(q);
             }
@@ -2126,10 +2338,6 @@ fn run() -> Result<()> {
             let photo_qs = photos.layers(&space);
             for q in &photo_qs {
                 layers.push(q);
-            }
-            if popup_active {
-                popup_q = quad_layer(&launch_panel, &space, true);
-                layers.push(&popup_q);
             }
             if toast_active {
                 toast_q = quad_layer(&toast_panel, &space, true);
@@ -2466,9 +2674,15 @@ fn run() -> Result<()> {
         }
         let dock_q = d_in.dock_hint.as_ref().map(|(p, h, _, _, _)| gfx::bar_quad(&marker, &space, *p, *h));
         let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
+        let popup_q;
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
         if let Some(s) = &sky_layer {
             layers.push(s);
+        }
+        // Beneath the dashboard and the screens (see the hidden path).
+        if popup_active {
+            popup_q = quad_layer(&launch_panel, &space, true);
+            layers.push(&popup_q);
         }
         // Screens first: they sit behind the dashboard in the composite.
         for q in &screen_quads {
@@ -2505,11 +2719,7 @@ fn run() -> Result<()> {
             layers.push(&rail_quad);
             layers.push(&bottom_quad);
         }
-        let (toast_q, popup_q);
-        if popup_active {
-            popup_q = quad_layer(&launch_panel, &space, true);
-            layers.push(&popup_q);
-        }
+        let toast_q;
         if toast_active {
             toast_q = quad_layer(&toast_panel, &space, true);
             layers.push(&toast_q);
@@ -2554,11 +2764,33 @@ fn run() -> Result<()> {
                     ));
                     st.sound_tab = true;
                 } else {
+                    // A VR game must not read gaming mode's pad as a gamepad of its
+                    // own: make sure its per-game fix is in place before it starts.
+                    let seen_in_vr = g.cover_id.as_ref().is_some_and(|id| learned_vr.contains(id));
+                    let is_vr = g.vr || seen_in_vr;
+                    if seen_in_vr && st.game_hide_pad && !g.pad_hidden_by_options {
+                        if let Some(id) = &g.cover_id {
+                            let r = monadeck_core::vr_games::install_pad_fix(id, &g.name);
+                            log::info!("vr: pad fix for '{}' ({id}): {r:?}", g.name);
+                        }
+                    }
+                    let prefix_before = g.cover_id.as_deref().and_then(monadeck_core::steam::prefix_version);
                     if g.uevr {
                         launch_uevr(g, st.uevr_delay);
                     } else {
                         launch_game(g);
                     }
+                    // Follow it: process up / died / died on a Proton prefix upgrade.
+                    launch_track = match (&g.cover_id, steam_game_id(g)) {
+                        (Some(id), Some(game_id)) => {
+                            proc_watch.watch(Some(id.clone()));
+                            Some(launch::Tracked::new(g.name.clone(), id.clone(), game_id, is_vr, g.uevr, prefix_before))
+                        }
+                        _ => {
+                            proc_watch.watch(None);
+                            None
+                        }
+                    };
                     // A remap profile made for this game takes over.
                     if let Some(p) = game.auto_select(&g.name) {
                         log::info!("gaming: profile '{p}' picked for '{}'", g.name);
@@ -2567,35 +2799,13 @@ fn run() -> Result<()> {
                     st.click_pulse = false; // the launch chime is the click
                     // Hand off to the standalone launch popup (SteamVR-style): close
                     // the dashboard and put a "now starting" card in front of the
-                    // head. Assigning `launch_popup` below replaces any popup already
-                    // showing, so launching another game just takes over (no stacking).
-                    // It lives until the game appears as a running client or a short
-                    // timeout — since we can't detect a crash/close mid-load, the popup
-                    // gives up quickly rather than lingering: 15 s for a normal game,
-                    // uevr_delay + 15 s for a UEVR game (chihuahua waits before injecting).
-                    let timeout = if g.uevr { st.uevr_delay as u64 + 15 } else { 15 };
-                    let pose = match hmd {
-                        Some(h) => front_pose(&h, 1.25, 0.0, 0.0, false),
-                        None => posef([0.0, 0.0, -1.25]),
-                    };
-                    // Decode the hero art on a worker; loaded into the popup panel's
-                    // own egui context when it lands (textures are per-context).
-                    let hero_rx = g.cover_id.clone().map(|id| {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(games::decode(&id, games::ArtKind::Hero));
-                        });
-                        rx
-                    });
-                    launch_popup = Some(LaunchPopup {
-                        name: g.name.clone(),
-                        uevr: g.uevr,
-                        pose,
-                        started: Instant::now(),
-                        deadline: Instant::now() + std::time::Duration::from_secs(timeout),
-                        hero: games::ArtState::Idle,
-                        hero_rx,
-                    });
+                    // head. Assigning `launch_popup` replaces any popup already showing,
+                    // so launching another game just takes its place (no stacking).
+                    // The tracker dismisses it when the game is up or has died; the
+                    // 60 s fallback (plus the injection wait for a UEVR game) only
+                    // exists so it can never stick.
+                    let extra = if g.uevr { st.uevr_delay as u64 } else { 0 };
+                    launch_popup = Some(LaunchPopup::open(g.name.clone(), g.cover_id.clone(), g.uevr, extra, hmd.as_ref()));
                     visible = false;
                     launched = true;
                 }
@@ -2625,7 +2835,7 @@ fn run() -> Result<()> {
             st.playspace_z,
             st.playspace_yaw,
             st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow, st.watch_mini, st.keyboard_haptics, st.osc_enabled, st.osc_port as u16, st.watch_right_hand), (st.game_rumble, st.game_handheld_width))),
+            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow, st.watch_mini, st.keyboard_haptics, st.osc_enabled, st.osc_port as u16, st.watch_right_hand), (st.game_rumble, st.game_handheld_width, st.game_hide_pad))),
         );
         if settings_now != settings_prev {
             audio.set_enabled(st.audio_enabled);
@@ -2638,6 +2848,15 @@ fn run() -> Result<()> {
             desktop.scroll_speed = st.scroll_speed;
             desktop.drag_threshold_px = st.drag_threshold_px as f64;
             game.rumble_enabled = st.game_rumble;
+            if st.game_hide_pad != hide_pad_prev {
+                hide_pad_prev = st.game_hide_pad;
+                if st.game_hide_pad {
+                    pad_fix_swept = false; // sweep the library again below
+                } else {
+                    let n = monadeck_core::vr_games::remove_all_pad_fixes();
+                    st.flash(format!("Pad fix removed from {n} VR games"));
+                }
+            }
             settings_prev = settings_now;
             overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
@@ -2997,6 +3216,7 @@ fn overlay_config_from(
         watch_mini: st.watch_mini,
         keyboard_haptics: st.keyboard_haptics,
         game_rumble: st.game_rumble,
+        game_hide_pad_from_vr: st.game_hide_pad,
         game_dock: st.game_dock.as_str().to_string(),
         game_handheld_width: st.game_handheld_width,
         game_profile: Some(st.game_profile.clone()),
@@ -3145,26 +3365,34 @@ fn deadzone(x: f32, y: f32) -> (f32, f32) {
     (x * scale, y * scale)
 }
 
-/// Launch a game via `steam://rungameid/<id>` so the user's per-game launch
-/// options (the VR wrapper) are honoured. Steam apps: id == appid. Non-Steam
-/// shortcuts: the 64-bit game id `(appid << 32) | 0x02000000`.
-fn launch_game(g: &games::LibGame) {
-    let game_id = if let Some(id) = &g.app_id {
-        id.clone()
-    } else if let Some(sid) = g.shortcut_id.as_ref().and_then(|s| s.parse::<u64>().ok()) {
-        ((sid << 32) | 0x0200_0000).to_string()
+/// The `steam://rungameid/` value for a game. Steam apps: id == appid.
+/// Non-Steam shortcuts: the 64-bit game id `(appid << 32) | 0x02000000`.
+fn steam_game_id(g: &games::LibGame) -> Option<String> {
+    if let Some(id) = &g.app_id {
+        Some(id.clone())
     } else {
-        log::warn!("'{}' has no launch id — can't launch it", g.name);
-        return;
-    };
+        g.shortcut_id.as_ref().and_then(|s| s.parse::<u64>().ok()).map(|sid| ((sid << 32) | 0x0200_0000).to_string())
+    }
+}
+
+/// Launch a game via `steam://rungameid/<id>` so the user's per-game launch
+/// options (the VR wrapper) are honoured.
+fn launch_game(g: &games::LibGame) {
+    match steam_game_id(g) {
+        Some(game_id) => launch_game_id(&game_id, &g.name),
+        None => log::warn!("'{}' has no launch id — can't launch it", g.name),
+    }
+}
+
+fn launch_game_id(game_id: &str, name: &str) {
     let uri = format!("steam://rungameid/{game_id}");
-    log::info!("launching '{}' via {}", g.name, uri);
+    log::info!("launching '{name}' via {uri}");
     let spawn = |bin: &str| {
         Command::new(bin).arg(&uri).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
     };
     if spawn("steam").is_err() {
         if let Err(e) = spawn("xdg-open") {
-            log::warn!("failed to launch '{}': {e}", g.name);
+            log::warn!("failed to launch '{name}': {e}");
         }
     }
 }
