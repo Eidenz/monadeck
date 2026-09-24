@@ -25,6 +25,8 @@ const MAIN_PX: (usize, usize) = (2000, 1250);
 const TALL_PX: (usize, usize) = (2000, 4600);
 /// The wrist watch.
 const WATCH_PX: (usize, usize) = (600, 404);
+/// The nav rail.
+const RAIL_PX: (usize, usize) = (162, 1140);
 
 /// (name, toast, extra queued, frames as (suffix, seconds since shown)).
 type Case = (&'static str, Toast, usize, Vec<(&'static str, f32)>);
@@ -156,6 +158,8 @@ pub fn run(dir: &Path) -> Result<()> {
     let mut st = crate::ui::LibState::new();
     st.clock = "9:41 PM".into();
     st.notif_unseen = 2;
+    st.watch_date = "Thursday, September 24".into();
+    st.batteries = sample_batteries();
     for (name, hot) in [("watch-mini", false), ("watch-mini-hot", true)] {
         let out = ctx.run(screen_input(MINI_PX, 1.0), |ctx| crate::ui::build_watch_mini(ctx, &st, hot));
         for (id, delta) in &out.textures_delta.set {
@@ -250,7 +254,227 @@ pub fn run(dir: &Path) -> Result<()> {
         println!("{}", path.display());
     }
     pages(&ctx, &mut textures, dir)?;
+    dashboard(&ctx, &mut textures, dir)?;
     Ok(())
+}
+
+/// The game side of the dashboard (Home, Library, Collections, Favorites, the
+/// running-game splash, the search keyboard), the rail, the watch in its
+/// states, and a flat composite of rail + main + bottom bar as they hang in VR.
+fn dashboard(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir: &Path) -> Result<()> {
+    use crate::ui::Nav;
+    let games = sample_games(ctx);
+    let dressed = |nav: Nav| {
+        let mut st = sample_state();
+        st.games = games.iter().map(clone_game).collect();
+        st.collections = vec!["Chill".into(), "With friends".into()];
+        for (i, g) in st.games.iter_mut().enumerate() {
+            if i % 3 == 0 {
+                g.collections.push(0);
+            }
+            if i % 4 == 1 {
+                g.collections.push(1);
+            }
+        }
+        st.selected = Some(0);
+        st.running_index = Some(0);
+        st.nav = nav;
+        st.session_minutes = Some(42);
+        st
+    };
+    type Setup = Box<dyn Fn(&mut crate::ui::LibState)>;
+    let shots: Vec<(&str, Setup)> = vec![
+        ("dash-home", Box::new(|_| {})),
+        ("dash-home-idle", Box::new(|st| {
+            st.running_index = None;
+            st.selected = Some(2);
+        })),
+        ("dash-library", Box::new(|st| st.nav = Nav::Library)),
+        ("dash-collections", Box::new(|st| {
+            st.nav = Nav::Library;
+            st.library_grouped = true;
+        })),
+        ("dash-favorites", Box::new(|st| st.nav = Nav::Favorites)),
+        ("dash-splash", Box::new(|st| st.show_splash = true)),
+        ("dash-search", Box::new(|st| {
+            st.search = "ha".into();
+            st.keyboard_open = true;
+        })),
+    ];
+    let mut home_main = None;
+    for (name, setup) in shots {
+        if !wanted(name) && !wanted("dashboard-composite") {
+            continue;
+        }
+        let mut st = dressed(Nav::Home);
+        setup(&mut st);
+        let img = shoot(ctx, textures, MAIN_PX, 12, |ctx| crate::ui::build_main(ctx, &mut st));
+        if name == "dash-home" {
+            home_main = Some(img.clone());
+        }
+        if wanted(name) {
+            let path = dir.join(format!("{name}.png"));
+            img.save(&path)?;
+            println!("{}", path.display());
+        }
+    }
+    // The rail and the bottom bar, alone and in the composite.
+    let mut st = dressed(Nav::Home);
+    let rail = shoot(ctx, textures, RAIL_PX, 6, |ctx| crate::ui::build_rail(ctx, &mut st));
+    let mut st = dressed(Nav::Home);
+    st.batteries = sample_batteries();
+    let bottom = shoot(ctx, textures, BOTTOM_PX, 6, |ctx| crate::ui::build_bottom(ctx, &mut st));
+    if wanted("dash-rail") {
+        let path = dir.join("dash-rail.png");
+        rail.save(&path)?;
+        println!("{}", path.display());
+    }
+    if wanted("dashboard-composite") {
+        if let Some(main) = home_main {
+            // Same physical scale for all three: the bar's 1640 px span the
+            // main panel's 2000 px width in VR.
+            let bw = MAIN_PX.0 as u32;
+            let bh = (BOTTOM_PX.1 as f32 * MAIN_PX.0 as f32 / BOTTOM_PX.0 as f32) as u32;
+            let bottom = image::imageops::resize(&bottom, bw, bh, image::imageops::FilterType::Triangle);
+            let gap = 36u32;
+            let (w, h) = (RAIL_PX.0 as u32 + gap + MAIN_PX.0 as u32, MAIN_PX.1 as u32 + gap + bh);
+            let mut canvas = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 12, 15, 255]));
+            image::imageops::overlay(&mut canvas, &rail, 0, ((MAIN_PX.1 - RAIL_PX.1) / 2) as i64);
+            image::imageops::overlay(&mut canvas, &main, (RAIL_PX.0 as u32 + gap) as i64, 0);
+            image::imageops::overlay(&mut canvas, &bottom, (RAIL_PX.0 as u32 + gap) as i64, (MAIN_PX.1 as u32 + gap) as i64);
+            let path = dir.join("dashboard-composite.png");
+            canvas.save(&path)?;
+            println!("{}", path.display());
+        }
+    }
+    // The watch: clock, the media card, notification history, gaming mode.
+    let watch_shots: Vec<(&str, Setup)> = vec![
+        ("watch-clock", Box::new(|_| {})),
+        ("watch-media", Box::new(|st| {
+            st.media = Some(crate::media::MediaState { player: "Spotify".into(), title: "Lofi hip hop radio".into(), artist: "Lofi Girl".into(), playing: true });
+            st.watch_media_menu = true;
+        })),
+        ("watch-history", Box::new(|st| {
+            st.notif_history = vec![
+                ("Eidenz".into(), "are you coming tonight?".into(), "2m".into()),
+                ("VRCX".into(), "Nyx is now online".into(), "14m".into()),
+            ];
+            st.watch_history_menu = true;
+        })),
+        ("watch-gaming", Box::new(|st| st.game_mode = true)),
+        ("watch-unlocked", Box::new(|st| st.watch_locked = false)),
+    ];
+    for (name, setup) in watch_shots {
+        if !wanted(name) {
+            continue;
+        }
+        let mut st = dressed(Nav::Home);
+        st.batteries = sample_batteries();
+        st.watch_date = "Thursday, September 24".into();
+        st.notif_unseen = 1;
+        st.notif_history = vec![("Eidenz".into(), "are you coming tonight?".into(), "2m".into())];
+        st.timer_running = true;
+        st.timer_remaining = 272;
+        st.timer_total = 300;
+        setup(&mut st);
+        let img = shoot(ctx, textures, WATCH_PX, 6, |ctx| crate::ui::build_watch(ctx, &mut st));
+        let path = dir.join(format!("{name}.png"));
+        img.save(&path)?;
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
+fn sample_batteries() -> Vec<crate::monado::BatteryInfo> {
+    use crate::monado::{BatteryInfo, BatteryKind, DevState};
+    let b = |kind, charge, state| BatteryInfo { kind, charge, charging: false, state };
+    vec![
+        b(BatteryKind::Controller, 0.86, DevState::Live),
+        b(BatteryKind::Controller, 0.64, DevState::Live),
+        b(BatteryKind::Tracker, 0.41, DevState::Lost),
+        b(BatteryKind::Glove, 0.80, DevState::Live),
+        b(BatteryKind::Glove, 0.60, DevState::Off),
+    ]
+}
+
+fn clone_game(g: &crate::games::LibGame) -> crate::games::LibGame {
+    use crate::games::ArtState;
+    let art = |a: &ArtState| match a {
+        ArtState::Ready(t) => ArtState::Ready(t.clone()),
+        ArtState::Missing => ArtState::Missing,
+        ArtState::Pending => ArtState::Pending,
+        ArtState::Idle => ArtState::Idle,
+    };
+    crate::games::LibGame {
+        name: g.name.clone(),
+        app_id: g.app_id.clone(),
+        shortcut_id: g.shortcut_id.clone(),
+        cover_id: g.cover_id.clone(),
+        source: g.source.clone(),
+        exe: g.exe.clone(),
+        start_dir: g.start_dir.clone(),
+        uevr_capable: g.uevr_capable,
+        vr: g.vr,
+        pad_hidden_by_options: g.pad_hidden_by_options,
+        last_played: g.last_played,
+        size_on_disk: g.size_on_disk,
+        playtime_minutes: g.playtime_minutes,
+        tracked_minutes: g.tracked_minutes,
+        is_favorite: g.is_favorite,
+        uevr: g.uevr,
+        collections: g.collections.clone(),
+        cover: art(&g.cover),
+        hero: art(&g.hero),
+        logo: art(&g.logo),
+    }
+}
+
+/// A library of stand-in games: gradient covers and hero art (a few missing,
+/// to show the placeholders), favourites, playtime, sizes.
+fn sample_games(ctx: &egui::Context) -> Vec<crate::games::LibGame> {
+    use crate::games::{ArtState, LibGame};
+    let names = [
+        "VRChat", "Half-Life: Alyx", "Beat Saber", "Hollow Knight", "Pistol Whip", "Bonelab", "The Midnight Walk",
+        "Hades II", "Blade & Sorcery", "Stray", "Outer Wilds", "Ramage", "GOAT", "Celeste",
+    ];
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let tex = |name: &str, w: usize, h: usize, seed: usize| {
+        let hue = (seed as f32 * 0.137) % 1.0;
+        let px = (0..w * h)
+            .map(|k| {
+                let (x, y) = ((k % w) as f32 / w as f32, (k / w) as f32 / h as f32);
+                let c = |o: f32| (((hue + o + x * 0.15) * std::f32::consts::TAU).sin() * 0.5 + 0.5) * (170.0 - 90.0 * y) + 30.0;
+                egui::Color32::from_rgb(c(0.0) as u8, c(0.33) as u8, c(0.66) as u8)
+            })
+            .collect();
+        ArtState::Ready(ctx.load_texture(format!("{name}-{w}x{h}"), egui::ColorImage { size: [w, h], pixels: px }, egui::TextureOptions::LINEAR))
+    };
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| LibGame {
+            name: name.to_string(),
+            app_id: Some(format!("{}", 1000 + i)),
+            shortcut_id: None,
+            cover_id: Some(format!("{}", 1000 + i)),
+            source: if i % 5 == 4 { "Non-Steam".into() } else { "Steam".into() },
+            exe: None,
+            start_dir: None,
+            uevr_capable: i == 9,
+            vr: i < 6,
+            pad_hidden_by_options: false,
+            last_played: Some(now - (i as u64 * 7 + 1) * 3600 * 5),
+            size_on_disk: Some((i as u64 + 1) * 3_700_000_000),
+            playtime_minutes: Some((14 - i as u32) * 97),
+            tracked_minutes: None,
+            is_favorite: i % 4 == 0,
+            uevr: false,
+            collections: Vec::new(),
+            cover: if i % 6 == 5 { ArtState::Missing } else { tex(name, 60, 90, i) },
+            hero: if i % 6 == 5 { ArtState::Missing } else { tex(name, 192, 62, i + 3) },
+            logo: ArtState::Missing,
+        })
+        .collect()
 }
 
 /// Dashboard pages: each at the panel's real size (what you see first) and on

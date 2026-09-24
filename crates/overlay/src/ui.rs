@@ -619,6 +619,8 @@ pub fn interaction_pass(ctx: &egui::Context, st: &mut LibState) {
     if snap.clicked.is_some() {
         st.click_pulse = true;
     }
+    // Kit widgets animate their own hover.
+    st.no_glow.extend(kit::take_kit_hovered(ctx));
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("hover-glow")));
     for id in snap.hovered.iter() {
         let Some(resp) = ctx.read_response(*id) else { continue };
@@ -640,6 +642,8 @@ pub fn interaction_pass(ctx: &egui::Context, st: &mut LibState) {
 
 const TILE_W: f32 = 168.0;
 const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
+/// The name under a tile.
+const TILE_CAPTION_H: f32 = 32.0;
 
 /// The main (centre) panel: search bar, the active view (or active-game splash),
 /// the on-screen keyboard, and the launching/fade overlays.
@@ -687,86 +691,103 @@ fn overlays(ctx: &egui::Context, st: &mut LibState) {
 
 // --- chrome -----------------------------------------------------------------
 
-/// The left floating nav rail (its own composition layer).
+/// The left floating nav rail (its own composition layer): the game pages on
+/// top, the tool pages pinned to the bottom, each a glyph with its name.
 pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgb(18, 22, 28))
-        .corner_radius(20)
-        .inner_margin(egui::Margin::symmetric(10, 16));
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)))
+        .corner_radius(26)
+        .inner_margin(egui::Margin::symmetric(8, 14));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-        ui.vertical_centered(|ui| {
-            ui.add_space(10.0);
-            for (glyph, nav) in [
-                (icon::HOUSE, Nav::Home),
-                (icon::SQUARES_FOUR, Nav::Library),
-                (icon::STAR, Nav::Favorites),
-            ] {
-                let active = st.nav == nav && !st.show_splash;
-                if rail_button(ui, glyph, active).clicked() && !active {
-                    st.nav = nav;
-                    st.show_splash = false;
-                    st.sound_tab = true;
-                }
-                ui.add_space(8.0);
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let mut go = |ui: &mut egui::Ui, glyph: &str, label: &str, nav: Nav| {
+            let active = st.nav == nav && !st.show_splash;
+            if rail_item(ui, glyph, label, active).clicked() && !active {
+                st.nav = nav;
+                st.show_splash = false;
+                st.sound_tab = true;
             }
-            // Tools (timer) · Playspace · Freeze · Settings pinned to the bottom.
-            // Reserve enough for the icons PLUS item-spacing + the rounded-corner
-            // margin, or the last icon overruns the panel's rounded bottom (clipped).
-            // ~64 px per icon (48 button + 8 add_space + spacing) — bump when adding.
-            let avail = ui.available_height();
-            ui.add_space((avail - 272.0).max(0.0));
-            let bottom = [
-                (icon::WRENCH, Nav::System),
-                (icon::MONITOR, Nav::Desktop),
-                (icon::IMAGES, Nav::Photos),
-                (icon::GEAR, Nav::Settings),
-            ];
-            for (k, &(glyph, nav)) in bottom.iter().enumerate() {
-                let active = st.nav == nav && !st.show_splash;
-                if rail_button(ui, glyph, active).clicked() && !active {
-                    st.nav = nav;
-                    st.show_splash = false;
-                    st.sound_tab = true;
-                }
-                if k + 1 < bottom.len() {
-                    ui.add_space(8.0);
-                }
-            }
-        });
+        };
+        go(ui, icon::HOUSE, "Home", Nav::Home);
+        go(ui, icon::SQUARES_FOUR, "Library", Nav::Library);
+        go(ui, icon::STAR, "Favorites", Nav::Favorites);
+        // The tool pages pinned to the bottom (4 items + their spacing).
+        let reserve = 4.0 * RAIL_ITEM_H + 3.0 * 6.0;
+        ui.add_space((ui.available_height() - reserve).max(0.0));
+        go(ui, icon::WRENCH, "System", Nav::System);
+        go(ui, icon::MONITOR, "Desktop", Nav::Desktop);
+        go(ui, icon::IMAGES, "Photos", Nav::Photos);
+        go(ui, icon::GEAR, "Settings", Nav::Settings);
     });
 }
 
-fn rail_button(ui: &mut egui::Ui, glyph: &str, active: bool) -> egui::Response {
-    let fg = if active { egui::Color32::BLACK } else { theme::ON_SURFACE_VAR };
-    let fill = if active { theme::PRIMARY } else { egui::Color32::TRANSPARENT };
-    let btn = egui::Button::new(egui::RichText::new(glyph).size(24.0).color(fg))
-        .min_size(egui::vec2(48.0, 48.0))
-        .fill(fill)
-        .frame(true);
-    ui.add(btn)
+const RAIL_ITEM_H: f32 = 72.0;
+
+fn rail_item(ui: &mut egui::Ui, glyph: &str, label: &str, active: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), RAIL_ITEM_H), egui::Sense::click());
+    let h = kit::hover_t(ui, &resp);
+    let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), active, 0.16);
+    let p = ui.painter();
+    p.rect_filled(rect, egui::CornerRadius::same(18), kit::mix(kit::alpha(egui::Color32::WHITE, 0.05 * h), kit::alpha(theme::PRIMARY, 0.16), on));
+    if on > 0.01 {
+        let bar = egui::Rect::from_min_size(egui::pos2(rect.left() - 4.0, rect.center().y - 14.0), egui::vec2(4.0, 28.0));
+        p.rect_filled(bar, egui::CornerRadius::same(2), kit::alpha(theme::PRIMARY, on));
+    }
+    let glyph_fg = kit::mix(kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, h), theme::PRIMARY, on);
+    let label_fg = kit::mix(kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, h), egui::Color32::WHITE, on);
+    p.text(egui::pos2(rect.center().x, rect.center().y - 9.0), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(25.0), glyph_fg);
+    p.text(egui::pos2(rect.center().x, rect.center().y + 19.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), label_fg);
+    resp
 }
 
 fn top_bar(ctx: &egui::Context, st: &mut LibState) {
-    let frame = egui::Frame::default()
-        .fill(egui::Color32::from_rgb(13, 16, 20))
-        .inner_margin(egui::Margin::symmetric(18, 12));
-    egui::TopBottomPanel::top("search").exact_height(58.0).frame(frame).show(ctx, |ui| {
+    let frame = egui::Frame::default().fill(theme::SURFACE).inner_margin(egui::Margin { left: 24, right: 24, top: 16, bottom: 2 });
+    egui::TopBottomPanel::top("search").exact_height(70.0).show_separator_line(false).frame(frame).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
-            ui.label(egui::RichText::new(icon::MAGNIFYING_GLASS).size(20.0).color(theme::ON_SURFACE_VAR));
-            ui.add_space(8.0);
-            let kbd_w = 46.0;
-            let resp = ui.add_sized(
-                egui::vec2(ui.available_width() - kbd_w - 10.0, 30.0),
-                egui::TextEdit::singleline(&mut st.search).hint_text("Search for games…").frame(false),
+            let (kbd_w, h) = (52.0, 52.0);
+            let w = ui.available_width() - kbd_w - 12.0;
+            let (rect, field) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+            let open = ui.ctx().animate_bool_with_time(field.id.with("open"), st.keyboard_open, 0.16);
+            let p = ui.painter();
+            let radius = egui::CornerRadius::same((h / 2.0) as u8);
+            p.rect_filled(rect, radius, theme::SURFACE_CONTAINER);
+            p.rect_stroke(rect, radius, egui::Stroke::new(1.0 + open, kit::mix(kit::alpha(egui::Color32::WHITE, 0.07), kit::alpha(theme::PRIMARY, 0.7), open)), egui::StrokeKind::Inside);
+            p.text(egui::pos2(rect.left() + 26.0, rect.center().y), egui::Align2::CENTER_CENTER, icon::MAGNIFYING_GLASS, egui::FontId::proportional(20.0), kit::mix(theme::ON_SURFACE_VAR, theme::PRIMARY, open));
+            let searching = !st.search.is_empty();
+            let right_pad = if searching { 150.0 } else { 20.0 };
+            // The text row, centred in the field (a TextEdit sits at the top of its rect).
+            let inner = egui::Rect::from_min_max(egui::pos2(rect.left() + 52.0, rect.center().y - 12.0), egui::pos2(rect.right() - right_pad, rect.center().y + 14.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            let resp = child.add_sized(
+                inner.size(),
+                egui::TextEdit::singleline(&mut st.search).hint_text("Search your games").frame(false).font(egui::FontId::proportional(18.0)),
             );
-            if resp.clicked() || resp.gained_focus() {
+            if resp.clicked() || resp.gained_focus() || field.clicked() {
                 st.keyboard_open = true;
             }
-            ui.add_space(8.0);
-            let kbd = egui::Button::new(egui::RichText::new(icon::KEYBOARD).size(20.0))
-                .min_size(egui::vec2(kbd_w, 36.0))
-                .fill(if st.keyboard_open { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH });
-            if ui.add(kbd).clicked() {
+            if searching {
+                // "N found" and a clear button at the field's right end.
+                let n = filtered(st).len();
+                let clear = egui::Rect::from_center_size(egui::pos2(rect.right() - 28.0, rect.center().y), egui::vec2(36.0, 36.0));
+                ui.painter().text(egui::pos2(clear.left() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, format!("{n} found"), egui::FontId::proportional(14.0), theme::ON_SURFACE_VAR);
+                let c = ui.interact(clear, field.id.with("clear"), egui::Sense::click());
+                let ch = kit::hover_t(ui, &c);
+                ui.painter().circle_filled(clear.center(), 16.0, kit::mix(theme::SURFACE_CONTAINER_HIGH, egui::Color32::from_rgb(56, 66, 78), ch));
+                ui.painter().text(clear.center(), egui::Align2::CENTER_CENTER, icon::X, egui::FontId::proportional(15.0), kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, ch));
+                if c.on_hover_text("Clear the search").clicked() {
+                    st.search.clear();
+                    st.sound_tab = true;
+                }
+            }
+            ui.add_space(12.0);
+            let (kr, kresp) = ui.allocate_exact_size(egui::vec2(kbd_w, h), egui::Sense::click());
+            let kh = kit::hover_t(ui, &kresp);
+            let p = ui.painter();
+            let fill = kit::mix(kit::mix(theme::SURFACE_CONTAINER, egui::Color32::from_rgb(44, 54, 64), kh), theme::PRIMARY, open);
+            p.rect_filled(kr, egui::CornerRadius::same(16), fill);
+            p.text(kr.center(), egui::Align2::CENTER_CENTER, icon::KEYBOARD, egui::FontId::proportional(21.0), kit::mix(kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, kh), egui::Color32::BLACK, open));
+            if kresp.on_hover_text("Keyboard").clicked() {
                 st.keyboard_open = !st.keyboard_open;
                 st.sound_tab = true;
             }
@@ -778,76 +799,88 @@ fn top_bar(ctx: &egui::Context, st: &mut LibState) {
 /// extra time zones, quick buttons, and the menu + screen toggles like WayVR.
 pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
-        .fill(egui::Color32::from_rgba_unmultiplied(14, 18, 24, 235))
-        .corner_radius(18)
-        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 110, 120)))
+        .fill(egui::Color32::from_rgba_unmultiplied(16, 20, 26, 242))
+        .corner_radius(24)
+        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(64, 224, 208, 70)))
         .inner_margin(egui::Margin::same(10));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        // Batteries + position lock (top right).
+        // Batteries on the left; the timer (when one runs) and the position
+        // lock on the right. The batteries get what's left: controllers one
+        // by one and one chip per other kind, or one chip per kind when even
+        // that won't fit.
         ui.horizontal(|ui| {
-            if st.batteries.is_empty() {
-                ui.label(egui::RichText::new("no batteries").size(12.0).color(theme::ON_SURFACE_VAR));
-            }
-            // Controllers individually; every other kind collapsed to one chip
-            // showing its lowest charge (gloves, trackers…) so a full-body rig
-            // doesn't run off the wrist.
-            use crate::monado::BatteryKind;
-            for b in st.batteries.iter().filter(|b| b.kind == BatteryKind::Controller) {
-                battery_widget(ui, b);
-                ui.add_space(4.0);
-            }
-            for kind in [BatteryKind::Glove, BatteryKind::Tracker, BatteryKind::Other] {
-                let group: Vec<&crate::monado::BatteryInfo> = st.batteries.iter().filter(|b| b.kind == kind).collect();
-                if !group.is_empty() {
-                    battery_group_widget(ui, kind, &group);
-                    ui.add_space(4.0);
-                }
-            }
-            // A running/paused timer: small chip with the time left; tap to open it.
-            if st.timer_running || st.timer_paused {
+            ui.set_height(28.0);
+            let timer = (st.timer_running || st.timer_paused).then(|| {
                 let rem = st.timer_remaining;
-                let txt = if rem >= 3600 {
-                    format!("{}:{:02}:{:02}", rem / 3600, (rem / 60) % 60, rem % 60)
+                if rem >= 3600 {
+                    format!("{} {}:{:02}:{:02}", icon::TIMER, rem / 3600, (rem / 60) % 60, rem % 60)
                 } else {
-                    format!("{}:{:02}", rem / 60, rem % 60)
-                };
-                let accent = if st.timer_paused { FAV_GOLD } else { theme::PRIMARY };
-                let btn = egui::Button::new(egui::RichText::new(format!("{} {txt}", icon::TIMER)).size(13.0).color(accent))
-                    .fill(egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 30))
-                    .min_size(egui::vec2(0.0, 24.0));
-                if ui.add(btn).on_hover_text(if st.timer_paused { "Timer paused · tap to open" } else { "Timer running · tap to open" }).clicked() {
-                    st.watch_timer_request = true;
-                    st.sound_tab = true;
+                    format!("{} {}:{:02}", icon::TIMER, rem / 60, rem % 60)
+                }
+            });
+            let measure = |ui: &egui::Ui, text: String| ui.fonts(|f| f.layout_no_wrap(text, egui::FontId::proportional(13.5), egui::Color32::WHITE).size().x);
+            let timer_w = timer.as_ref().map_or(0.0, |t| measure(ui, t.clone()) + 26.0 + 6.0);
+            let avail = (ui.available_width() - 34.0 - timer_w - 10.0).max(0.0);
+            // Chip sets from most to least detailed; the first that fits wins
+            // (else the last, cut to what fits).
+            use crate::monado::{BatteryInfo, BatteryKind};
+            let of_kind = |k: BatteryKind| -> Vec<&BatteryInfo> { st.batteries.iter().filter(|b| b.kind == k).collect() };
+            let set = |split: bool, compact: bool| -> Vec<(String, egui::Color32, String)> {
+                let mut out: Vec<(String, egui::Color32, String)> = Vec::new();
+                if split {
+                    out.extend(of_kind(BatteryKind::Controller).into_iter().map(|b| one_chip(b, compact)));
+                } else {
+                    out.extend(group_chip(BatteryKind::Controller, &of_kind(BatteryKind::Controller), compact));
+                }
+                for kind in [BatteryKind::Glove, BatteryKind::Tracker, BatteryKind::Other] {
+                    out.extend(group_chip(kind, &of_kind(kind), compact));
+                }
+                out
+            };
+            let width = |ui: &egui::Ui, chips: &[(String, egui::Color32, String)]| chips.iter().map(|c| measure(ui, c.0.clone()) + BATTERY_PILL_PAD + 6.0).sum::<f32>();
+            let mut chips = Vec::new();
+            for (split, compact) in [(true, false), (false, false), (false, true)] {
+                chips = set(split, compact);
+                if width(ui, &chips) <= avail {
+                    break;
                 }
             }
+            while !chips.is_empty() && width(ui, &chips) > avail {
+                chips.pop();
+            }
+            ui.allocate_ui_with_layout(egui::vec2(avail, 28.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if st.batteries.is_empty() {
+                    ui.label(egui::RichText::new("no batteries").size(12.0).color(theme::ON_SURFACE_VAR));
+                }
+                for (text, color, tip) in chips {
+                    battery_pill(ui, text, color, &tip);
+                }
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Top-right: lock · media · notifications (the last two swap the
-                // clock card's content, so the watch never changes size).
-                let corner = |ui: &mut egui::Ui, glyph: String, on: bool, hot: bool, tip: &str| -> bool {
-                    let fg = if on { egui::Color32::BLACK } else if hot { egui::Color32::from_rgb(150, 190, 255) } else { theme::ON_SURFACE_VAR };
-                    let fill = if on { theme::PRIMARY } else if hot { egui::Color32::from_rgba_unmultiplied(150, 190, 255, 30) } else { egui::Color32::TRANSPARENT };
-                    ui.add(egui::Button::new(egui::RichText::new(glyph).size(14.0).color(fg)).fill(fill).min_size(egui::vec2(28.0, 24.0)))
-                        .on_hover_text(tip)
-                        .clicked()
-                };
+                ui.spacing_mut().item_spacing.x = 6.0;
                 let (glyph, tip) = if st.watch_locked {
                     (icon::LOCK, "Position locked · tap to unlock, then grip the watch to move it")
                 } else {
                     (icon::LOCK_OPEN, "Grip the watch with the other hand to move it · tap to lock")
                 };
-                let fg = if st.watch_locked { theme::ON_SURFACE_VAR } else { egui::Color32::BLACK };
-                let btn = egui::Button::new(egui::RichText::new(glyph).size(15.0).color(fg))
-                    .fill(if st.watch_locked { egui::Color32::TRANSPARENT } else { theme::PRIMARY })
-                    .min_size(egui::vec2(28.0, 24.0));
-                if ui.add(btn).on_hover_text(tip).clicked() {
+                if watch_btn(ui, egui::vec2(34.0, 28.0), glyph, 15.0, !st.watch_locked, tip) {
                     st.watch_locked = !st.watch_locked;
                     st.sound_tab = true;
                 }
-                if !st.watch_locked {
-                    ui.label(egui::RichText::new("grip to move").size(11.0).color(theme::ON_SURFACE_VAR));
+                // A running/paused timer: the time left; tap to open it.
+                if let Some(t) = timer {
+                    let accent = if st.timer_paused { FAV_GOLD } else { theme::PRIMARY };
+                    let (r, resp) = ui.allocate_exact_size(egui::vec2(timer_w - 6.0, 26.0), egui::Sense::click());
+                    let h = kit::hover_t(ui, &resp);
+                    ui.painter().rect_filled(r, egui::CornerRadius::same(13), kit::alpha(accent, 0.16 + 0.12 * h));
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, t, egui::FontId::proportional(13.5), accent);
+                    if resp.on_hover_text(if st.timer_paused { "Timer paused · tap to open" } else { "Timer running · tap to open" }).clicked() {
+                        st.watch_timer_request = true;
+                        st.sound_tab = true;
+                    }
                 }
-                let _ = &corner;
             });
         });
         // Clock + zones (or the layout picker) | quick buttons — each in its own
@@ -858,7 +891,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
         ui.horizontal(|ui| {
             watch_card(ui, |ui| {
                 // (the row width includes the card's own margins — keep it inside)
-                ui.set_width(if wide { row_w - 30.0 } else { 214.0 });
+                ui.set_width(if wide { row_w - 21.5 } else { 212.0 });
                 ui.set_min_height(120.0);
                 // Corner icons inside the clock card: music (toggles the player view)
                 // and the notification bell (toggles the history). Drawn at fixed
@@ -868,12 +901,11 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     let mut no_glow: Vec<egui::Rect> = Vec::new();
                     // Tinted glyphs only (no fill): music top-right, bell top-left.
                     // `on` = its view is open (tap again to close); `badge` = a
-                    // small count bubble on the glyph's shoulder.
+                    // small count bubble under the glyph.
                     // `slot`: 0 = leftmost, 1 = rightmost, 2 = second from the right.
                     let mut corner_btn = |ui: &mut egui::Ui, slot: u8, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
                         // The left edge sits a little into the margin so both glyphs
                         // end up the same distance from their card edge.
-                        let left = slot == 0;
                         let x = match slot {
                             0 => r.left() - 8.0,
                             1 => r.right() - 28.0,
@@ -889,8 +921,8 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                             .on_hover_text(tip);
                         no_glow.push(rect);
                         if badge > 0 {
-                            // Beside the glyph (outside the button's rect), not over it.
-                            let c = if left { egui::pos2(rect.right() + 6.0, rect.center().y) } else { egui::pos2(rect.left() - 6.0, rect.center().y) };
+                            // Under the glyph (outside the button's rect), clear of the clock.
+                            let c = egui::pos2(rect.center().x, rect.bottom() + 8.0);
                             let p = ui.painter();
                             p.circle_filled(c, 6.5, egui::Color32::from_rgb(150, 190, 255));
                             p.text(c, egui::Align2::CENTER_CENTER, badge.min(9).to_string(), egui::FontId::proportional(9.0), egui::Color32::BLACK);
@@ -910,7 +942,9 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     }
                     if !st.notif_history.is_empty() {
                         let glyph = if st.notif_unseen > 0 { icon::BELL_RINGING } else { icon::BELL };
-                        if corner_btn(ui, 0, glyph, st.watch_history_menu, st.notif_unseen > 0, st.notif_unseen, "Recent notifications") {
+                        // No count while the history itself is open (it's right there).
+                        let badge = if st.watch_history_menu { 0 } else { st.notif_unseen };
+                        if corner_btn(ui, 0, glyph, st.watch_history_menu, st.notif_unseen > 0, badge, "Recent notifications") {
                             st.watch_history_menu = !st.watch_history_menu;
                             st.watch_media_menu = false;
                             st.watch_layout_menu = false;
@@ -933,7 +967,8 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 if st.watch_media_menu {
                     match &st.media {
                         Some(m) => {
-                            ui.add_space(4.0);
+                            // Below the corner icons.
+                            ui.add_space(22.0);
                             let title: String = if m.title.chars().count() > 24 { format!("{}…", m.title.chars().take(23).collect::<String>()) } else { m.title.clone() };
                             ui.label(egui::RichText::new(if title.is_empty() { m.player.clone() } else { title }).size(16.0).strong().color(egui::Color32::WHITE));
                             let sub = if m.artist.is_empty() { m.player.clone() } else { format!("{} · {}", m.artist, m.player) };
@@ -943,11 +978,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                             let b = 44.0;
                             centered_row(ui, b * 3.0 + 12.0, |ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
-                                let tb = |ui: &mut egui::Ui, g: &str, tip: &str| -> bool {
-                                    ui.add(egui::Button::new(egui::RichText::new(g).size(18.0).color(theme::ON_SURFACE)).fill(theme::SURFACE_CONTAINER_HIGH).min_size(egui::vec2(b, 36.0)))
-                                        .on_hover_text(tip)
-                                        .clicked()
-                                };
+                                let tb = |ui: &mut egui::Ui, g: &str, tip: &str| -> bool { watch_btn(ui, egui::vec2(b, 38.0), g, 18.0, false, tip) };
                                 if tb(ui, icon::SKIP_BACK, "Previous") {
                                     st.media_request = Some(crate::media::MediaCmd::Previous);
                                 }
@@ -969,22 +1000,19 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     // title · body, age on the right; the body truncates to fit.
                     ui.add_space(24.0);
                     for (title, body, age) in &st.notif_history {
-                        ui.horizontal(|ui| {
-                            let t: String = if title.chars().count() > 24 { format!("{}…", title.chars().take(23).collect::<String>()) } else { title.clone() };
-                            ui.label(egui::RichText::new(t).size(12.0).strong().color(egui::Color32::WHITE));
-                            let age_w = 58.0;
-                            let body_w = (ui.available_width() - age_w).max(40.0);
-                            if !body.is_empty() {
-                                let b: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
-                                ui.add_sized(
-                                    egui::vec2(body_w, 16.0),
-                                    egui::Label::new(egui::RichText::new(b).size(11.0).color(theme::ON_SURFACE_VAR)).truncate(),
-                                );
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new(age).size(10.0).color(theme::ON_SURFACE_VAR));
-                            });
-                        });
+                        // Title, then the message (cut to fit), the age on the right.
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
+                        let age_g = ui.fonts(|f| f.layout_no_wrap(age.clone(), egui::FontId::proportional(11.0), theme::ON_SURFACE_VAR));
+                        let title_g = kit::fit_text(ui, title, 13.0, egui::Color32::WHITE, r.width() * 0.4);
+                        let body: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let body_w = (r.width() - title_g.size().x - age_g.size().x - 20.0).max(20.0);
+                        let body_g = kit::fit_text(ui, &body, 12.0, theme::ON_SURFACE_VAR, body_w);
+                        let p = ui.painter();
+                        let y = |g: &egui::Galley| r.center().y - g.size().y / 2.0;
+                        let body_x = r.left() + title_g.size().x + 10.0;
+                        p.galley(egui::pos2(body_x, y(&body_g)), body_g, theme::ON_SURFACE_VAR);
+                        p.galley(egui::pos2(r.right() - age_g.size().x, y(&age_g)), age_g.clone(), theme::ON_SURFACE_VAR);
+                        p.galley(egui::pos2(r.left(), y(&title_g)), title_g, egui::Color32::WHITE);
                     }
                 } else if let (Some(shot), false) = (&st.wrist_shot, st.watch_layout_menu) {
                     let req = crate::photos::wrist_card(ui, shot.thumb.as_ref(), shot.qr.as_deref(), &shot.when, shot.idx, shot.total);
@@ -996,13 +1024,10 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{}  Gaming", icon::GAME_CONTROLLER)).size(14.0).strong().color(egui::Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(egui::RichText::new(icon::X).size(13.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
+                            if watch_btn(ui, egui::vec2(28.0, 24.0), icon::X, 13.0, false, "Close") {
                                 st.watch_game_menu = false;
                             }
-                            let guide = egui::Button::new(egui::RichText::new("Guide").size(12.0).color(theme::ON_SURFACE))
-                                .fill(theme::SURFACE_CONTAINER_HIGH)
-                                .min_size(egui::vec2(52.0, 22.0));
-                            if ui.add(guide).on_hover_text("Press the pad's Guide button").clicked() {
+                            if watch_btn(ui, egui::vec2(58.0, 24.0), "Guide", 12.5, false, "Press the pad's Guide button") {
                                 st.game_guide_request = true;
                                 st.sound_tab = true;
                             }
@@ -1011,12 +1036,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     let mut pick = None;
                     egui::ScrollArea::vertical().max_height(92.0).auto_shrink([false, true]).show(ui, |ui| {
                         for (i, name) in st.game_profiles.iter().enumerate() {
-                            let active = st.game_profile == *name;
-                            let fg = if active { egui::Color32::BLACK } else { theme::ON_SURFACE };
-                            let b = egui::Button::new(egui::RichText::new(name).size(14.0).color(fg))
-                                .fill(if active { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                                .min_size(egui::vec2(ui.available_width(), 28.0));
-                            if ui.add(b).clicked() {
+                            if watch_btn(ui, egui::vec2(ui.available_width(), 30.0), name, 14.0, st.game_profile == *name, name) {
                                 pick = Some(i);
                             }
                         }
@@ -1030,7 +1050,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("{}  Layouts", icon::SQUARES_FOUR)).size(14.0).strong().color(egui::Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new(egui::RichText::new(icon::X).size(13.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
+                            if watch_btn(ui, egui::vec2(28.0, 24.0), icon::X, 13.0, false, "Close") {
                                 st.watch_layout_menu = false;
                             }
                         });
@@ -1039,11 +1059,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     egui::ScrollArea::vertical().max_height(92.0).auto_shrink([false, true]).show(ui, |ui| {
                         for (i, (name, _)) in st.layouts.iter().enumerate() {
                             let active = st.layout_active.as_deref() == Some(name.as_str());
-                            let fg = if active { egui::Color32::BLACK } else { theme::ON_SURFACE };
-                            let b = egui::Button::new(egui::RichText::new(name).size(14.0).color(fg))
-                                .fill(if active { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                                .min_size(egui::vec2(ui.available_width(), 28.0));
-                            if ui.add(b).clicked() {
+                            if watch_btn(ui, egui::vec2(ui.available_width(), 30.0), name, 14.0, active, name) {
                                 apply = Some(i);
                             }
                         }
@@ -1059,6 +1075,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 } else {
                     ui.vertical_centered(|ui| {
                         ui.label(egui::RichText::new(&st.clock).size(40.0).strong().color(egui::Color32::WHITE));
+                        ui.add_space(-4.0);
                         ui.label(egui::RichText::new(&st.watch_date).size(14.0).color(theme::ON_SURFACE_VAR));
                     });
                     ui.add_space(2.0);
@@ -1083,13 +1100,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
             watch_card(ui, |ui| {
                 ui.set_min_height(120.0);
                 let b = 57.0;
-                let quick = |ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str| -> bool {
-                    let fg = if on { egui::Color32::BLACK } else { theme::ON_SURFACE };
-                    let btn = egui::Button::new(egui::RichText::new(glyph).size(24.0).color(fg))
-                        .fill(if on { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                        .min_size(egui::vec2(b, b));
-                    ui.add(btn).on_hover_text(tip).clicked()
-                };
+                let quick = |ui: &mut egui::Ui, glyph: &str, on: bool, tip: &str| -> bool { watch_btn(ui, egui::vec2(b, b), glyph, 24.0, on, tip) };
                 if st.game_mode {
                     watch_game_buttons(ui, st, &quick);
                 } else {
@@ -1111,10 +1122,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
             // a hair narrower still, so the stroke never touches the panel edge)
             ui.set_width(ui.available_width() - 4.0);
             ui.horizontal(|ui| {
-                let menu = egui::Button::new(egui::RichText::new(icon::LIST).size(22.0).color(theme::ON_SURFACE))
-                    .fill(theme::SURFACE_CONTAINER_HIGH)
-                    .min_size(egui::vec2(56.0, 42.0));
-                if ui.add(menu).on_hover_text("Monadeck menu").clicked() {
+                if watch_btn(ui, egui::vec2(56.0, 42.0), icon::LIST, 22.0, false, "Monadeck menu") {
                     st.watch_menu_request = true;
                     st.sound_tab = true;
                 }
@@ -1125,11 +1133,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 ui.add_space(6.0);
                 let mut toggle = None;
                 for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
-                    let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
-                    let btn = egui::Button::new(egui::RichText::new(format!("{} {}", icon::MONITOR, i + 1)).size(14.0).color(fg))
-                        .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                        .min_size(egui::vec2(56.0, 42.0));
-                    if ui.add(btn).on_hover_text(name).clicked() {
+                    if watch_btn(ui, egui::vec2(56.0, 42.0), &format!("{} {}", icon::MONITOR, i + 1), 15.0, *shown, name) {
                         toggle = Some(i);
                     }
                 }
@@ -1220,20 +1224,51 @@ fn watch_game_buttons(ui: &mut egui::Ui, st: &mut LibState, quick: &dyn Fn(&mut 
     });
 }
 
-/// The minimal watch: a clock-only pill that takes the wrist spot when the
-/// full watch is folded away. `hot` = the other hand points at it (a tap peeks
-/// at the full watch). Same skin as the watch, so they read as one thing.
+/// The minimal watch: a clock pill that takes the wrist spot when the full
+/// watch is folded away, with one quiet line under the time (the timer when
+/// one runs, else the date, and the lowest battery). `hot` = the other hand
+/// points at it (a tap peeks at the full watch). Same skin as the watch.
 pub fn build_watch_mini(ctx: &egui::Context, st: &LibState, hot: bool) {
     let painter = ctx.layer_painter(egui::LayerId::background());
     let rect = ctx.screen_rect().shrink(3.0);
-    let radius = egui::CornerRadius::same((rect.height() / 2.0) as u8);
-    let stroke = if hot { theme::PRIMARY } else { egui::Color32::from_rgb(40, 110, 120) };
-    painter.rect_filled(rect, radius, egui::Color32::from_rgba_unmultiplied(14, 18, 24, 235));
-    painter.rect_stroke(rect, radius, egui::Stroke::new(1.5, stroke), egui::StrokeKind::Inside);
-    painter.text(rect.center(), egui::Align2::CENTER_CENTER, &st.clock, egui::FontId::proportional(rect.height() * 0.52), egui::Color32::WHITE);
+    let radius = rect.height() / 2.0;
+    kit::gradient_rect(&painter, rect, radius, egui::Color32::from_rgba_unmultiplied(24, 30, 38, 245), egui::Color32::from_rgba_unmultiplied(14, 18, 24, 245));
+    let rim = if hot { theme::PRIMARY } else { egui::Color32::from_rgba_unmultiplied(64, 224, 208, 70) };
+    painter.rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(1.5, rim), egui::StrokeKind::Inside);
+    painter.text(rect.center() - egui::vec2(0.0, rect.height() * 0.12), egui::Align2::CENTER_CENTER, &st.clock, egui::FontId::proportional(rect.height() * 0.44), egui::Color32::WHITE);
+
+    // The line under the clock: timer or date · lowest live battery.
+    let mut job = egui::text::LayoutJob::default();
+    let font = egui::FontId::proportional(rect.height() * 0.15);
+    let add = |job: &mut egui::text::LayoutJob, text: &str, color: egui::Color32| {
+        job.append(text, 0.0, egui::TextFormat { font_id: font.clone(), color, ..Default::default() });
+    };
+    if st.timer_running || st.timer_paused {
+        let rem = st.timer_remaining;
+        let accent = if st.timer_paused { FAV_GOLD } else { theme::PRIMARY };
+        add(&mut job, &format!("{} {}:{:02}", icon::TIMER, rem / 60, rem % 60), accent);
+    } else {
+        // "Thursday, September 24" → "Thu 24".
+        let short = match st.watch_date.split_once(", ") {
+            Some((day, rest)) => format!("{} {}", day.chars().take(3).collect::<String>(), rest.rsplit(' ').next().unwrap_or(rest)),
+            None => st.watch_date.clone(),
+        };
+        add(&mut job, &short, theme::ON_SURFACE_VAR);
+    }
+    let lowest = st
+        .batteries
+        .iter()
+        .filter(|b| b.state != crate::monado::DevState::Off && !b.charging)
+        .min_by(|a, b| a.charge.total_cmp(&b.charge));
+    if let Some(b) = lowest {
+        add(&mut job, "   ", theme::ON_SURFACE_VAR);
+        add(&mut job, &format!("{} {}%", battery_glyph(b), (b.charge * 100.0).round() as i32), battery_color(b));
+    }
+    let galley = ctx.fonts(|f| f.layout_job(job));
+    painter.galley(egui::pos2(rect.center().x - galley.size().x / 2.0, rect.center().y + rect.height() * 0.2 - galley.size().y / 2.0), galley, theme::ON_SURFACE_VAR);
     // Unread notifications: a small dot by the rim, nothing more.
     if st.notif_unseen > 0 {
-        painter.circle_filled(egui::pos2(rect.right() - 16.0, rect.top() + 14.0), 4.5, egui::Color32::from_rgb(150, 190, 255));
+        painter.circle_filled(egui::pos2(rect.right() - radius * 0.55, rect.top() + radius * 0.45), 5.0, egui::Color32::from_rgb(150, 190, 255));
     }
 }
 
@@ -1349,12 +1384,29 @@ fn watch_quick_button(ui: &mut egui::Ui, st: &mut LibState, id: &str, quick: &dy
     }
 }
 
-/// A subtle inset card used to group the watch's areas.
+/// A watch button (painted, eases on hover): `lit` fills it with the accent.
+/// Disabled ones fade. Returns true when tapped.
+fn watch_btn(ui: &mut egui::Ui, size: egui::Vec2, text: &str, font: f32, lit: bool, tip: &str) -> bool {
+    let enabled = ui.is_enabled();
+    let (r, resp) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let h = if enabled { kit::hover_t(ui, &resp) } else { 0.0 };
+    let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), lit, 0.16);
+    let fill = kit::mix(kit::mix(theme::SURFACE_CONTAINER_HIGH, egui::Color32::from_rgb(58, 68, 80), h), theme::PRIMARY, on);
+    let fg = kit::mix(kit::mix(theme::ON_SURFACE, egui::Color32::WHITE, h), egui::Color32::BLACK, on);
+    let p = ui.painter();
+    let radius = egui::CornerRadius::same((size.y * 0.3).min(16.0) as u8);
+    p.rect_filled(r, radius, if enabled { fill } else { kit::alpha(fill, 0.4) });
+    let g = kit::fit_text(ui, text, font, if enabled { fg } else { kit::alpha(fg, 0.4) }, size.x - 12.0);
+    ui.painter().galley(r.center() - g.size() / 2.0, g, fg);
+    resp.on_hover_text(tip).clicked()
+}
+
+/// A card grouping one of the watch's areas.
 fn watch_card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
-        .fill(egui::Color32::from_rgb(22, 28, 36))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(16)))
-        .corner_radius(12)
+        .fill(theme::SURFACE_CONTAINER)
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(14)))
+        .corner_radius(16)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             // Cards sit in a horizontal row; their contents stack vertically.
@@ -1362,85 +1414,76 @@ fn watch_card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-/// The bottom floating bar (its own layer): recenter · active-game splash toggle ·
-/// device batteries · clock.
+/// The bottom floating bar (its own layer): recenter · the running game ·
+/// the mirrored screens and keyboard (centred) · batteries · clock.
 pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgb(18, 22, 28))
-        .corner_radius(20)
-        .inner_margin(egui::Margin::symmetric(18, 6));
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)))
+        .corner_radius(26)
+        .inner_margin(egui::Margin::symmetric(16, 6));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
         ui.horizontal_centered(|ui| {
-            // Recenter playspace — transparent at rest, fades to a hover highlight
-            // with the icon brightening to white.
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(46.0, 40.0), egui::Sense::click());
-            let t = ui.ctx().animate_bool(resp.id, resp.hovered());
-            if t > 0.001 {
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::same(10),
-                    egui::Color32::from_rgba_unmultiplied(48, 70, 74, (t * 255.0) as u8),
-                );
-            }
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                icon::CROSSHAIR,
-                egui::FontId::proportional(22.0),
-                lerp_color(theme::ON_SURFACE_VAR, egui::Color32::WHITE, t),
-            );
+            ui.spacing_mut().item_spacing.x = 10.0;
+            // Recenter playspace: a round glyph that lights on hover.
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::click());
+            let h = kit::hover_t(ui, &resp);
+            ui.painter().circle_filled(rect.center(), 24.0, kit::mix(theme::SURFACE_CONTAINER, egui::Color32::from_rgb(44, 54, 64), h));
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon::CROSSHAIR, egui::FontId::proportional(22.0), kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, h));
             if resp.on_hover_text("Recenter playspace").clicked() {
                 st.recenter_playspace_request = true;
                 st.sound_tab = true;
             }
-            ui.add_space(6.0);
-            // Active-game splash toggle (only while a game runs).
+            // The running game: opens its splash.
             if let Some(i) = st.running_index {
                 let name = short(&st.games[i].name);
-                let btn = egui::Button::new(
-                    egui::RichText::new(format!("{}  {}", icon::GAME_CONTROLLER, name))
-                        .size(15.0)
-                        .color(if st.show_splash { egui::Color32::BLACK } else { theme::ON_SURFACE }),
-                )
-                .fill(if st.show_splash { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                .min_size(egui::vec2(0.0, 40.0));
-                if ui.add(btn).on_hover_text("Active game").clicked() {
+                let label = format!("{}  {name}", icon::GAME_CONTROLLER);
+                let g = ui.fonts(|f| f.layout_no_wrap(label.clone(), egui::FontId::proportional(15.0), egui::Color32::WHITE));
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 44.0, 48.0), egui::Sense::click());
+                let h = kit::hover_t(ui, &resp);
+                let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), st.show_splash, 0.16);
+                let p = ui.painter();
+                p.rect_filled(r, egui::CornerRadius::same(24), kit::mix(kit::mix(theme::SURFACE_CONTAINER, egui::Color32::from_rgb(44, 54, 64), h), theme::PRIMARY, on));
+                p.circle_filled(egui::pos2(r.left() + 16.0, r.center().y), 4.0, kit::mix(RUNNING_GREEN, egui::Color32::BLACK, on));
+                p.text(egui::pos2(r.left() + 28.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(15.0), kit::mix(theme::ON_SURFACE, egui::Color32::BLACK, on));
+                if resp.on_hover_text("The running game").clicked() {
                     st.show_splash = !st.show_splash;
                     st.sound_tab = true;
                 }
             }
-            // Mirrored screens + keyboard, centred in the bar (fixed order so a
-            // screen is always in the same spot — the WayVR wrist-bar problem).
+            // Mirrored screens + keyboard in one tray, centred in the bar (fixed
+            // order: a screen is always in the same spot).
             let mut pills_right: Option<f32> = None;
             if !st.desktop_bar.is_empty() {
-                let count = st.desktop_bar.len();
-                let pill_w = 64.0;
-                let kb_w = 48.0;
-                let total = count as f32 * pill_w + kb_w + count as f32 * 8.0;
-                let bar = ui.max_rect();
-                let rect = egui::Rect::from_center_size(bar.center(), egui::vec2(total, 40.0));
-                pills_right = Some(rect.right());
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-                child.spacing_mut().item_spacing.x = 8.0;
+                let (pill_w, kb_w, gap, pad) = (68.0, 52.0, 6.0, 5.0);
+                let count = st.desktop_bar.len() as f32;
+                let total = count * pill_w + kb_w + count * gap + pad * 2.0 + 10.0;
+                let tray = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(total, 54.0));
+                pills_right = Some(tray.right());
+                ui.painter().rect_filled(tray, egui::CornerRadius::same(27), egui::Color32::from_rgb(24, 29, 36));
+                let mut x = tray.left() + pad;
                 let mut toggle = None;
+                // `lead`: extra room before this pill (sets the keyboard apart).
+                let mut pill = |ui: &mut egui::Ui, w: f32, lead: f32, key: usize, text: String, on: bool, tip: &str| -> bool {
+                    x += lead;
+                    let r = egui::Rect::from_min_size(egui::pos2(x, tray.top() + pad), egui::vec2(w, 44.0));
+                    x += w + gap;
+                    let resp = ui.interact(r, ui.id().with(("bar-pill", key)), egui::Sense::click());
+                    let h = kit::hover_t(ui, &resp);
+                    let lit = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.16);
+                    let p = ui.painter();
+                    p.rect_filled(r, egui::CornerRadius::same(22), kit::mix(kit::alpha(egui::Color32::WHITE, 0.06 * h), theme::PRIMARY, lit));
+                    p.text(r.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(16.0), kit::mix(kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, h), egui::Color32::BLACK, lit));
+                    resp.on_hover_text(tip).clicked()
+                };
                 for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
-                    let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
                     // Numbered, not named: the number is the position, which never moves.
-                    let btn = egui::Button::new(
-                        egui::RichText::new(format!("{}  {}", icon::MONITOR, i + 1)).size(15.0).color(fg),
-                    )
-                    .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                    .min_size(egui::vec2(pill_w, 40.0));
                     let tip = format!("{} · {}", name, if *shown { "hide" } else { "show" });
-                    if child.add(btn).on_hover_text(tip).clicked() {
+                    if pill(ui, pill_w, 0.0, i, format!("{}  {}", icon::MONITOR, i + 1), *shown, &tip) {
                         toggle = Some(i);
                     }
                 }
-                let kfg = if st.keyboard_shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
-                let kbtn = egui::Button::new(egui::RichText::new(icon::KEYBOARD).size(20.0).color(kfg))
-                    .fill(if st.keyboard_shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
-                    .min_size(egui::vec2(kb_w, 40.0));
-                if child.add(kbtn).on_hover_text("VR keyboard").clicked() {
+                if pill(ui, kb_w, 10.0, 999, icon::KEYBOARD.to_string(), st.keyboard_shown, "VR keyboard") {
                     st.keyboard_toggle_request = true;
                     st.sound_tab = true;
                 }
@@ -1450,11 +1493,10 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                 }
             }
             // Clock + batteries on the right. The batteries only get the room
-            // between the (fixed, centred) screen pills and the clock: a full-body
-            // rig's worth of devices would otherwise run over the pills. They wrap
-            // onto a second row first (every device stays readable), and only fold
-            // into one chip per kind — the watch's trick — when two rows aren't
-            // enough: trackers / gloves / others first, the controllers last.
+            // between the (fixed, centred) screen tray and the clock: a full-body
+            // rig's worth of devices would otherwise run over it. They wrap onto a
+            // second row first (every device stays readable), and only fold into
+            // one chip per kind — the watch's trick — when two rows aren't enough.
             use crate::monado::{BatteryInfo, BatteryKind};
             enum Chip<'a> {
                 One(&'a BatteryInfo),
@@ -1464,11 +1506,11 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                 ui.fonts(|f| f.layout_no_wrap(text, egui::FontId::proportional(size), egui::Color32::WHITE).size().x)
             };
             let limit = pills_right.unwrap_or(0.0).max(ui.cursor().min.x) + 14.0;
-            let clock_w = if st.clock.is_empty() { 0.0 } else { measure(ui, st.clock.clone(), 20.0) + 8.0 };
-            let avail = (ui.max_rect().right() - limit - clock_w - 16.0).max(0.0);
-            // Widest a chip gets ("100%", and "×N" for a group), plus its spacing.
-            let w_single = measure(ui, format!("{} {} 100%", icon::GAME_CONTROLLER, icon::BATTERY_FULL), 14.0) + 18.0;
-            let w_group = measure(ui, format!("{} {} 100% ×9", icon::GAME_CONTROLLER, icon::BATTERY_FULL), 14.0) + 18.0;
+            let clock_w = if st.clock.is_empty() { 0.0 } else { measure(ui, st.clock.clone(), 22.0) + 8.0 };
+            let avail = (ui.max_rect().right() - limit - clock_w - 18.0).max(0.0);
+            // Widest a chip gets ("100%", and "×N" for a group), with its padding and spacing.
+            let w_single = measure(ui, format!("{} {} 100%", icon::GAME_CONTROLLER, icon::BATTERY_FULL), 13.5) + BATTERY_PILL_PAD + 8.0;
+            let w_group = measure(ui, format!("{} {} 100% ×9", icon::GAME_CONTROLLER, icon::BATTERY_FULL), 13.5) + BATTERY_PILL_PAD + 8.0;
             let of_kind = |k: BatteryKind| -> Vec<&BatteryInfo> { st.batteries.iter().filter(|b| b.kind == k).collect() };
             let others = [BatteryKind::Glove, BatteryKind::Tracker, BatteryKind::Other];
             let groups = |kinds: &[BatteryKind]| -> Vec<Chip> {
@@ -1498,26 +1540,26 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                 Chip::Group(kind, group) => battery_group_widget(ui, *kind, group),
             };
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 if !st.clock.is_empty() {
-                    ui.label(egui::RichText::new(&st.clock).size(20.0).strong().color(egui::Color32::WHITE));
+                    ui.label(egui::RichText::new(&st.clock).size(22.0).strong().color(egui::Color32::WHITE));
                 }
-                ui.add_space(16.0);
+                ui.add_space(14.0);
                 if chips.len() <= per_row {
                     for chip in &chips {
                         draw(ui, chip);
-                        ui.add_space(10.0);
                     }
                 } else {
                     // Two rows, split evenly (the first devices stay top-right).
                     let top = chips.len().div_ceil(2);
                     let block_w = avail.min(top as f32 * w_single.max(w_group));
-                    ui.allocate_ui_with_layout(egui::vec2(block_w, 44.0), egui::Layout::top_down(egui::Align::Max), |ui| {
-                        ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.allocate_ui_with_layout(egui::vec2(block_w, 60.0), egui::Layout::top_down(egui::Align::Max), |ui| {
+                        ui.spacing_mut().item_spacing.y = 6.0;
                         for row in [&chips[..top], &chips[top..]] {
-                            ui.allocate_ui_with_layout(egui::vec2(block_w, 18.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.allocate_ui_with_layout(egui::vec2(block_w, 26.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
                                 for chip in row {
                                     draw(ui, chip);
-                                    ui.add_space(10.0);
                                 }
                             });
                         }
@@ -1558,32 +1600,49 @@ fn battery_state_note(b: &crate::monado::BatteryInfo) -> &'static str {
 /// by it), "×N" when several, and every member's charge on hover. Switched-off
 /// members don't count towards the lowest; a group that's all off goes grey.
 fn battery_group_widget(ui: &mut egui::Ui, kind: crate::monado::BatteryKind, group: &[&crate::monado::BatteryInfo]) {
+    if let Some((text, color, tip)) = group_chip(kind, group, false) {
+        battery_pill(ui, text, color, &tip);
+    }
+}
+
+fn battery_widget(ui: &mut egui::Ui, b: &crate::monado::BatteryInfo) {
+    let (text, color, tip) = one_chip(b, false);
+    battery_pill(ui, text, color, &tip);
+}
+
+/// A device's chip: (text, colour, hover text). `compact` drops the battery
+/// glyph (the watch, when room is short).
+fn one_chip(b: &crate::monado::BatteryInfo, compact: bool) -> (String, egui::Color32, String) {
+    use crate::monado::BatteryKind;
+    let dev = match b.kind {
+        BatteryKind::Glove => icon::HAND,
+        BatteryKind::Controller => icon::GAME_CONTROLLER,
+        _ => icon::CIRCLE,
+    };
+    // A switched-off device's charge is its last reading: show "off" instead.
+    let text = if b.state == crate::monado::DevState::Off {
+        format!("{dev}  off")
+    } else if compact {
+        format!("{dev} {}%", (b.charge * 100.0).round() as i32)
+    } else {
+        format!("{dev} {} {}%", battery_glyph(b), (b.charge * 100.0).round() as i32)
+    };
+    let what = match b.kind {
+        BatteryKind::Glove => "Glove",
+        BatteryKind::Controller => "Controller",
+        BatteryKind::Tracker => "Tracker",
+        BatteryKind::Other => "Device",
+    };
+    (text, battery_color(b), format!("{what}{}", battery_state_note(b)))
+}
+
+/// A kind's chip (see `battery_group_widget`); `None` for an empty group.
+fn group_chip(kind: crate::monado::BatteryKind, group: &[&crate::monado::BatteryInfo], compact: bool) -> Option<(String, egui::Color32, String)> {
     use crate::monado::{BatteryKind, DevState};
     let on: Vec<&&crate::monado::BatteryInfo> = group.iter().filter(|b| b.state != DevState::Off).collect();
-    let lowest = on
-        .iter()
-        .filter(|b| !b.charging)
-        .min_by(|a, b| a.charge.total_cmp(&b.charge))
-        .or(on.first())
-        .map(|b| **b)
-        .or(group.first().copied());
-    let Some(lowest) = lowest else {
-        return;
-    };
-    let pct = (lowest.charge * 100.0).round() as i32;
-    let bat = if lowest.charging {
-        icon::BATTERY_CHARGING
-    } else if lowest.charge > 0.66 {
-        icon::BATTERY_FULL
-    } else if lowest.charge > 0.33 {
-        icon::BATTERY_MEDIUM
-    } else if lowest.charge > 0.1 {
-        icon::BATTERY_LOW
-    } else {
-        icon::BATTERY_WARNING
-    };
-    // Tinted by the lowest live member; faded only when none of them tracks.
+    let lowest = on.iter().filter(|b| !b.charging).min_by(|a, b| a.charge.total_cmp(&b.charge)).or(on.first()).map(|b| **b).or(group.first().copied())?;
     let all_off = on.is_empty();
+    // Tinted by the lowest live member; faded only when none of them tracks.
     let color = if all_off {
         battery_color(lowest)
     } else {
@@ -1612,15 +1671,19 @@ fn battery_group_widget(ui: &mut egui::Ui, kind: crate::monado::BatteryKind, gro
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let text = if all_off { format!("{dev} off{count}") } else { format!("{dev} {bat} {pct}%{count}") };
-    ui.label(egui::RichText::new(text).size(14.0).color(color))
-        .on_hover_text(format!("Lowest of {}:\n{tip}", name.to_lowercase()));
+    let pct = (lowest.charge * 100.0).round() as i32;
+    let text = if all_off {
+        format!("{dev}  off{count}")
+    } else if compact {
+        format!("{dev} {pct}%{count}")
+    } else {
+        format!("{dev} {} {pct}%{count}", battery_glyph(lowest))
+    };
+    Some((text, color, format!("Lowest of {}:\n{tip}", name.to_lowercase())))
 }
 
-fn battery_widget(ui: &mut egui::Ui, b: &crate::monado::BatteryInfo) {
-    use crate::monado::BatteryKind;
-    let pct = (b.charge * 100.0).round() as i32;
-    let bat = if b.charging {
+fn battery_glyph(b: &crate::monado::BatteryInfo) -> &'static str {
+    if b.charging {
         icon::BATTERY_CHARGING
     } else if b.charge > 0.66 {
         icon::BATTERY_FULL
@@ -1630,65 +1693,72 @@ fn battery_widget(ui: &mut egui::Ui, b: &crate::monado::BatteryInfo) {
         icon::BATTERY_LOW
     } else {
         icon::BATTERY_WARNING
-    };
-    let color = battery_color(b);
-    let dev = match b.kind {
-        BatteryKind::Glove => icon::HAND,
-        BatteryKind::Controller => icon::GAME_CONTROLLER,
-        _ => icon::CIRCLE,
-    };
-    // A switched-off device's charge is its last reading: show "off" instead.
-    let text = if b.state == crate::monado::DevState::Off { format!("{dev} off") } else { format!("{dev} {bat} {pct}%") };
-    let what = match b.kind {
-        BatteryKind::Glove => "Glove",
-        BatteryKind::Controller => "Controller",
-        BatteryKind::Tracker => "Tracker",
-        BatteryKind::Other => "Device",
-    };
-    ui.label(egui::RichText::new(text).size(14.0).color(color)).on_hover_text(format!("{what}{}", battery_state_note(b)));
+    }
+}
+
+/// Horizontal room a battery pill takes around its text (padding + spacing).
+const BATTERY_PILL_PAD: f32 = 20.0;
+
+/// A battery reading as a softly tinted pill.
+fn battery_pill(ui: &mut egui::Ui, text: String, color: egui::Color32, tip: &str) {
+    let g = ui.fonts(|f| f.layout_no_wrap(text, egui::FontId::proportional(13.5), color));
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + BATTERY_PILL_PAD, 26.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, egui::CornerRadius::same(13), kit::alpha(color, 0.13));
+    p.galley(egui::pos2(rect.left() + BATTERY_PILL_PAD / 2.0, rect.center().y - g.size().y / 2.0), g, color);
+    resp.on_hover_text(tip);
 }
 
 // --- on-panel virtual keyboard ----------------------------------------------
 
 fn keyboard(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
-        .fill(egui::Color32::from_rgb(13, 16, 20))
-        .inner_margin(egui::Margin::symmetric(14, 12));
+        .fill(egui::Color32::from_rgb(18, 22, 28))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)))
+        .inner_margin(egui::Margin::symmetric(14, 14));
     let naming = st.naming;
-    egui::TopBottomPanel::bottom("keyboard").frame(frame).show(ctx, |ui| {
-        ui.spacing_mut().item_spacing.y = 6.0;
+    egui::TopBottomPanel::bottom("keyboard").show_separator_line(false).frame(frame).show(ctx, |ui| {
+        ui.spacing_mut().item_spacing.y = 8.0;
         if naming {
             ui.horizontal(|ui| {
                 let what = if st.layout_rename.is_some() {
-                    "Rename layout:"
+                    "RENAME LAYOUT"
                 } else if st.naming_layout {
-                    "New layout:"
+                    "NEW LAYOUT"
                 } else {
-                    "New collection:"
+                    "NEW COLLECTION"
                 };
-                ui.label(egui::RichText::new(format!("{}  {what}", icon::FOLDER_PLUS)).size(14.0).color(theme::ON_SURFACE_VAR));
-                ui.add_space(6.0);
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(what).size(12.5).strong().color(theme::PRIMARY));
+                ui.add_space(8.0);
                 let shown = if st.name_buf.is_empty() { "…" } else { st.name_buf.as_str() };
-                ui.label(egui::RichText::new(shown).size(16.0).strong().color(egui::Color32::WHITE));
+                ui.label(egui::RichText::new(shown).size(20.0).strong().color(egui::Color32::WHITE));
             });
-            ui.add_space(4.0);
+            ui.add_space(2.0);
         }
         for row in ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"] {
             key_row(ui, row, if naming { &mut st.name_buf } else { &mut st.search });
         }
-        let sp = 6.0;
-        let total = 96.0 + 240.0 + 96.0 + 130.0 + 3.0 * sp;
+        let sp = 8.0;
+        let total = 110.0 + 260.0 + 110.0 + 140.0 + 3.0 * sp + if naming { 110.0 + sp } else { 0.0 };
         let pad = ((ui.available_width() - total) * 0.5).max(0.0);
         ui.horizontal(|ui| {
             ui.add_space(pad);
             ui.spacing_mut().item_spacing.x = sp;
-            if fkey(ui, &format!("{}  Back", icon::BACKSPACE), 96.0, false).clicked() {
+            if naming && fkey(ui, "Cancel", 110.0, false).clicked() {
+                st.name_buf.clear();
+                st.naming = false;
+                st.naming_layout = false;
+                st.layout_rename = None;
+                st.keyboard_open = false;
+            }
+            if fkey(ui, &format!("{}  Back", icon::BACKSPACE), 110.0, false).clicked() {
                 if naming { st.name_buf.pop(); } else { st.search.pop(); }
             }
-            if fkey(ui, "Space", 240.0, false).clicked() {
+            if fkey(ui, "Space", 260.0, false).clicked() {
                 if naming { st.name_buf.push(' '); } else { st.search.push(' '); }
             }
-            if fkey(ui, "Clear", 96.0, false).clicked() {
+            if fkey(ui, "Clear", 110.0, false).clicked() {
                 if naming { st.name_buf.clear(); } else { st.search.clear(); }
             }
             let commit = if !naming {
@@ -1699,7 +1769,7 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
                 "Create"
             };
             let can_commit = !naming || !st.name_buf.trim().is_empty();
-            let commit_resp = ui.add_enabled_ui(can_commit, |ui| fkey(ui, commit, 130.0, true)).inner;
+            let commit_resp = ui.add_enabled_ui(can_commit, |ui| fkey(ui, commit, 140.0, true)).inner;
             if !can_commit {
                 commit_resp.on_hover_text("Type a name first");
             } else if commit_resp.clicked() {
@@ -1721,24 +1791,11 @@ fn keyboard(ctx: &egui::Context, st: &mut LibState) {
                 st.keyboard_open = false;
             }
         });
-        if naming {
-            let cancel_pad = ((ui.available_width() - 110.0) * 0.5).max(0.0);
-            ui.horizontal(|ui| {
-                ui.add_space(cancel_pad);
-                if fkey(ui, "Cancel", 110.0, false).clicked() {
-                    st.name_buf.clear();
-                    st.naming = false;
-                    st.naming_layout = false;
-                    st.layout_rename = None;
-                    st.keyboard_open = false;
-                }
-            });
-        }
     });
 }
 
 fn key_row(ui: &mut egui::Ui, chars: &str, target: &mut String) {
-    let (kw, sp) = (44.0, 6.0);
+    let (kw, sp) = (48.0, 8.0);
     let n = chars.chars().count() as f32;
     let total = n * kw + (n - 1.0).max(0.0) * sp;
     let pad = ((ui.available_width() - total) * 0.5).max(0.0);
@@ -1746,23 +1803,30 @@ fn key_row(ui: &mut egui::Ui, chars: &str, target: &mut String) {
         ui.add_space(pad);
         ui.spacing_mut().item_spacing.x = sp;
         for ch in chars.chars() {
-            let key = egui::Button::new(egui::RichText::new(ch.to_string()).size(18.0))
-                .min_size(egui::vec2(kw, 44.0));
-            if ui.add(key).clicked() {
+            if fkey(ui, &ch.to_string(), kw, false).clicked() {
                 target.push(ch);
             }
         }
     });
 }
 
+/// A key of the on-panel keyboard (painted, so it eases on hover); `accent`
+/// fills it with the brand colour (Done / Create).
 fn fkey(ui: &mut egui::Ui, label: &str, w: f32, accent: bool) -> egui::Response {
-    let text = egui::RichText::new(label).size(16.0);
-    let text = if accent { text.color(egui::Color32::BLACK) } else { text };
-    let mut btn = egui::Button::new(text).min_size(egui::vec2(w, 44.0));
-    if accent {
-        btn = btn.fill(theme::PRIMARY);
-    }
-    ui.add(btn)
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 48.0), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    let h = if enabled { kit::hover_t(ui, &resp) } else { 0.0 };
+    let down = resp.is_pointer_button_down_on() as u8 as f32;
+    let p = ui.painter();
+    let fill = if accent {
+        kit::mix(theme::PRIMARY, egui::Color32::WHITE, h * 0.14)
+    } else {
+        kit::mix(kit::mix(theme::SURFACE_CONTAINER_HIGH, egui::Color32::from_rgb(58, 68, 80), h), egui::Color32::from_rgb(72, 84, 98), down)
+    };
+    p.rect_filled(rect, egui::CornerRadius::same(12), if enabled { fill } else { kit::alpha(fill, 0.45) });
+    let fg = if accent { egui::Color32::BLACK } else { kit::mix(theme::ON_SURFACE, egui::Color32::WHITE, h) };
+    p.text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(if label.chars().count() == 1 { 19.0 } else { 16.0 }), if enabled { fg } else { kit::alpha(fg, 0.5) });
+    resp
 }
 
 // --- central views ----------------------------------------------------------
@@ -1822,9 +1886,19 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
 fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
     hero(ui, st);
     collection_chips(ui, st);
-    ui.add_space(14.0);
-    ui.label(egui::RichText::new("Recent Games").heading().strong().color(egui::Color32::WHITE));
-    ui.add_space(8.0);
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Recent").size(22.0).strong().color(egui::Color32::WHITE));
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(format!("{} games", st.games.len())).size(14.0).color(theme::ON_SURFACE_VAR));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if kit::button(ui, icon::SQUARES_FOUR, "See all", kit::Tone::Neutral, 130.0).clicked() {
+                st.nav = Nav::Library;
+                st.sound_tab = true;
+            }
+        });
+    });
+    ui.add_space(6.0);
 
     let shown = filtered(st);
     if shown.is_empty() {
@@ -1836,6 +1910,7 @@ fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
     let (mut visible, mut newly, mut hovered) = (Vec::new(), None, None);
     egui::ScrollArea::horizontal().id_salt("home-row").show(ui, |ui| {
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 16.0;
             for &i in &shown {
                 let r = tile(ui, &st.games[i], st.selected == Some(i), st.running_index == Some(i));
                 if ui.is_rect_visible(r.rect) {
@@ -1847,7 +1922,6 @@ fn home_view(ui: &mut egui::Ui, st: &mut LibState) {
                 if r.clicked() {
                     newly = Some(i);
                 }
-                ui.add_space(14.0);
             }
         });
     });
@@ -1865,19 +1939,19 @@ fn collection_chips(ui: &mut egui::Ui, st: &mut LibState) {
     let Some(sel) = st.selected.filter(|&i| i < st.games.len()) else {
         return;
     };
-    ui.add_space(8.0);
+    ui.add_space(10.0);
     let cols = st.collections.clone();
     ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new(format!("{}  Collections", icon::FOLDERS)).size(13.0).color(theme::ON_SURFACE_VAR));
-        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        ui.add_sized(egui::vec2(128.0, 42.0), egui::Label::new(egui::RichText::new(format!("{}  COLLECTIONS", icon::FOLDERS)).size(12.5).strong().color(theme::ON_SURFACE_VAR)));
         for (ci, name) in cols.iter().enumerate() {
             let member = st.games[sel].collections.contains(&ci);
-            if chip(ui, name, member).clicked() {
+            if kit::choice_chip(ui, name, member).clicked() {
                 st.collection_toggle = Some(ci);
                 st.sound_tab = true;
             }
         }
-        if chip(ui, &format!("{}  New", icon::PLUS), false).clicked() {
+        if kit::choice_chip(ui, &format!("{}  New", icon::PLUS), false).clicked() {
             st.naming = true;
             st.name_buf.clear();
             st.keyboard_open = true;
@@ -1886,24 +1960,10 @@ fn collection_chips(ui: &mut egui::Ui, st: &mut LibState) {
     });
 }
 
-fn chip(ui: &mut egui::Ui, label: &str, on: bool) -> egui::Response {
-    let (fg, fill) = if on {
-        (egui::Color32::BLACK, theme::PRIMARY)
-    } else {
-        (theme::ON_SURFACE, theme::SURFACE_CONTAINER_HIGH)
-    };
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).size(13.0).color(fg))
-            .fill(fill)
-            .corner_radius(8)
-            .min_size(egui::vec2(0.0, 28.0)),
-    )
-}
-
 fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
-    view_header(ui, st, title);
-    ui.add_space(10.0);
     let mut shown = filtered(st);
+    view_header(ui, st, title, shown.len(), true);
+    ui.add_space(12.0);
     apply_sort(st, &mut shown);
     if shown.is_empty() {
         st.visible_now.clear();
@@ -1914,24 +1974,27 @@ fn grid_view(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
     game_grid(ui, st, &shown, "grid", false);
 }
 
-/// A view header: the title on the left, the sort selector on the right.
-fn view_header(ui: &mut egui::Ui, st: &mut LibState, title: &str) {
+/// A game page's header: title and count on the left; on the right the sort
+/// order and, on the Library, whether it's grouped into collections.
+fn view_header(ui: &mut egui::Ui, st: &mut LibState, title: &str, count: usize, library: bool) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title).heading().strong().color(egui::Color32::WHITE));
+        ui.label(egui::RichText::new(title).size(28.0).strong().color(egui::Color32::WHITE));
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new(format!("{count} game{}", if count == 1 { "" } else { "s" })).size(15.0).color(theme::ON_SURFACE_VAR));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Added right-to-left, so list reversed to read Recent · Name · … left-to-right.
-            for (label, mode) in [
-                (icon::HARD_DRIVES, SortMode::Size),
-                (icon::HOURGLASS_MEDIUM, SortMode::Playtime),
-                (icon::TEXT_AA, SortMode::Name),
-                (icon::CLOCK_COUNTER_CLOCKWISE, SortMode::Recent),
-            ] {
-                if sort_pill(ui, label, sort_label(mode), st.sort == mode).clicked() {
-                    st.sort = mode;
+            let modes = [SortMode::Recent, SortMode::Name, SortMode::Playtime, SortMode::Size];
+            let cur = modes.iter().position(|m| *m == st.sort).unwrap_or(0);
+            if let Some(i) = kit::segmented(ui, &modes.map(sort_label), cur) {
+                st.sort = modes[i];
+                st.sound_tab = true;
+            }
+            if library {
+                ui.add_space(14.0);
+                if let Some(i) = kit::segmented(ui, &["All games", "Collections"], st.library_grouped as usize) {
+                    st.library_grouped = i == 1;
                     st.sound_tab = true;
                 }
             }
-            ui.label(egui::RichText::new("Sort").size(13.0).color(theme::ON_SURFACE_VAR));
         });
     });
 }
@@ -1943,20 +2006,6 @@ fn sort_label(mode: SortMode) -> &'static str {
         SortMode::Playtime => "Played",
         SortMode::Size => "Size",
     }
-}
-
-fn sort_pill(ui: &mut egui::Ui, glyph: &str, label: &str, selected: bool) -> egui::Response {
-    let (fg, fill) = if selected {
-        (egui::Color32::BLACK, theme::PRIMARY)
-    } else {
-        (theme::ON_SURFACE_VAR, theme::SURFACE_CONTAINER)
-    };
-    ui.add(
-        egui::Button::new(egui::RichText::new(format!("{glyph}  {label}")).size(13.0).color(fg))
-            .fill(fill)
-            .corner_radius(8)
-            .min_size(egui::vec2(0.0, 30.0)),
-    )
 }
 
 /// Sort game indices in place by the active mode (Recent keeps the recency order
@@ -1978,19 +2027,14 @@ fn apply_sort(st: &LibState, idxs: &mut [usize]) {
 }
 
 fn favorites_view(ui: &mut egui::Ui, st: &mut LibState) {
-    view_header(ui, st, "Favorites");
-    ui.add_space(10.0);
     let mut shown: Vec<usize> = filtered(st).into_iter().filter(|&i| st.games[i].is_favorite).collect();
+    view_header(ui, st, "Favorites", shown.len(), false);
+    ui.add_space(12.0);
     apply_sort(st, &mut shown);
     if shown.is_empty() {
         st.visible_now.clear();
         st.hovered_index = None;
-        ui.add_space(50.0);
-        ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new(format!("{}  No favorites yet", icon::STAR)).size(18.0).color(theme::ON_SURFACE_VAR));
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new("Tap the ★ on a game to pin it here.").small().color(theme::ON_SURFACE_VAR));
-        });
+        kit::empty_state(ui, icon::STAR, "No favorites yet", "Tap the star on a game to pin it here");
         return;
     }
     game_grid(ui, st, &shown, "favs", true);
@@ -2004,6 +2048,7 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str, 
     let (mut visible, mut newly, mut launch, mut hovered) = (Vec::new(), None, None, None);
     egui::ScrollArea::vertical().id_salt(salt).show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(16.0, 18.0);
             for &i in shown {
                 let r = tile(ui, &st.games[i], st.selected == Some(i), st.running_index == Some(i));
                 if ui.is_rect_visible(r.rect) {
@@ -2035,20 +2080,9 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str, 
     }
 }
 
-/// Library: a mode row (all games / grouped by collection) over the grid or
-/// the former Categories view.
+/// Library: every game in a grid, or grouped by collection (the header's
+/// switch picks).
 fn library_view(ui: &mut egui::Ui, st: &mut LibState) {
-    ui.horizontal(|ui| {
-        if chip(ui, &format!("{}  All games", icon::SQUARES_FOUR), !st.library_grouped).clicked() {
-            st.library_grouped = false;
-            st.sound_tab = true;
-        }
-        if chip(ui, &format!("{}  Collections", icon::TAG), st.library_grouped).clicked() {
-            st.library_grouped = true;
-            st.sound_tab = true;
-        }
-    });
-    ui.add_space(6.0);
     if st.library_grouped {
         tags_view(ui, st);
     } else {
@@ -2057,19 +2091,17 @@ fn library_view(ui: &mut egui::Ui, st: &mut LibState) {
 }
 
 fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
-    view_header(ui, st, "Collections");
-    ui.add_space(8.0);
-
+    let shown = filtered(st);
+    view_header(ui, st, "Library", shown.len(), true);
+    ui.add_space(12.0);
     // Create a new collection (works even with no games yet).
-    if chip(ui, &format!("{}  New collection", icon::FOLDER_PLUS), false).clicked() {
+    if kit::choice_chip(ui, &format!("{}  New collection", icon::FOLDER_PLUS), false).clicked() {
         st.naming = true;
         st.name_buf.clear();
         st.keyboard_open = true;
         st.sound_tab = true;
     }
-    ui.add_space(10.0);
-
-    let shown = filtered(st);
+    ui.add_space(6.0);
     if shown.is_empty() {
         st.visible_now.clear();
         st.hovered_index = None;
@@ -2082,39 +2114,46 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
         ("Non-Steam", |g| g.source == "Non-Steam"),
     ];
     let (mut visible, mut newly, mut hovered, mut delete) = (Vec::new(), None, None, None);
+    // One group: a header (glyph, name, count, and for collections a two-tap
+    // delete), then its tiles.
+    let group_header = |ui: &mut egui::Ui, glyph: &str, name: &str, n: usize| {
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(glyph).size(20.0).color(theme::PRIMARY));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(name).size(19.0).strong().color(egui::Color32::WHITE));
+            ui.add_space(4.0);
+            kit::badge(ui, &n.to_string(), theme::ON_SURFACE_VAR);
+        });
+        ui.add_space(8.0);
+    };
     egui::ScrollArea::vertical().id_salt("tags").show(ui, |ui| {
         // User collections first.
         for (ci, name) in cols.iter().enumerate() {
-            let mut group: Vec<usize> =
-                shown.iter().copied().filter(|&i| st.games[i].collections.contains(&ci)).collect();
+            let mut group: Vec<usize> = shown.iter().copied().filter(|&i| st.games[i].collections.contains(&ci)).collect();
             apply_sort(st, &mut group);
-            ui.add_space(4.0);
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("{}  {name}  ·  {}", icon::FOLDER, group.len()))
-                        .strong()
-                        .color(theme::ON_SURFACE_VAR),
-                );
-                ui.add_space(6.0);
+                ui.label(egui::RichText::new(icon::FOLDER).size(20.0).color(theme::PRIMARY));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(name).size(19.0).strong().color(egui::Color32::WHITE));
+                ui.add_space(4.0);
+                kit::badge(ui, &group.len().to_string(), theme::ON_SURFACE_VAR);
+                ui.add_space(8.0);
                 let key = format!("col-del:{ci}");
                 let armed = st.is_armed(&key);
-                let del = egui::Button::new(
-                    egui::RichText::new(if armed { format!("{}  Tap again to delete", icon::TRASH) } else { icon::TRASH.to_string() })
-                        .size(13.0)
-                        .color(if armed { egui::Color32::BLACK } else { STOP_RED }),
-                )
-                .fill(if armed { STOP_RED } else { egui::Color32::TRANSPARENT })
-                .corner_radius(8)
-                .min_size(egui::vec2(28.0, 24.0));
-                if ui.add(del).on_hover_text("Delete collection").clicked() && st.confirm_tap(&key) {
+                if kit::icon_btn(ui, icon::TRASH, if armed { "Tap again to delete the collection" } else { "Delete the collection (its games stay)" }, armed, true).clicked()
+                    && st.confirm_tap(&key)
+                {
                     delete = Some(ci);
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             if group.is_empty() {
-                ui.label(egui::RichText::new("Empty — add games from the Home hero.").size(13.0).color(theme::ON_SURFACE_VAR));
+                ui.label(egui::RichText::new("Empty · add games from the chips under the Home banner").size(14.0).color(theme::ON_SURFACE_VAR));
             } else {
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(16.0, 18.0);
                     for &i in &group {
                         let r = tile(ui, &st.games[i], st.selected == Some(i), st.running_index == Some(i));
                         if ui.is_rect_visible(r.rect) {
@@ -2129,7 +2168,7 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
                     }
                 });
             }
-            ui.add_space(14.0);
+            ui.add_space(10.0);
         }
         // Auto categories by source.
         for (label, pred) in groups {
@@ -2138,10 +2177,9 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
             if group.is_empty() {
                 continue;
             }
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(format!("{label}  ·  {}", group.len())).strong().color(theme::ON_SURFACE_VAR));
-            ui.add_space(6.0);
+            group_header(ui, icon::GAME_CONTROLLER, label, group.len());
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(16.0, 18.0);
                 for &i in &group {
                     let r = tile(ui, &st.games[i], st.selected == Some(i), st.running_index == Some(i));
                     if ui.is_rect_visible(r.rect) {
@@ -2155,7 +2193,7 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
                     }
                 }
             });
-            ui.add_space(14.0);
+            ui.add_space(10.0);
         }
     });
     st.visible_now = visible;
@@ -2173,64 +2211,70 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
     }
 }
 
-/// Full-screen splash for the currently-running game: cover, title, and Stop.
+/// Full-screen splash for the running game: its art behind, the cover, what
+/// it is, and Stop.
 fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
     st.hovered_index = None;
     let Some(i) = st.running_index.filter(|&i| i < st.games.len()) else {
         st.visible_now.clear();
-        ui.add_space(80.0);
-        ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new("No game is running.").size(18.0).color(theme::ON_SURFACE_VAR));
-        });
+        kit::empty_state(ui, icon::GAME_CONTROLLER, "No game is running", "Pick one from Home or the Library");
         return;
     };
     // Keep the running game's cover loaded while the splash is shown.
     st.visible_now = vec![i];
     let g = &st.games[i];
 
-    // Hero art (dimmed) or a gradient as a full-bleed background.
-    let full = ui.max_rect();
+    // Hero art (or its gradient) full-bleed, under a scrim that deepens downward.
+    let full = ui.max_rect().expand2(egui::vec2(24.0, 18.0));
     match &g.hero {
-        ArtState::Ready(tex) => {
-            draw_texture_cover(ui.painter(), full, tex);
-            ui.painter().rect_filled(full, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha(175));
-        }
-        _ => {
-            draw_hero_placeholder(ui.painter(), full, &g.name);
-            ui.painter().rect_filled(full, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha(90));
-        }
+        ArtState::Ready(tex) => kit::cover_image(ui, full, tex, 0.0),
+        _ => draw_hero_placeholder(ui.painter(), full, &g.name, 0.0),
     }
+    kit::gradient_rect(ui.painter(), full, 0.0, egui::Color32::from_black_alpha(120), egui::Color32::from_black_alpha(235));
 
-    ui.add_space(40.0);
+    ui.add_space(((ui.available_height() - 435.0) / 2.0).max(24.0));
     ui.horizontal(|ui| {
-        ui.add_space(20.0);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(300.0, 450.0), egui::Sense::hover());
-        draw_art(ui.painter(), rect, &g.cover, &g.name);
-        ui.add_space(48.0);
+        ui.add_space(24.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(290.0, 435.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect.translate(egui::vec2(0.0, 8.0)).expand(4.0), egui::CornerRadius::same(24), egui::Color32::from_black_alpha(110));
+        draw_art(ui, rect, &g.cover, &g.name, 20.0);
+        ui.painter().rect_stroke(rect, egui::CornerRadius::same(20), egui::Stroke::new(1.0, egui::Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
+        ui.add_space(52.0);
         ui.vertical(|ui| {
-            ui.add_space(30.0);
-            ui.label(egui::RichText::new(&g.name).size(42.0).strong().color(egui::Color32::WHITE));
-            ui.add_space(10.0);
-            let running_line = match st.session_minutes {
-                Some(m) if m > 0 => {
-                    let t = if m < 60 { format!("{m}m") } else { format!("{:.1}h", m as f32 / 60.0) };
-                    format!("●  Running  ·  {t} this session")
+            ui.spacing_mut().item_spacing.y = 10.0;
+            ui.add_space(26.0);
+            ui.label(egui::RichText::new("NOW PLAYING").size(13.5).strong().color(theme::PRIMARY));
+            ui.label(egui::RichText::new(&g.name).size(46.0).strong().color(egui::Color32::WHITE));
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let live = match st.session_minutes {
+                    Some(m) if m > 0 => format!("Running · {} this session", if m < 60 { format!("{m}m") } else { format!("{:.1}h", m as f32 / 60.0) }),
+                    _ => "Running".to_string(),
+                };
+                kit::live_badge(ui, &live, RUNNING_GREEN);
+                kit::badge(ui, &g.source, theme::ON_SURFACE_VAR);
+                if g.vr {
+                    kit::badge(ui, "VR", theme::PRIMARY);
                 }
-                _ => "●  Running".to_string(),
-            };
-            ui.label(egui::RichText::new(running_line).size(17.0).color(RUNNING_GREEN).strong());
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new(sub_label(g)).size(16.0).color(theme::ON_SURFACE));
-            ui.add_space(36.0);
-            let stop = egui::Button::new(
-                egui::RichText::new(format!("{}  Stop", icon::STOP)).size(24.0).color(egui::Color32::WHITE),
-            )
-            .fill(STOP_RED)
-            .min_size(egui::vec2(280.0, 66.0));
-            if ui.add(stop).clicked() {
-                st.stop_request = Some(i);
-                st.sound_tab = true;
-            }
+            });
+            ui.label(egui::RichText::new(meta_label(g)).size(16.0).color(theme::ON_SURFACE_VAR));
+            ui.add_space(30.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(230.0, 58.0), egui::Sense::click());
+                let h = kit::hover_t(ui, &resp);
+                ui.painter().rect_filled(r, egui::CornerRadius::same(29), kit::mix(STOP_RED, egui::Color32::WHITE, h * 0.12));
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("{}  Stop", icon::STOP), egui::FontId::proportional(21.0), egui::Color32::WHITE);
+                if resp.clicked() {
+                    st.stop_request = Some(i);
+                    st.sound_tab = true;
+                }
+                if kit::button(ui, icon::SQUARES_FOUR, "Library", kit::Tone::Neutral, 150.0).clicked() {
+                    st.show_splash = false;
+                    st.nav = Nav::Library;
+                    st.sound_tab = true;
+                }
+            });
         });
     });
 }
@@ -2404,8 +2448,9 @@ const FAV_GOLD: egui::Color32 = egui::Color32::from_rgb(255, 200, 70);
 fn hero(ui: &mut egui::Ui, st: &mut LibState) {
     let sel = st.selected.filter(|&i| i < st.games.len());
     let running = sel.is_some() && sel == st.running_index;
+    let session = if running { st.session_minutes } else { None };
     let action = match sel {
-        Some(i) => hero_banner(ui, &st.games[i], running, st.uevr_available),
+        Some(i) => hero_banner(ui, &st.games[i], running, session, st.uevr_available),
         None => {
             hero_empty(ui);
             HeroAction::None
@@ -2420,125 +2465,93 @@ fn hero(ui: &mut egui::Ui, st: &mut LibState) {
     }
 }
 
-fn hero_card() -> egui::Frame {
-    egui::Frame::default()
-        .fill(egui::Color32::from_rgb(17, 21, 27))
-        .corner_radius(14)
-        .inner_margin(egui::Margin::same(16))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 44, 54)))
-}
-
-/// The single, consistent hero layout: a wide banner showing the game's hero art
-/// when it's loaded, or a gradient placeholder (lazy-load swaps it in later) —
-/// so the hero never switches shape or flickers between portrait/landscape.
-fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, uevr_available: bool) -> HeroAction {
+/// The selected game's banner: its hero art (or a name-tinted gradient while
+/// that loads, so the shape never jumps) under a scrim, badges on top, the
+/// logo or title and what's known about it bottom-left, actions bottom-right.
+fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, session: Option<u32>, uevr_available: bool) -> HeroAction {
     let w = ui.available_width();
-    let h = (w * 0.30).clamp(190.0, 300.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    let h = (w * 0.24).clamp(200.0, 280.0);
+    let (rect, base) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    let radius = 22.0;
     match &g.hero {
-        ArtState::Ready(tex) => draw_texture_cover(ui.painter(), rect, tex),
-        _ => draw_hero_placeholder(ui.painter(), rect, &g.name),
+        ArtState::Ready(tex) => kit::cover_image(ui, rect, tex, radius),
+        _ => draw_hero_placeholder(ui.painter(), rect, &g.name, radius),
+    }
+    let painter = ui.painter();
+    kit::gradient_rect(painter, rect, radius, egui::Color32::from_black_alpha(0), egui::Color32::from_black_alpha(215));
+    painter.rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(1.0, egui::Color32::from_white_alpha(16)), egui::StrokeKind::Inside);
+
+    // Badges, top-left: running, source, VR.
+    let mut x = rect.left() + 20.0;
+    let mut art_badge = |text: &str, fg: egui::Color32, dot: bool| {
+        let g = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(13.5), fg);
+        let pad = if dot { 30.0 } else { 14.0 };
+        let r = egui::Rect::from_min_size(egui::pos2(x, rect.top() + 18.0), egui::vec2(g.size().x + pad + 14.0, 30.0));
+        painter.rect_filled(r, egui::CornerRadius::same(15), egui::Color32::from_black_alpha(150));
+        painter.rect_stroke(r, egui::CornerRadius::same(15), egui::Stroke::new(1.0, kit::alpha(fg, 0.35)), egui::StrokeKind::Inside);
+        if dot {
+            painter.circle_filled(egui::pos2(r.left() + 16.0, r.center().y), 4.5, fg);
+        }
+        painter.galley(egui::pos2(r.left() + pad, r.center().y - g.size().y / 2.0), g, fg);
+        x = r.right() + 8.0;
+    };
+    if running {
+        let t = match session {
+            Some(m) if m > 0 => format!("Running · {}", if m < 60 { format!("{m}m") } else { format!("{:.1}h", m as f32 / 60.0) }),
+            _ => "Running".to_string(),
+        };
+        art_badge(&t, RUNNING_GREEN, true);
+    }
+    art_badge(&g.source, theme::ON_SURFACE, false);
+    if g.vr {
+        art_badge("VR", theme::PRIMARY, false);
     }
 
-    let painter = ui.painter();
-    let band = 18.0;
-    for k in 0..7 {
-        let y1 = rect.bottom() - k as f32 * band;
-        let y0 = y1 - band;
-        let alpha = ((7 - k) as f32 / 7.0 * 190.0) as u8;
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
-            egui::CornerRadius::ZERO,
-            egui::Color32::from_black_alpha(alpha),
-        );
-    }
-    // Logo art over the gradient, else the text title.
+    // Logo art over the scrim, else the title; the details under it.
+    let meta = meta_label(g);
     if let ArtState::Ready(logo) = &g.logo {
         let [lw, lh] = logo.size();
         let aspect = lw as f32 / lh.max(1) as f32;
-        let max_h = (h * 0.40).min(110.0);
-        let max_w = w * 0.42;
-        let mut dh = max_h;
-        let mut dw = dh * aspect;
+        let (max_h, max_w) = ((h * 0.36).min(104.0), w * 0.40);
+        let (mut dw, mut dh) = (max_h * aspect, max_h);
         if dw > max_w {
             dw = max_w;
             dh = dw / aspect;
         }
-        let logo_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + 22.0, rect.bottom() - 34.0 - dh),
-            egui::vec2(dw, dh),
-        );
-        painter.image(
-            logo.id(),
-            logo_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
-        );
-        painter.text(
-            egui::pos2(rect.left() + 24.0, rect.bottom() - 12.0),
-            egui::Align2::LEFT_BOTTOM,
-            sub_label(g),
-            egui::FontId::proportional(13.0),
-            theme::ON_SURFACE_VAR,
-        );
+        let logo_rect = egui::Rect::from_min_size(egui::pos2(rect.left() + 24.0, rect.bottom() - 46.0 - dh), egui::vec2(dw, dh));
+        painter.image(logo.id(), logo_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
     } else {
-        painter.text(
-            egui::pos2(rect.left() + 22.0, rect.bottom() - 54.0),
-            egui::Align2::LEFT_BOTTOM,
-            sub_label(g),
-            egui::FontId::proportional(14.0),
-            theme::ON_SURFACE_VAR,
-        );
-        painter.text(
-            egui::pos2(rect.left() + 20.0, rect.bottom() - 20.0),
-            egui::Align2::LEFT_BOTTOM,
-            &g.name,
-            egui::FontId::proportional(30.0),
-            egui::Color32::WHITE,
-        );
+        let title = kit::fit_text(ui, &g.name, 36.0, egui::Color32::WHITE, w * 0.5);
+        painter.galley(egui::pos2(rect.left() + 24.0, rect.bottom() - 50.0 - title.size().y), title, egui::Color32::WHITE);
     }
+    painter.text(egui::pos2(rect.left() + 26.0, rect.bottom() - 22.0), egui::Align2::LEFT_BOTTOM, meta, egui::FontId::proportional(14.5), theme::ON_SURFACE);
 
-    if running {
-        let c = egui::pos2(rect.left() + 26.0, rect.top() + 26.0);
-        painter.circle_filled(c, 5.0, RUNNING_GREEN);
-        painter.text(
-            egui::pos2(c.x + 12.0, c.y),
-            egui::Align2::LEFT_CENTER,
-            "Running",
-            egui::FontId::proportional(14.0),
-            RUNNING_GREEN,
-        );
-    }
-
-    let play_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - 16.0 - 150.0, rect.bottom() - 16.0 - 46.0),
-        egui::vec2(150.0, 46.0),
-    );
+    // Actions, bottom-right: Play / Stop, the favourite star, the UEVR toggle.
+    let play = egui::Rect::from_min_size(egui::pos2(rect.right() - 20.0 - 176.0, rect.bottom() - 20.0 - 56.0), egui::vec2(176.0, 56.0));
+    let resp = ui.interact(play, base.id.with("play"), egui::Sense::click());
+    let ph = kit::hover_t(ui, &resp);
     let (label, fill, fg, action) = if running {
         (format!("{}  Stop", icon::STOP), STOP_RED, egui::Color32::WHITE, HeroAction::Stop)
     } else {
         (format!("{}  Play", icon::PLAY), theme::PRIMARY, egui::Color32::BLACK, HeroAction::Launch)
     };
-    let btn = egui::Button::new(egui::RichText::new(label).size(19.0).color(fg)).fill(fill);
-    let play_clicked = ui.put(play_rect, btn).clicked();
+    let p = ui.painter();
+    p.rect_filled(play.translate(egui::vec2(0.0, 4.0)), egui::CornerRadius::same(28), egui::Color32::from_black_alpha(90));
+    p.rect_filled(play, egui::CornerRadius::same(28), kit::mix(fill, egui::Color32::WHITE, ph * 0.14));
+    p.text(play.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(20.0), fg);
+    let play_clicked = resp.clicked();
 
-    let star_rect = egui::Rect::from_min_size(
-        egui::pos2(play_rect.left() - 12.0 - 46.0, play_rect.top()),
-        egui::vec2(46.0, 46.0),
-    );
-    let star_clicked = ui.put(star_rect, fav_button(g.is_favorite)).clicked();
+    let star = egui::Rect::from_min_size(egui::pos2(play.left() - 12.0 - 56.0, play.top()), egui::vec2(56.0, 56.0));
+    let star_clicked = kit::glass_button(ui, star, base.id.with("fav"), icon::STAR, "", g.is_favorite, FAV_GOLD)
+        .on_hover_text(if g.is_favorite { "Remove from favorites" } else { "Add to favorites" })
+        .clicked();
 
-    // VR-Mod (UEVR) toggle, left of the star — only for non-Steam games we can
-    // inject (v1 scope: they carry the launch exe via shortcuts.vdf).
-    // Offer the VR-Mod toggle only for Unreal Engine games we can inject: non-Steam
-    // UE shortcuts and Proton UE Steam games (detected by their install layout).
-    let can_uevr = uevr_available && g.uevr_capable;
-    let uevr_clicked = can_uevr && {
-        let uevr_rect = egui::Rect::from_min_size(
-            egui::pos2(star_rect.left() - 12.0 - 104.0, star_rect.top()),
-            egui::vec2(104.0, 46.0),
-        );
-        ui.put(uevr_rect, uevr_button(g.uevr)).clicked()
+    // VR-Mod (UEVR) toggle, only for Unreal Engine games we can inject.
+    let uevr_clicked = uevr_available && g.uevr_capable && {
+        let r = egui::Rect::from_min_size(egui::pos2(star.left() - 12.0 - 124.0, play.top()), egui::vec2(124.0, 56.0));
+        kit::glass_button(ui, r, base.id.with("uevr"), icon::VIRTUAL_REALITY, "UEVR", g.uevr, theme::PRIMARY)
+            .on_hover_text(if g.uevr { "VR Mod on: launches through UEVR" } else { "Launch through UEVR (VR Mod)" })
+            .clicked()
     };
 
     if uevr_clicked {
@@ -2552,65 +2565,33 @@ fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, uevr_available: bo
     }
 }
 
-/// The ★ favorite toggle: gold when pinned, muted otherwise.
-fn fav_button(is_favorite: bool) -> egui::Button<'static> {
-    let color = if is_favorite { FAV_GOLD } else { theme::ON_SURFACE_VAR };
-    egui::Button::new(egui::RichText::new(icon::STAR).size(20.0).color(color))
-        .fill(egui::Color32::from_black_alpha(120))
-        .min_size(egui::vec2(46.0, 46.0))
-}
-
-/// The VR-Mod (UEVR) toggle: headset glyph + "UEVR" label, teal when enabled.
-fn uevr_button(enabled: bool) -> egui::Button<'static> {
-    let color = if enabled { theme::PRIMARY } else { theme::ON_SURFACE_VAR };
-    egui::Button::new(egui::RichText::new(format!("{}  UEVR", icon::VIRTUAL_REALITY)).size(16.0).color(color))
-        .fill(egui::Color32::from_black_alpha(120))
-        .min_size(egui::vec2(104.0, 46.0))
-}
-
-/// A subtle vertical gradient placeholder for the hero banner when there's no
-/// art (or it's still loading). Tinted from a hash of the name so each game gets
-/// a consistent, distinct look instead of a flat block.
-fn draw_hero_placeholder(painter: &egui::Painter, rect: egui::Rect, name: &str) {
+/// A name-tinted gradient standing in for hero art (none, or still loading),
+/// so each game keeps a consistent look instead of a flat block.
+fn draw_hero_placeholder(painter: &egui::Painter, rect: egui::Rect, name: &str, radius: f32) {
     const PALETTE: [(egui::Color32, egui::Color32); 6] = [
-        (egui::Color32::from_rgb(18, 22, 30), egui::Color32::from_rgb(33, 44, 62)),
-        (egui::Color32::from_rgb(24, 19, 30), egui::Color32::from_rgb(46, 33, 58)),
-        (egui::Color32::from_rgb(16, 28, 27), egui::Color32::from_rgb(26, 50, 46)),
-        (egui::Color32::from_rgb(30, 23, 17), egui::Color32::from_rgb(54, 40, 28)),
-        (egui::Color32::from_rgb(30, 18, 23), egui::Color32::from_rgb(56, 31, 42)),
-        (egui::Color32::from_rgb(19, 25, 20), egui::Color32::from_rgb(33, 48, 35)),
+        (egui::Color32::from_rgb(33, 44, 62), egui::Color32::from_rgb(18, 22, 30)),
+        (egui::Color32::from_rgb(46, 33, 58), egui::Color32::from_rgb(24, 19, 30)),
+        (egui::Color32::from_rgb(26, 50, 46), egui::Color32::from_rgb(16, 28, 27)),
+        (egui::Color32::from_rgb(54, 40, 28), egui::Color32::from_rgb(30, 23, 17)),
+        (egui::Color32::from_rgb(56, 31, 42), egui::Color32::from_rgb(30, 18, 23)),
+        (egui::Color32::from_rgb(33, 48, 35), egui::Color32::from_rgb(19, 25, 20)),
     ];
     let (top, bottom) = PALETTE[name_hash(name) as usize % PALETTE.len()];
-    const BANDS: usize = 28;
-    for k in 0..BANDS {
-        let t = (k as f32 + 0.5) / BANDS as f32;
-        let y0 = rect.top() + (k as f32 / BANDS as f32) * rect.height();
-        let y1 = rect.top() + ((k + 1) as f32 / BANDS as f32) * rect.height();
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
-            egui::CornerRadius::ZERO,
-            lerp_color(top, bottom, t),
-        );
-    }
+    kit::gradient_rect(painter, rect, radius, top, bottom);
 }
 
 fn name_hash(s: &str) -> u32 {
     s.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
 }
 
-fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
-    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
-    egui::Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
-}
-
 fn hero_empty(ui: &mut egui::Ui) {
-    hero_card().show(ui, |ui| {
-        ui.set_min_height(248.0);
-        ui.vertical_centered(|ui| {
-            ui.add_space(96.0);
-            ui.label(egui::RichText::new("Select a game to get started").size(18.0).color(theme::ON_SURFACE_VAR));
-        });
-    });
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 240.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, egui::CornerRadius::same(22), theme::SURFACE_CONTAINER);
+    p.rect_stroke(rect, egui::CornerRadius::same(22), egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)), egui::StrokeKind::Inside);
+    p.text(rect.center() - egui::vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, icon::GAME_CONTROLLER, egui::FontId::proportional(40.0), theme::ON_SURFACE_VAR);
+    p.text(rect.center() + egui::vec2(0.0, 26.0), egui::Align2::CENTER_CENTER, "Pick a game to get started", egui::FontId::proportional(18.0), theme::ON_SURFACE);
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -2629,32 +2610,29 @@ fn filtered(st: &LibState) -> Vec<usize> {
 }
 
 fn empty_note(ui: &mut egui::Ui, st: &LibState) {
-    let (glyph, title, hint) = if st.games.is_empty() {
-        (icon::GAME_CONTROLLER, "No games found", "Add games to Steam or your non-Steam shortcuts.")
+    if st.games.is_empty() {
+        kit::empty_state(ui, icon::GAME_CONTROLLER, "No games found", "Add games to Steam or your non-Steam shortcuts");
     } else {
-        (icon::MAGNIFYING_GLASS, "No matches", "Try a different search.")
-    };
-    ui.add_space(56.0);
-    ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new(glyph).size(40.0).color(theme::SURFACE_CONTAINER_HIGH));
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new(title).size(19.0).strong().color(theme::ON_SURFACE));
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new(hint).size(14.0).color(theme::ON_SURFACE_VAR));
-    });
+        kit::empty_state(ui, icon::MAGNIFYING_GLASS, "No matches", "Try a different search");
+    }
 }
 
-fn sub_label(g: &LibGame) -> String {
-    let mut parts = vec![g.source.clone()];
+/// What's known about a game, for the hero and the splash: playtime, when it
+/// was last played, size.
+fn meta_label(g: &LibGame) -> String {
+    let mut parts = Vec::new();
     // Steam's own playtime when known, else our tracked total (non-Steam games).
     if let Some(m) = g.playtime_minutes.or(g.tracked_minutes) {
         parts.push(human_playtime(m));
     }
     if let Some(a) = played_ago(g.last_played) {
-        parts.push(a);
+        parts.push(format!("played {a}"));
     }
     if let Some(sz) = g.size_on_disk {
         parts.push(human_size(sz));
+    }
+    if parts.is_empty() {
+        parts.push("Never played".to_string());
     }
     parts.join("  ·  ")
 }
@@ -2701,70 +2679,58 @@ fn played_ago(ts: Option<u64>) -> Option<String> {
     })
 }
 
+/// A game capsule: 2:3 cover (lifts on hover, accent rim when selected), a
+/// "playing" badge and the favourite star on it, and its name underneath.
 fn tile(ui: &mut egui::Ui, game: &LibGame, selected: bool, running: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(TILE_W, TILE_H), egui::Sense::click());
-    // Smoothly fade the hover highlight + pop the cover slightly on hover.
-    let hover_t = ui.ctx().animate_bool(resp.id, resp.hovered());
-    let r = rect.expand(hover_t * 5.0);
-    if hover_t > 0.001 {
-        // Soft shadow behind the lifted tile.
-        ui.painter().rect_filled(
-            r.translate(egui::vec2(0.0, 2.0)).expand(2.0),
-            egui::CornerRadius::same(10),
-            egui::Color32::from_black_alpha((hover_t * 70.0) as u8),
-        );
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(TILE_W, TILE_H + TILE_CAPTION_H), egui::Sense::click());
+    let h = kit::hover_t(ui, &resp);
+    let sel = ui.ctx().animate_bool_with_time(resp.id.with("sel"), selected, 0.16);
+    let art = egui::Rect::from_min_size(rect.min, egui::vec2(TILE_W, TILE_H)).expand(h * 4.0);
+    let radius = 16.0;
+    let p = ui.painter();
+    if h > 0.001 || sel > 0.001 {
+        p.rect_filled(art.translate(egui::vec2(0.0, 6.0)).expand(2.0), egui::CornerRadius::same(18), egui::Color32::from_black_alpha((h.max(sel * 0.6) * 110.0) as u8));
     }
-    draw_art(ui.painter(), r, &game.cover, &game.name);
-    if hover_t > 0.001 {
-        ui.painter().rect_filled(r, egui::CornerRadius::same(8), egui::Color32::from_white_alpha((hover_t * 24.0) as u8));
-    }
-    if selected {
-        ui.painter().rect_stroke(
-            r,
-            egui::CornerRadius::same(8),
-            egui::Stroke::new(3.0, theme::PRIMARY),
-            egui::StrokeKind::Inside,
-        );
-    }
+    draw_art(ui, art, &game.cover, &game.name, radius);
+    let p = ui.painter();
+    let rim = kit::mix(kit::mix(egui::Color32::from_white_alpha(14), egui::Color32::from_white_alpha(70), h), theme::PRIMARY, sel);
+    p.rect_stroke(art, egui::CornerRadius::same(radius as u8), egui::Stroke::new(1.0 + 2.0 * sel, rim), egui::StrokeKind::Inside);
     if running {
-        let c = egui::pos2(r.left() + 13.0, r.top() + 13.0);
-        ui.painter().circle_filled(c, 6.0, egui::Color32::from_black_alpha(140));
-        ui.painter().circle_filled(c, 4.0, RUNNING_GREEN);
+        let g = p.layout_no_wrap("Playing".to_string(), egui::FontId::proportional(12.0), RUNNING_GREEN);
+        let r = egui::Rect::from_min_size(art.min + egui::vec2(10.0, 10.0), egui::vec2(g.size().x + 32.0, 24.0));
+        p.rect_filled(r, egui::CornerRadius::same(12), egui::Color32::from_black_alpha(170));
+        p.circle_filled(egui::pos2(r.left() + 12.0, r.center().y), 4.0, RUNNING_GREEN);
+        p.galley(egui::pos2(r.left() + 22.0, r.center().y - g.size().y / 2.0), g, RUNNING_GREEN);
     }
     if game.is_favorite {
-        let c = egui::pos2(r.right() - 15.0, r.top() + 15.0);
-        ui.painter().circle_filled(c, 11.0, egui::Color32::from_black_alpha(120));
-        ui.painter().text(c, egui::Align2::CENTER_CENTER, icon::STAR, egui::FontId::proportional(15.0), FAV_GOLD);
+        let c = egui::pos2(art.right() - 20.0, art.top() + 20.0);
+        p.circle_filled(c, 13.0, egui::Color32::from_black_alpha(160));
+        p.text(c, egui::Align2::CENTER_CENTER, icon::STAR, egui::FontId::proportional(15.0), FAV_GOLD);
     }
+    let fg = kit::mix(kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, h), egui::Color32::WHITE, sel);
+    let cap = kit::fit_text(ui, &game.name, 14.0, fg, TILE_W - 4.0);
+    ui.painter().galley(egui::pos2(rect.left() + 2.0, rect.top() + TILE_H + 9.0), cap, fg);
     resp.on_hover_text(&game.name)
 }
 
-/// Draw a game's cover from its lazy art state: the texture (center-cropped) when
-/// ready, a loading tint while pending, or a named placeholder if it has none.
-fn draw_art(painter: &egui::Painter, rect: egui::Rect, art: &ArtState, name: &str) {
-    let radius = egui::CornerRadius::same(8);
+/// Draw a game's cover from its lazy art state: the texture (centre-cropped,
+/// rounded) when ready, a quiet tint while loading, or the name on a card when
+/// there's none.
+fn draw_art(ui: &egui::Ui, rect: egui::Rect, art: &ArtState, name: &str, radius: f32) {
+    let r = egui::CornerRadius::same(radius as u8);
     match art {
-        ArtState::Ready(tex) => draw_texture_cover(painter, rect, tex),
+        ArtState::Ready(tex) => kit::cover_image(ui, rect, tex, radius),
         ArtState::Missing => {
-            painter.rect_filled(rect, radius, theme::SURFACE_CONTAINER_HIGH);
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                short(name),
-                egui::FontId::proportional(15.0),
-                theme::ON_SURFACE_VAR,
-            );
+            draw_hero_placeholder(ui.painter(), rect, name, radius);
+            let p = ui.painter();
+            p.text(rect.center() - egui::vec2(0.0, 26.0), egui::Align2::CENTER_CENTER, icon::GAME_CONTROLLER, egui::FontId::proportional(30.0), kit::alpha(egui::Color32::WHITE, 0.35));
+            let g = ui.fonts(|f| f.layout(short(name), egui::FontId::proportional(16.0), theme::ON_SURFACE, rect.width() - 28.0));
+            p.galley(egui::pos2(rect.center().x - g.size().x / 2.0, rect.center().y + 6.0), g, theme::ON_SURFACE);
         }
         _ => {
-            painter.rect_filled(rect, radius, theme::SURFACE_CONTAINER);
+            ui.painter().rect_filled(rect, r, theme::SURFACE_CONTAINER);
         }
     }
-}
-
-/// Paint a texture into `rect` with center-crop (object-fit: cover).
-fn draw_texture_cover(painter: &egui::Painter, rect: egui::Rect, tex: &egui::TextureHandle) {
-    painter.rect_filled(rect, egui::CornerRadius::same(8), egui::Color32::from_rgb(12, 14, 18));
-    painter.image(tex.id(), rect, cover_uv(tex.size(), rect), egui::Color32::WHITE);
 }
 
 /// The UV sub-rect that center-crops a `tw x th` texture to fill `rect` without

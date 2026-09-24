@@ -114,9 +114,92 @@ pub(super) fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgba_premultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
 }
 
-/// Eased 0..1 hover amount for a response.
+/// Eased 0..1 hover amount for a response. Kit widgets paint their own
+/// hover, so a hovered one is also noted for `take_kit_hovered` (the panel's
+/// generic hover glow leaves those alone).
 pub(super) fn hover_t(ui: &egui::Ui, resp: &Response) -> f32 {
+    if resp.hovered() {
+        ui.ctx().data_mut(|d| {
+            let v = d.get_temp_mut_or_default::<Vec<Rect>>(kit_hovered_id());
+            // Panels that never take the list mustn't grow it forever.
+            if v.len() > 64 {
+                v.clear();
+            }
+            v.push(resp.rect);
+        });
+    }
     ui.ctx().animate_bool_with_time(resp.id.with("hover"), resp.hovered(), 0.12)
+}
+
+fn kit_hovered_id() -> egui::Id {
+    egui::Id::new("kit-hovered")
+}
+
+/// Rects of kit widgets hovered this frame (cleared by the call).
+pub(super) fn take_kit_hovered(ctx: &egui::Context) -> Vec<Rect> {
+    ctx.data_mut(|d| d.remove_temp::<Vec<Rect>>(kit_hovered_id()).unwrap_or_default())
+}
+
+/// A rounded rect filled with an exact top→bottom gradient (a triangle fan
+/// with per-vertex colours; a linear gradient survives any triangulation).
+pub(super) fn gradient_rect(painter: &egui::Painter, rect: Rect, radius: f32, top: Color32, bottom: Color32) {
+    let r = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
+    let colour_at = |p: Pos2| mix(top, bottom, (p.y - rect.top()) / rect.height().max(1.0));
+    let mut mesh = egui::Mesh::default();
+    let centre = rect.center();
+    mesh.colored_vertex(centre, colour_at(centre));
+    let corners = [
+        (Pos2::new(rect.right() - r, rect.top() + r), -90.0f32),
+        (Pos2::new(rect.right() - r, rect.bottom() - r), 0.0),
+        (Pos2::new(rect.left() + r, rect.bottom() - r), 90.0),
+        (Pos2::new(rect.left() + r, rect.top() + r), 180.0),
+    ];
+    const STEPS: usize = 10;
+    for (c, start) in corners {
+        for i in 0..=STEPS {
+            let a = (start + 90.0 * i as f32 / STEPS as f32).to_radians();
+            let p = Pos2::new(c.x + r * a.cos(), c.y + r * a.sin());
+            mesh.colored_vertex(p, colour_at(p));
+        }
+    }
+    let n = (corners.len() * (STEPS + 1)) as u32;
+    for i in 0..n {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// A texture centre-cropped into `rect` (object-fit: cover), rounded.
+pub(super) fn cover_image(ui: &egui::Ui, rect: Rect, tex: &egui::TextureHandle, radius: f32) {
+    let [tw, th] = tex.size();
+    let (ta, da) = (tw as f32 / th.max(1) as f32, rect.width() / rect.height().max(1.0));
+    let uv = if ta > da {
+        let k = da / ta;
+        Rect::from_min_max(Pos2::new((1.0 - k) / 2.0, 0.0), Pos2::new((1.0 + k) / 2.0, 1.0))
+    } else {
+        let k = ta / da;
+        Rect::from_min_max(Pos2::new(0.0, (1.0 - k) / 2.0), Pos2::new(1.0, (1.0 + k) / 2.0))
+    };
+    egui::Image::new(egui::load::SizedTexture::new(tex.id(), tex.size_vec2()))
+        .uv(uv)
+        .corner_radius(CornerRadius::same(radius as u8))
+        .paint_at(ui, rect);
+}
+
+/// A dark translucent button for use over artwork: glyph (+ label), `lit`
+/// tints it with `accent`. Returns the response.
+pub(super) fn glass_button(ui: &mut egui::Ui, rect: Rect, id: egui::Id, glyph: &str, label: &str, lit: bool, accent: Color32) -> Response {
+    let resp = ui.interact(rect, id, Sense::click());
+    let h = hover_t(ui, &resp);
+    let on = ui.ctx().animate_bool_with_time(id.with("on"), lit, 0.16);
+    let p = ui.painter();
+    let radius = CornerRadius::same((rect.height() / 2.0) as u8);
+    p.rect_filled(rect, radius, mix(Color32::from_black_alpha(130), Color32::from_black_alpha(170), h));
+    p.rect_stroke(rect, radius, Stroke::new(1.0, mix(alpha(Color32::WHITE, 0.14 + 0.2 * h), alpha(accent, 0.8), on)), StrokeKind::Inside);
+    let fg = mix(mix(theme::ON_SURFACE, Color32::WHITE, h), accent, on);
+    let text = if label.is_empty() { glyph.to_string() } else { format!("{glyph}  {label}") };
+    p.text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(if label.is_empty() { 21.0 } else { 16.0 }), fg);
+    resp
 }
 
 /// One line of text, cut with an ellipsis past `max_w`.
@@ -509,6 +592,16 @@ pub(super) fn empty_state(ui: &mut egui::Ui, glyph: &str, title: &str, hint: &st
         }
     });
     ui.add_space(26.0);
+}
+
+/// A status badge led by a dot (e.g. "Running").
+pub(super) fn live_badge(ui: &mut egui::Ui, text: &str, accent: Color32) {
+    let g = ui.fonts(|f| f.layout_no_wrap(text.to_string(), FontId::proportional(12.5), accent));
+    let (rect, _) = ui.allocate_exact_size(g.size() + egui::vec2(34.0, 8.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same((rect.height() / 2.0) as u8), alpha(accent, 0.16));
+    p.circle_filled(Pos2::new(rect.left() + 13.0, rect.center().y), 4.0, accent);
+    p.galley(rect.min + egui::vec2(24.0, 4.0), g, accent);
 }
 
 /// A small status badge (e.g. "Active", "Frozen"), `accent`-tinted.
