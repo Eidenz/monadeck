@@ -57,6 +57,12 @@ pub struct BatteryStatus {
 	pub charge: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackingState {
+	pub connected: bool,
+	pub tracking: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum DeviceRole {
 	Head,
@@ -236,6 +242,34 @@ impl Monado {
 	/// would otherwise no-op.
 	pub fn supports_controller_freeze(&self) -> bool {
 		self.api.has_mnd_root_set_client_controller_freeze()
+	}
+
+	/// Whether the loaded libmonado.so has the fork's hold-pose-when-off switch
+	/// (API 1.9). Stock Monado returns false.
+	pub fn supports_hold_pose_when_off(&self) -> bool {
+		self.api.has_mnd_root_set_hold_pose_when_off()
+	}
+
+	/// Powered-off controllers hold their last pose (true, the default) or go
+	/// untracked so apps can take over (false). Since fork API 1.9.
+	pub fn set_hold_pose_when_off(&self, hold: bool) -> Result<(), MndResult> {
+		unsafe {
+			self.api
+				.mnd_root_set_hold_pose_when_off(self.root, hold)
+				.ok_or(MndResult::ErrorInvalidVersion)?
+				.to_result()
+		}
+	}
+
+	pub fn hold_pose_when_off(&self) -> Result<bool, MndResult> {
+		let mut hold = true;
+		unsafe {
+			self.api
+				.mnd_root_get_hold_pose_when_off(self.root, &mut hold)
+				.ok_or(MndResult::ErrorInvalidVersion)?
+				.to_result()?;
+		}
+		Ok(hold)
 	}
 	pub fn recenter_local_spaces(&self) -> Result<(), MndResult> {
 		unsafe {
@@ -645,6 +679,30 @@ pub trait DeviceLogic: MonadoRef {
 			present,
 			charging,
 			charge,
+		})
+	}
+	/// Whether the device is connected and fully tracked. `ErrorInvalidVersion`
+	/// on libmonado without the fork's API 1.9, `ErrorUnsupportedOperation` for
+	/// devices that don't report it.
+	fn tracking_state(&self) -> Result<TrackingState, MndResult> {
+		let mut connected = true;
+		let mut tracking = true;
+		let monado = self.monado();
+		unsafe {
+			monado
+				.api
+				.mnd_root_get_device_tracking_state(
+					monado.root,
+					self.index(),
+					&mut connected,
+					&mut tracking,
+				)
+				.ok_or(MndResult::ErrorInvalidVersion)?
+				.to_result()?;
+		}
+		Ok(TrackingState {
+			connected,
+			tracking,
 		})
 	}
 	fn serial(&self) -> Result<String, MndResult> {

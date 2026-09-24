@@ -68,6 +68,10 @@ export interface DeviceInfo {
   kind: DeviceKind;
   serial: string | null;
   battery: Battery | null;
+  /** Powered on / linked; null when the runtime doesn't say (treat as on). */
+  connected?: boolean | null;
+  /** Pose fully tracked right now; raw, debounced by the strip. */
+  tracking?: boolean | null;
 }
 
 export interface ClientInfo {

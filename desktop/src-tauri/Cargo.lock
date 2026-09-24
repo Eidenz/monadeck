@@ -2046,7 +2046,6 @@ dependencies = [
 [[package]]
 name = "libmonado"
 version = "1.6.0"
-source = "git+https://github.com/wayvr-org/libmonado-rs.git?rev=6f66b26930c24a8a2fc57ddcd85704784894c750#6f66b26930c24a8a2fc57ddcd85704784894c750"
 dependencies = [
  "dlopen2 0.7.0",
  "flagset",

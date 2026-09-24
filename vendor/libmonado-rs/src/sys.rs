@@ -288,6 +288,23 @@ pub struct MonadoApi {
 		unsafe extern "C" fn(root: MndRootPtr, client_id: u32, freeze: u32) -> MndResult,
 	>,
 
+	// === API version 1.9 (Monadeck/Monado fork) ===
+	/// Whether a device is connected (powered on / linked) and fully tracked.
+	mnd_root_get_device_tracking_state: Option<
+		unsafe extern "C" fn(
+			root: MndRootPtr,
+			device_index: u32,
+			out_connected: *mut bool,
+			out_tracking: *mut bool,
+		) -> MndResult,
+	>,
+	/// Whether powered-off controllers hold their last pose (default) or go
+	/// untracked so apps can take over.
+	mnd_root_set_hold_pose_when_off:
+		Option<unsafe extern "C" fn(root: MndRootPtr, hold: bool) -> MndResult>,
+	mnd_root_get_hold_pose_when_off:
+		Option<unsafe extern "C" fn(root: MndRootPtr, out_hold: *mut bool) -> MndResult>,
+
 	/// Set chroma key params for any base application opaque projection layer. Since API version 1.6.
 	mnd_root_set_chroma_key_params: Option<
 		unsafe extern "C" fn(

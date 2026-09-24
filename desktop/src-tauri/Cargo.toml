@@ -28,3 +28,8 @@ monadeck-core = { path = "../../crates/core" }
 # Own workspace, isolated from the core workspace so the heavy webkit dep tree
 # stays out of `cargo check -p monadeck-core`.
 [workspace]
+
+# Same redirect as the root workspace: core reads the fork's per-device tracking
+# state (libmonado 1.9) through the vendored, patched libmonado-rs.
+[patch."https://github.com/wayvr-org/libmonado-rs.git"]
+libmonado = { path = "../../vendor/libmonado-rs" }
