@@ -903,6 +903,9 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                     // `on` = its view is open (tap again to close); `badge` = a
                     // small count bubble under the glyph.
                     // `slot`: 0 = leftmost, 1 = rightmost, 2 = second from the right.
+                    // Only the clock view has room under the bell for the count;
+                    // everywhere else it sits on the bell's top-right corner.
+                    let clock_view = !st.watch_media_menu && !st.watch_history_menu && !st.watch_game_menu && !st.watch_layout_menu && st.wrist_shot.is_none();
                     let mut corner_btn = |ui: &mut egui::Ui, slot: u8, glyph: &str, on: bool, hot: bool, badge: usize, tip: &str| -> bool {
                         // The left edge sits a little into the margin so both glyphs
                         // end up the same distance from their card edge.
@@ -920,9 +923,13 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                             .add(egui::Button::new(egui::RichText::new(glyph).size(13.0).color(fg)).fill(egui::Color32::TRANSPARENT).corner_radius(8).min_size(rect.size()))
                             .on_hover_text(tip);
                         no_glow.push(rect);
+                        no_glow.push(resp.rect);
                         if badge > 0 {
-                            // Under the glyph (outside the button's rect), clear of the clock.
-                            let c = egui::pos2(rect.center().x, rect.bottom() + 8.0);
+                            // Placed from the glyph itself (the button's real rect;
+                            // its padding makes it wider than `rect`): centred under
+                            // it on the clock, else on its top-right corner.
+                            let g = resp.rect.center();
+                            let c = if clock_view { egui::pos2(g.x, g.y + 17.0) } else { egui::pos2(g.x + 9.0, g.y - 6.0) };
                             let p = ui.painter();
                             p.circle_filled(c, 6.5, egui::Color32::from_rgb(150, 190, 255));
                             p.text(c, egui::Align2::CENTER_CENTER, badge.min(9).to_string(), egui::FontId::proportional(9.0), egui::Color32::BLACK);
