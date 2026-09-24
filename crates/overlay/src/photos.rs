@@ -776,6 +776,27 @@ fn build_photo(ctx: &egui::Context, v: &PhotoView, action: &mut PhotoAction) {
     });
 }
 
+/// The photo window's pixel size (for the preview rig).
+pub const WINDOW_PX: (u32, u32) = PHOTO_PX;
+
+/// A photo window showing `tex`, as the preview rig renders it.
+pub fn preview_window(ctx: &egui::Context, tex: egui::TextureHandle, when: &str, translate_ok: bool, share_ok: bool) {
+    let view = PhotoView {
+        tex: Some(tex),
+        text: None,
+        show_text: false,
+        loading: false,
+        translating: false,
+        sharing: false,
+        share_msg: None,
+        when: when.to_string(),
+        translate_ok,
+        share_ok,
+    };
+    let mut action = PhotoAction::None;
+    build_photo(ctx, &view, &mut action);
+}
+
 /// The wrist card, drawn inside the watch's clock area when a shot is queued.
 pub fn wrist_card(
     ui: &mut egui::Ui,

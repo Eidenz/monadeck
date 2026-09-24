@@ -255,7 +255,200 @@ pub fn run(dir: &Path) -> Result<()> {
     }
     pages(&ctx, &mut textures, dir)?;
     dashboard(&ctx, &mut textures, dir)?;
+    // Only on request: reads your Steam library's art.
+    if std::env::var("MONADECK_PREVIEW_ONLY").is_ok_and(|f| f.contains("readme")) {
+        readme(&ctx, &mut textures, dir)?;
+    }
     Ok(())
+}
+
+/// `MONADECK_PREVIEW_ONLY=readme`: the README's shots from real renders, with
+/// a headset and two controllers and nothing running: the watch, the Home
+/// dashboard with your Steam library's art, the playspace tools, and the
+/// layers of the screenshots shot (background, photo window, watch with a
+/// new-screenshot card) for compositing.
+fn readme(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir: &Path) -> Result<()> {
+    use crate::ui::{Nav, SystemTab};
+    let games = readme_games(ctx);
+    let state = |nav: Nav| {
+        let mut st = sample_state();
+        st.games = games.iter().map(clone_game).collect();
+        st.collections = vec!["Chill".into(), "With friends".into()];
+        st.games[0].collections = vec![0, 1];
+        st.selected = Some(0);
+        st.running_index = None;
+        st.nav = nav;
+        use crate::monado::{BatteryInfo, BatteryKind, DevState};
+        st.batteries = [0.86, 0.83].map(|charge| BatteryInfo { kind: BatteryKind::Controller, charge, charging: false, state: DevState::Live }).to_vec();
+        for r in &mut st.desktop_rows {
+            r.shown = false;
+        }
+        st.desktop_bar = st.desktop_rows.iter().map(|r| (r.name.clone(), false)).collect();
+        st.desktop_shown = 0;
+        st.watch_buttons = ["keyboard", "recenter", "letgo", "screenshot"].map(String::from).to_vec();
+        st.watch_date = "Thursday, September 24".into();
+        st.clock = "10:45 PM".into();
+        st
+    };
+    let save = |img: &image::RgbaImage, name: &str| -> Result<()> {
+        let path = dir.join(name);
+        img.save(&path)?;
+        println!("{}", path.display());
+        Ok(())
+    };
+
+    // The watch, floating (transparent around it).
+    let mut st = state(Nav::Home);
+    save(&shoot_over(ctx, textures, WATCH_PX, 6, true, |ctx| crate::ui::build_watch(ctx, &mut st)), "readme-watch.png")?;
+
+    // Home, and Home with the rail and the bottom bar as they hang in VR.
+    let mut st = state(Nav::Home);
+    let main = shoot(ctx, textures, MAIN_PX, 12, |ctx| crate::ui::build_main(ctx, &mut st));
+    save(&main, "readme-dash-home.png")?;
+    let mut st = state(Nav::Home);
+    let rail = shoot_over(ctx, textures, RAIL_PX, 6, true, |ctx| crate::ui::build_rail(ctx, &mut st));
+    let mut st = state(Nav::Home);
+    let bottom = shoot_over(ctx, textures, BOTTOM_PX, 6, true, |ctx| crate::ui::build_bottom(ctx, &mut st));
+    let dash = composite(&rail, &main, &bottom, None);
+    save(&dash, "readme-dashboard.png")?;
+
+    // The playspace tools, flat and with the rail and bar.
+    let playspace = |ctx: &egui::Context, st: &mut crate::ui::LibState| {
+        st.system_tab = SystemTab::Playspace;
+        crate::ui::build_main(ctx, st)
+    };
+    let mut st = state(Nav::System);
+    let ps_main = shoot(ctx, textures, MAIN_PX, 12, |ctx| playspace(ctx, &mut st));
+    save(&ps_main, "readme-playspace.png")?;
+    let mut st = state(Nav::System);
+    let ps_rail = shoot_over(ctx, textures, RAIL_PX, 6, true, |ctx| crate::ui::build_rail(ctx, &mut st));
+    let ps_dash = composite(&ps_rail, &ps_main, &bottom, None);
+
+    // The screenshots shot's layers. The background is a view of the built-in
+    // 360° panorama; the "screenshot" is that view with the dashboard in it.
+    let sky = image::open(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sky/table_mountain_2.jpg"))?.to_rgba8();
+    let view = |yaw: f32, fov: f32, w: u32, h: u32| -> image::RgbaImage {
+        // A rectilinear view out of the equirect panorama (yaw in turns).
+        let (sw, sh) = (sky.width() as f32, sky.height() as f32);
+        let f = (w as f32 / 2.0) / (fov.to_radians() / 2.0).tan();
+        image::RgbaImage::from_fn(w, h, |x, y| {
+            let (dx, dy) = (x as f32 - w as f32 / 2.0, y as f32 - h as f32 / 2.0 - h as f32 * 0.08);
+            let lon = yaw * std::f32::consts::TAU + dx.atan2(f);
+            let lat = -dy.atan2((dx * dx + f * f).sqrt());
+            let u = (lon / std::f32::consts::TAU).rem_euclid(1.0) * (sw - 1.0);
+            let v = (0.5 - lat / std::f32::consts::PI).clamp(0.0, 1.0) * (sh - 1.0);
+            *sky.get_pixel(u as u32, v as u32)
+        })
+    };
+    save(&view(0.50, 88.0, 1800, 1150), "readme-layer-bg.png")?;
+    // Panels over the panorama as they'd hang in front of you; the README's
+    // crop of it is 1200×805 at (204, 160).
+    let in_vr = |panels: &image::RgbaImage| {
+        let mut shot = view(0.47, 80.0, 1600, 1000);
+        let small = image::imageops::resize(panels, 1120, (1120.0 * panels.height() as f32 / panels.width() as f32) as u32, image::imageops::FilterType::Triangle);
+        image::imageops::overlay(&mut shot, &small, ((1600 - small.width()) / 2) as i64, 190);
+        shot
+    };
+    let readme_crop = |shot: &image::RgbaImage| image::DynamicImage::ImageRgba8(image::imageops::crop_imm(shot, 204, 160, 1200, 805).to_image()).to_rgb8();
+    let shot = in_vr(&dash);
+    save(&shot, "readme-layer-shot.png")?;
+    let jpg = |img: &image::RgbImage, name: &str| -> Result<()> {
+        let path = dir.join(name);
+        let mut out = std::fs::File::create(&path)?;
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92).encode_image(img)?;
+        println!("{}", path.display());
+        Ok(())
+    };
+    jpg(&readme_crop(&shot), "readme-dashboard-vr.jpg")?;
+    jpg(&readme_crop(&in_vr(&ps_dash)), "readme-playspace-vr.jpg")?;
+    let shot_tex = ctx.load_texture(
+        "readme-shot",
+        egui::ColorImage::from_rgba_unmultiplied([shot.width() as usize, shot.height() as usize], shot.as_raw()),
+        egui::TextureOptions::LINEAR,
+    );
+    let photo_px = (crate::photos::WINDOW_PX.0 as usize, crate::photos::WINDOW_PX.1 as usize);
+    let window = shoot_over(ctx, textures, photo_px, 6, true, |ctx| crate::photos::preview_window(ctx, shot_tex.clone(), "2026/09/24  22:49:35", true, true));
+    save(&window, "readme-layer-window.png")?;
+    let mut st = state(Nav::Home);
+    st.wrist_shot = Some(crate::ui::WristShot { thumb: Some(shot_tex.clone()), qr: None, when: "2026/09/24 22:49:51".into(), idx: 0, total: 1 });
+    save(&shoot_over(ctx, textures, WATCH_PX, 6, true, |ctx| crate::ui::build_watch(ctx, &mut st)), "readme-layer-watch.png")?;
+    Ok(())
+}
+
+/// Rail + main panel + bottom bar at one physical scale (the bar's 1640 px
+/// span the main panel's 2000 in VR), on `bg` or transparent.
+fn composite(rail: &image::RgbaImage, main: &image::RgbaImage, bottom: &image::RgbaImage, bg: Option<image::Rgba<u8>>) -> image::RgbaImage {
+    let bw = MAIN_PX.0 as u32;
+    let bh = (BOTTOM_PX.1 as f32 * MAIN_PX.0 as f32 / BOTTOM_PX.0 as f32) as u32;
+    let bottom = image::imageops::resize(bottom, bw, bh, image::imageops::FilterType::Triangle);
+    let gap = 36u32;
+    let (w, h) = (RAIL_PX.0 as u32 + gap + MAIN_PX.0 as u32, MAIN_PX.1 as u32 + gap + bh);
+    let mut canvas = image::RgbaImage::from_pixel(w, h, bg.unwrap_or(image::Rgba([0, 0, 0, 0])));
+    image::imageops::overlay(&mut canvas, rail, 0, ((MAIN_PX.1 - RAIL_PX.1) / 2) as i64);
+    image::imageops::overlay(&mut canvas, main, (RAIL_PX.0 as u32 + gap) as i64, 0);
+    image::imageops::overlay(&mut canvas, &bottom, (RAIL_PX.0 as u32 + gap) as i64, (MAIN_PX.1 as u32 + gap) as i64);
+    canvas
+}
+
+/// Games from your Steam library with their real art (Steam's own cache has
+/// it for owned games, installed or not); ones without art are skipped.
+fn readme_games(ctx: &egui::Context) -> Vec<crate::games::LibGame> {
+    use crate::games::{ArtState, LibGame};
+    use monadeck_core::steam;
+    const PICKS: [(&str, &str); 10] = [
+        ("VRChat", "438100"),
+        ("Half-Life: Alyx", "546560"),
+        ("Beat Saber", "620980"),
+        ("Pistol Whip", "1079800"),
+        ("BONELAB", "1592190"),
+        ("The Midnight Walk", "2863640"),
+        ("Blade & Sorcery", "629730"),
+        ("Phasmophobia", "739630"),
+        ("Resonite", "2519830"),
+        ("BONEWORKS", "823500"),
+    ];
+    let load = |bytes: Option<(Vec<u8>, bool)>, key: String, max_w: u32| -> ArtState {
+        let Some(img) = bytes.and_then(|(b, _)| image::load_from_memory(&b).ok()) else {
+            return ArtState::Missing;
+        };
+        let img = if img.width() > max_w { img.resize(max_w, u32::MAX, image::imageops::FilterType::Triangle) } else { img };
+        let rgba = img.to_rgba8();
+        let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
+        ArtState::Ready(ctx.load_texture(key, ci, egui::TextureOptions::LINEAR))
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    PICKS
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (name, id))| {
+            let cover = load(steam::game_cover_bytes(id, None), format!("{id}-cover"), 480);
+            if matches!(cover, ArtState::Missing) {
+                return None;
+            }
+            Some(LibGame {
+                name: name.to_string(),
+                app_id: Some(id.to_string()),
+                shortcut_id: None,
+                cover_id: Some(id.to_string()),
+                source: "Steam".into(),
+                exe: None,
+                start_dir: None,
+                uevr_capable: false,
+                vr: true,
+                pad_hidden_by_options: false,
+                last_played: Some(now - (i as u64 * 7 + 1) * 3600 * 5),
+                size_on_disk: Some((i as u64 + 2) * 2_900_000_000),
+                playtime_minutes: Some((12 - i as u32) * 131),
+                tracked_minutes: None,
+                is_favorite: matches!(i, 0 | 2 | 6),
+                uevr: false,
+                collections: Vec::new(),
+                cover,
+                hero: load(steam::game_hero_bytes(id), format!("{id}-hero"), 1600),
+                logo: load(steam::game_logo_bytes(id), format!("{id}-logo"), 700),
+            })
+        })
+        .collect()
 }
 
 /// The game side of the dashboard (Home, Library, Collections, Favorites, the
@@ -554,6 +747,18 @@ fn shoot(
     textures: &mut HashMap<egui::TextureId, Tex>,
     px: (usize, usize),
     frames: usize,
+    build: impl FnMut(&egui::Context),
+) -> image::RgbaImage {
+    shoot_over(ctx, textures, px, frames, false, build)
+}
+
+/// `shoot`, optionally without a backdrop (straight alpha, for compositing).
+fn shoot_over(
+    ctx: &egui::Context,
+    textures: &mut HashMap<egui::TextureId, Tex>,
+    px: (usize, usize),
+    frames: usize,
+    transparent: bool,
     mut build: impl FnMut(&egui::Context),
 ) -> image::RgbaImage {
     let mut last = None;
@@ -569,7 +774,7 @@ fn shoot(
     }
     let out = last.expect("at least one frame");
     let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
-    rasterise(&prims, textures, out.pixels_per_point, px)
+    rasterise_over(&prims, textures, out.pixels_per_point, px, transparent)
 }
 
 /// Cut a tall page shot just below its last content (rows that are all panel
@@ -686,10 +891,18 @@ fn apply_delta(textures: &mut HashMap<egui::TextureId, Tex>, id: egui::TextureId
 
 /// Premultiplied-alpha triangle rasteriser over a dim scene-like backdrop.
 fn rasterise(prims: &[egui::ClippedPrimitive], textures: &HashMap<egui::TextureId, Tex>, ppp: f32, px: (usize, usize)) -> image::RgbaImage {
+    rasterise_over(prims, textures, ppp, px, false)
+}
+
+/// `transparent`: no backdrop, a straight-alpha image to composite elsewhere.
+fn rasterise_over(prims: &[egui::ClippedPrimitive], textures: &HashMap<egui::TextureId, Tex>, ppp: f32, px: (usize, usize), transparent: bool) -> image::RgbaImage {
     let (w, h) = px;
     // Backdrop: a soft vertical gradient standing in for whatever's behind the card.
     let mut buf: Vec<[f32; 4]> = (0..w * h)
         .map(|i| {
+            if transparent {
+                return [0.0; 4];
+            }
             let t = (i / w) as f32 / h as f32;
             [0.13 + 0.03 * t, 0.15 + 0.03 * t, 0.20 + 0.04 * t, 1.0]
         })
@@ -772,6 +985,13 @@ fn rasterise(prims: &[egui::ClippedPrimitive], textures: &HashMap<egui::TextureI
     }
     image::RgbaImage::from_fn(w as u32, h as u32, |x, y| {
         let c = buf[y as usize * w + x as usize];
-        image::Rgba([(c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8, 255])
+        if transparent {
+            // Premultiplied → straight alpha.
+            let a = c[3].clamp(0.0, 1.0);
+            let un = |v: f32| if a > 1e-4 { (v / a).clamp(0.0, 1.0) } else { 0.0 };
+            image::Rgba([(un(c[0]) * 255.0).round() as u8, (un(c[1]) * 255.0).round() as u8, (un(c[2]) * 255.0).round() as u8, (a * 255.0).round() as u8])
+        } else {
+            image::Rgba([(c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8, 255])
+        }
     })
 }
