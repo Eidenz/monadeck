@@ -130,8 +130,9 @@ impl MonadoLink {
         self.status.lock().unwrap().hold_pose
     }
 
-    /// Switch what apps see when a controller turns off. Lives in the service
-    /// (every Monado start begins holding), so it isn't re-applied on reconnect.
+    /// Switch what apps see when a controller turns off. The service forgets it
+    /// on restart (it starts out holding), so the link keeps the choice and
+    /// re-applies it on every (re)connect.
     pub fn set_hold_pose(&self, hold: bool) {
         // Reflect at once; the next poll confirms.
         if let Some(h) = self.status.lock().unwrap().hold_pose.as_mut() {
@@ -179,6 +180,8 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
     let mut frozen_ids: HashSet<u32> = HashSet::new();
     // When each device (by serial) was first seen untracked.
     let mut lost_since: HashMap<String, Instant> = HashMap::new();
+    // The hold-pose-when-off choice, re-applied on every (re)connect.
+    let mut desired_hold: Option<bool> = None;
     loop {
         let was_connected = mon.is_some();
         if mon.is_none() && service_connected() {
@@ -187,6 +190,11 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
         if !was_connected && mon.is_some() {
             if let Some((x, y, z, yaw)) = desired_origin {
                 set_origin_offset(&mon, x, y, z, yaw);
+            }
+            if let (Some(m), Some(hold)) = (&mon, desired_hold) {
+                if m.supports_hold_pose_when_off() {
+                    let _ = m.set_hold_pose_when_off(hold);
+                }
             }
         }
         match cmd_rx.recv_timeout(Duration::from_millis(500)) {
@@ -222,7 +230,8 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
                 status.lock().unwrap().clients = clients;
             }
             Ok(Cmd::SetHoldPose(hold)) => {
-                if let Some(m) = &mon {
+                desired_hold = Some(hold);
+                if let Some(m) = mon.as_ref().filter(|m| m.supports_hold_pose_when_off()) {
                     let _ = m.set_hold_pose_when_off(hold);
                 }
             }

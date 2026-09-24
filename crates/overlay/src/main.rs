@@ -794,7 +794,9 @@ fn run() -> Result<()> {
     st.screen_warmth = ov_cfg.screen_warmth.clamp(0.0, 1.0);
     st.mouse_b_middle = ov_cfg.mouse_b_middle;
     st.desktop_color_scale = color_scale;
-    st.settings_classic = ov_cfg.settings_classic;
+    st.hold_pose_pref = ov_cfg.hold_pose_when_off;
+    // Kept by the link and applied whenever Monado comes up.
+    monado.set_hold_pose(st.hold_pose_pref);
     desktop.set_defaults(st.screen_curve, st.screen_opacity);
     desktop.spawn_dist = st.screen_spawn_dist;
     desktop.tint = desktop::screen_tint(st.screen_brightness, st.screen_warmth);
@@ -1484,8 +1486,10 @@ fn run() -> Result<()> {
                 monado.set_freeze(id, true);
             }
         }
-        // Switched-off controllers: freeze in place or let go (service-wide).
+        // Switched-off controllers: freeze in place or let go (service-wide,
+        // remembered: the link re-applies it whenever Monado comes up).
         if let Some(hold) = st.hold_pose_request.take() {
+            st.hold_pose_pref = hold;
             monado.set_hold_pose(hold);
         }
         st.hold_pose = monado.hold_pose();
@@ -3244,7 +3248,7 @@ fn overlay_config_from(
         game_profile: Some(st.game_profile.clone()),
         osc_enabled: st.osc_enabled,
         osc_port: st.osc_port as u16,
-        settings_classic: st.settings_classic,
+        hold_pose_when_off: st.hold_pose_pref,
     }
 }
 

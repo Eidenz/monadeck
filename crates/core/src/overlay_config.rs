@@ -151,8 +151,10 @@ pub struct OverlayConfig {
     /// Keep gaming mode's virtual pad away from VR games (they would read it
     /// as a gamepad behind your flat game): a per-game Proton local fix.
     pub game_hide_pad_from_vr: bool,
-    /// Show the original single-scroll Settings page instead of the tabbed one.
-    pub settings_classic: bool,
+    /// When a controller switches off, in-game hands freeze in place (true, the
+    /// Monado fork's default) or it's reported off so apps can take over.
+    /// Applied to the service whenever it comes up (fork libmonado 1.9).
+    pub hold_pose_when_off: bool,
 }
 
 impl Default for OverlayConfig {
@@ -227,7 +229,7 @@ impl Default for OverlayConfig {
             keyboard_haptics: true,
             osc_enabled: false,
             osc_port: 9001,
-            settings_classic: false,
+            hold_pose_when_off: true,
         }
     }
 }

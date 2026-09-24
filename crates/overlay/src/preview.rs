@@ -256,26 +256,51 @@ pub fn run(dir: &Path) -> Result<()> {
 /// Dashboard pages: each at the panel's real size (what you see first) and on
 /// a tall canvas cropped to the content (the whole scrolling page).
 fn pages(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir: &Path) -> Result<()> {
-    use crate::ui::settings_page_tabs as tabs;
-    use crate::ui::{Nav, SystemTab};
+    use crate::ui::{DesktopTab, Nav, PhotosTab, SettingsTab, SystemTab};
     type Setup = Box<dyn Fn(&mut crate::ui::LibState)>;
+    let name = |page: &str, tab: &dyn std::fmt::Debug| format!("page-{page}-{}", format!("{tab:?}").to_lowercase());
     let mut shots: Vec<(String, Setup)> = Vec::new();
-    for tab in tabs() {
-        let name = format!("page-settings-{}", format!("{tab:?}").to_lowercase());
-        shots.push((name, Box::new(move |st| {
+    for tab in SettingsTab::ALL {
+        shots.push((name("settings", &tab), Box::new(move |st| {
             st.nav = Nav::Settings;
             st.settings_tab = tab;
         })));
     }
-    shots.push(("page-settings-classic".into(), Box::new(|st| {
-        st.nav = Nav::Settings;
-        st.settings_classic = true;
-    })));
-    shots.push(("page-desktop".into(), Box::new(|st| st.nav = Nav::Desktop)));
-    shots.push(("page-system-monado".into(), Box::new(|st| {
-        st.nav = Nav::System;
-        st.system_tab = SystemTab::Monado;
-    })));
+    for tab in [SystemTab::Timer, SystemTab::Playspace, SystemTab::Monado] {
+        shots.push((name("system", &tab), Box::new(move |st| {
+            st.nav = Nav::System;
+            st.system_tab = tab;
+        })));
+    }
+    for tab in DesktopTab::ALL {
+        shots.push((name("desktop", &tab), Box::new(move |st| {
+            st.nav = Nav::Desktop;
+            st.desktop_tab = tab;
+        })));
+    }
+    for tab in PhotosTab::ALL {
+        shots.push((name("photos", &tab), Box::new(move |st| {
+            st.nav = Nav::Photos;
+            st.photos_tab = tab;
+        })));
+    }
+    // Stand-in screenshots for the gallery: soft gradients, some landscape,
+    // one portrait (the tiles centre-crop).
+    let shots_tex: Vec<(egui::TextureHandle, String)> = (0..8)
+        .map(|i| {
+            let (w, h) = if i == 3 { (90, 160) } else { (160, 90) };
+            let hue = i as f32 / 8.0;
+            let px = (0..w * h)
+                .map(|k| {
+                    let (x, y) = ((k % w) as f32 / w as f32, (k / w) as f32 / h as f32);
+                    let c = |o: f32| (((hue + o) * std::f32::consts::TAU).sin() * 0.5 + 0.5) * 180.0 + 40.0 * (1.0 - y);
+                    egui::Color32::from_rgb(c(0.0) as u8, c(0.33 + x * 0.2) as u8, c(0.66) as u8)
+                })
+                .collect();
+            let img = egui::ColorImage { size: [w, h], pixels: px };
+            (ctx.load_texture(format!("shot-{i}"), img, egui::TextureOptions::LINEAR), format!("Sep {}, 10:{:02} PM", 20 + i / 3, 5 * i))
+        })
+        .collect();
     for (name, setup) in shots {
         for (suffix, px) in [("", MAIN_PX), ("-full", TALL_PX)] {
             let file = format!("{name}{suffix}");
@@ -283,6 +308,8 @@ fn pages(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir:
                 continue;
             }
             let mut st = sample_state();
+            st.gallery_items = shots_tex.clone();
+            (st.gallery_total, st.gallery_pages) = (8, 1);
             setup(&mut st);
             let mut img = shoot(ctx, textures, px, 12, |ctx| crate::ui::build_main(ctx, &mut st));
             if px == TALL_PX {
