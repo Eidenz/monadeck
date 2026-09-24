@@ -308,6 +308,16 @@ pub struct DesktopViewer {
     pub handheld_width: f32,
     /// Per mode (World / Head / Handheld): where it last had the screens.
     dock_saved: [Option<DockSave>; 3],
+    // --- defaults & look (Desktop page) ---
+    /// How far in front of you a freshly shown screen appears, metres.
+    pub spawn_dist: f32,
+    /// Curve (0..1) and opacity new screens start with; see `set_defaults`.
+    default_curve: f32,
+    default_opacity: f32,
+    /// Colour multiplier for every screen (brightness × warm tint).
+    pub tint: [f32; 3],
+    /// B sends a middle click instead of a cursor-frozen left click.
+    pub b_middle: bool,
 }
 
 impl DesktopViewer {
@@ -388,7 +398,28 @@ impl DesktopViewer {
             dock_was_grabbing: false,
             handheld_width: 0.6,
             dock_saved: [None, None, None],
+            spawn_dist: PLACE_DIST,
+            default_curve: 0.0,
+            default_opacity: 1.0,
+            tint: [1.0; 3],
+            b_middle: false,
         }
+    }
+
+    /// Curve and opacity for new screens. Screens still on the old defaults
+    /// follow (like the default width); ones you've curved or faded keep theirs.
+    pub fn set_defaults(&mut self, curve: f32, opacity: f32) {
+        let (curve, opacity) = (curve.clamp(0.0, 1.0), opacity.clamp(0.2, 1.0));
+        for s in &mut self.screens {
+            if (s.curve - self.default_curve).abs() < 1e-4 {
+                s.curve = curve;
+            }
+            if (s.opacity - self.default_opacity).abs() < 1e-4 {
+                s.opacity = opacity;
+            }
+        }
+        self.default_curve = curve;
+        self.default_opacity = opacity;
     }
 
     // --- Gaming-mode docking ---------------------------------------------------
@@ -1484,7 +1515,7 @@ impl DesktopViewer {
             }
             if !s.placed {
                 if let Some(h) = hmd {
-                    s.pose = front_pose(h, PLACE_DIST, 0.0, 0.0, false);
+                    s.pose = front_pose(h, self.spawn_dist, 0.0, 0.0, false);
                     s.placed = true;
                 }
             }
@@ -1573,6 +1604,8 @@ impl DesktopViewer {
             log::info!("desktop: stream node {} -> {name} {detail} rect {rect:?}", st.node_id);
             let mut panel = ScreenPanel::new(name, detail, st.node_id, rect);
             panel.width_m = self.width_m;
+            panel.curve = self.default_curve;
+            panel.opacity = self.default_opacity;
             self.screens.push(panel);
         }
         // Screens the order list doesn't know yet go to the end, in stream order.
@@ -1906,7 +1939,13 @@ impl DesktopViewer {
                             let (code, frozen) = if h.select && !self.select_prev[hi] {
                                 (Some(hid::BTN_LEFT), false)
                             } else if h.precise && !self.precise_prev[hi] {
-                                (Some(hid::BTN_LEFT), true)
+                                // B: a click that never moves the cursor, or a
+                                // plain middle click (Desktop › Mouse).
+                                if self.b_middle {
+                                    (Some(hid::BTN_MIDDLE), false)
+                                } else {
+                                    (Some(hid::BTN_LEFT), true)
+                                }
                             } else if h.secondary && !self.secondary_prev[hi] {
                                 (Some(hid::BTN_RIGHT), false)
                             } else {
@@ -1937,6 +1976,7 @@ impl DesktopViewer {
                 (hid::BTN_LEFT, true) => h.precise,
                 (hid::BTN_LEFT, false) => h.select,
                 (hid::BTN_RIGHT, _) => h.secondary,
+                (hid::BTN_MIDDLE, _) => h.precise,
                 _ => false,
             });
             if !still {
@@ -1984,6 +2024,7 @@ impl DesktopViewer {
         let mut quads = Vec::new();
         let mut cyls = Vec::new();
         for s in self.screens.iter_mut() {
+            s.tint = self.tint;
             if s.cyl(curved).is_some() {
                 if let Some(c) = s.cylinder(space, curved, cs) {
                     cyls.push(c);
@@ -2000,6 +2041,15 @@ impl DesktopViewer {
     pub fn frame_counts(&self) -> Vec<(String, u64, Option<String>)> {
         self.screens.iter().map(|s| (s.name.clone(), s.frames, s.last_error.clone())).collect()
     }
+}
+
+/// The screens' colour multiplier: `brightness` (0.2..1) times a night-light
+/// style warm tint (`warmth` 0..1 pulls blue, and a little green, down —
+/// about 3400 K at full).
+pub fn screen_tint(brightness: f32, warmth: f32) -> [f32; 3] {
+    let b = brightness.clamp(0.2, 1.0);
+    let w = warmth.clamp(0.0, 1.0);
+    [b, b * (1.0 - 0.18 * w), b * (1.0 - 0.52 * w)]
 }
 
 fn pose_to_arr(p: &xr::Posef) -> [f32; 7] {

@@ -11,6 +11,8 @@
 //! - `/monadeck/screens`       the desktop screens
 //! - `/monadeck/keyboard`      the keyboard
 //! - `/monadeck/gaming`        gaming mode (controllers → gamepad)
+//! - `/monadeck/letgo`         switched-off controllers are reported off
+//!   instead of freezing in place (Monado fork; e.g. from a sleep tool)
 //! - `/monadeck/notify "title" ["body"]`  a toast
 //!
 //! VRChat sends changed avatar parameters as `/avatar/parameters/<name>`; a
@@ -29,6 +31,8 @@ pub enum Cmd {
     Screens(Option<bool>),
     Keyboard(Option<bool>),
     Gaming(Option<bool>),
+    /// Let go of switched-off controllers (true) or freeze them (false).
+    LetGo(Option<bool>),
     Notify { title: String, body: String },
 }
 
@@ -122,6 +126,7 @@ fn command(addr: &str, args: &[Arg]) -> Option<Cmd> {
         "screens" | "desktop" => Some(Cmd::Screens(flag())),
         "keyboard" => Some(Cmd::Keyboard(flag())),
         "gaming" | "gamemode" | "gamingmode" | "gamepad" => Some(Cmd::Gaming(flag())),
+        "letgo" => Some(Cmd::LetGo(flag())),
         "notify" | "toast" => {
             let mut strs = args.iter().filter_map(|a| if let Arg::Str(s) = a { Some(s.trim()) } else { None }).filter(|s| !s.is_empty());
             let title = strs.next()?.to_string();
@@ -312,6 +317,8 @@ mod tests {
         assert_eq!(command("/avatar/parameters/SomethingElse", &[Arg::Bool(true)]), None);
         assert_eq!(command("/monadeck/gaming", &[Arg::Bool(true)]), Some(Cmd::Gaming(Some(true))));
         assert_eq!(command("/avatar/parameters/MonadeckGameMode", &[]), Some(Cmd::Gaming(None)));
+        assert_eq!(command("/monadeck/letgo", &[Arg::Bool(true)]), Some(Cmd::LetGo(Some(true))));
+        assert_eq!(command("/avatar/parameters/MonadeckLetGo", &[Arg::Int(0)]), Some(Cmd::LetGo(Some(false))));
         assert_eq!(command("/monadeck/nope", &[]), None);
         assert_eq!(
             command("/monadeck/notify", &[Arg::Str("Raid".into()), Arg::Str("starting now".into())]),

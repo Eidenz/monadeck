@@ -1,11 +1,10 @@
 //! Persisted in-headset overlay preferences (separate from the desktop config).
-//! Currently just UI-sound settings; room to grow (panel distance, curve, etc.).
 use crate::paths::monadeck_config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlayConfig {
     pub audio_enabled: bool,
@@ -34,6 +33,18 @@ pub struct OverlayConfig {
     pub screencast_token: Option<String>,
     /// Physical width of mirrored screens, metres.
     pub screen_width_m: f32,
+    /// Curve new screens start with (0 = flat, 1 = the widest wrap).
+    pub screen_curve: f32,
+    /// Opacity new screens start with (0.2..=1).
+    pub screen_opacity: f32,
+    /// How far in front of you a freshly shown screen appears, metres.
+    pub screen_spawn_dist: f32,
+    /// Every screen's brightness (0.2..=1) and warm tint (0 = off ..= 1).
+    pub screen_brightness: f32,
+    pub screen_warmth: f32,
+    /// B on a screen sends a middle click (else a click that never moves the
+    /// cursor).
+    pub mouse_b_middle: bool,
     /// Bottom-bar order of the mirrored screens (output names, first = leftmost).
     pub screen_order: Vec<String>,
     /// Re-apply the last used desktop layout when the screens become available.
@@ -113,7 +124,7 @@ pub struct OverlayConfig {
     /// Notification sound level, 0 (mute) ..= 1, on top of the UI volume.
     pub notifications_volume: f32,
     /// The watch's four quick buttons (ids: keyboard, recenter, layouts, freeze,
-    /// timer, screenshot, screens, mute, photos).
+    /// letgo, timer, screenshot, screens, mute, photos, gaming).
     pub watch_buttons: Vec<String>,
     /// Keyboard follows its docked screen's visibility, and pops up when a text
     /// field gets focus on the desktop (accessibility bus). Off by default.
@@ -140,6 +151,8 @@ pub struct OverlayConfig {
     /// Keep gaming mode's virtual pad away from VR games (they would read it
     /// as a gamepad behind your flat game): a per-game Proton local fix.
     pub game_hide_pad_from_vr: bool,
+    /// Show the original single-scroll Settings page instead of the tabbed one.
+    pub settings_classic: bool,
 }
 
 impl Default for OverlayConfig {
@@ -159,6 +172,12 @@ impl Default for OverlayConfig {
             freeze_delay_secs: 3.0,
             screencast_token: None,
             screen_width_m: 1.35,
+            screen_curve: 0.0,
+            screen_opacity: 1.0,
+            screen_spawn_dist: 1.6,
+            screen_brightness: 1.0,
+            screen_warmth: 0.0,
+            mouse_b_middle: false,
             screen_order: Vec::new(),
             restore_layout: true,
             restore_layout_hidden: true,
@@ -208,6 +227,7 @@ impl Default for OverlayConfig {
             keyboard_haptics: true,
             osc_enabled: false,
             osc_port: 9001,
+            settings_classic: false,
         }
     }
 }

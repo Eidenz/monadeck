@@ -742,20 +742,9 @@ fn run() -> Result<()> {
         }
     }
     let mut audio = audio::Audio::new(ov_cfg.audio_enabled, ov_cfg.audio_volume);
-    let mut settings_prev = (
-        ov_cfg.audio_enabled,
-        ov_cfg.audio_volume,
-        ov_cfg.summon_tilt,
-        ov_cfg.panel_dist,
-        ov_cfg.panel_scale,
-        ov_cfg.panel_curve,
-        ov_cfg.playspace_x,
-        ov_cfg.playspace_y,
-        ov_cfg.playspace_z,
-        ov_cfg.playspace_yaw,
-        ov_cfg.uevr_delay,
-        (ov_cfg.screen_width_m, ov_cfg.restore_layout, ov_cfg.watch_enabled, ov_cfg.gaze_pause, ov_cfg.keyboard_scale, ov_cfg.watch_24h, ov_cfg.watch_locked, ov_cfg.recenter_on_toggle, (ov_cfg.capture_max_fps, ov_cfg.capture_max_height, ov_cfg.skybox_enabled, ov_cfg.notifications_enabled, ov_cfg.notifications_xso, ov_cfg.notifications_sound, ov_cfg.screen_restore_tilt, ov_cfg.notifications_volume, ov_cfg.keyboard_auto, (ov_cfg.restore_layout_hidden, ov_cfg.scroll_speed, ov_cfg.drag_threshold_px), (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone(), ov_cfg.ps_drag_vertical, ov_cfg.ps_drag_follow, ov_cfg.watch_mini, ov_cfg.keyboard_haptics, ov_cfg.osc_enabled, ov_cfg.osc_port, ov_cfg.watch_right_hand), (ov_cfg.game_rumble, ov_cfg.game_handheld_width, ov_cfg.game_hide_pad_from_vr))),
-    );
+    // The settings as last applied/saved; `None` until the first frame takes a
+    // snapshot (see "Settings changed" in the loop).
+    let mut settings_prev: Option<monadeck_core::overlay_config::OverlayConfig> = None;
     let mut favorites: HashSet<String> = monadeck_core::favorites::load();
     // Games the user flagged to launch through UEVR ("VR Mod").
     let mut uevr_games: HashSet<String> = monadeck_core::uevr::load_enabled();
@@ -798,6 +787,18 @@ fn run() -> Result<()> {
     st.uevr_delay = ov_cfg.uevr_delay;
     st.freeze_delay_secs = ov_cfg.freeze_delay_secs;
     st.screen_width_m = ov_cfg.screen_width_m;
+    st.screen_curve = ov_cfg.screen_curve.clamp(0.0, 1.0);
+    st.screen_opacity = ov_cfg.screen_opacity.clamp(0.2, 1.0);
+    st.screen_spawn_dist = ov_cfg.screen_spawn_dist.clamp(0.6, 3.0);
+    st.screen_brightness = ov_cfg.screen_brightness.clamp(0.2, 1.0);
+    st.screen_warmth = ov_cfg.screen_warmth.clamp(0.0, 1.0);
+    st.mouse_b_middle = ov_cfg.mouse_b_middle;
+    st.desktop_color_scale = color_scale;
+    st.settings_classic = ov_cfg.settings_classic;
+    desktop.set_defaults(st.screen_curve, st.screen_opacity);
+    desktop.spawn_dist = st.screen_spawn_dist;
+    desktop.tint = desktop::screen_tint(st.screen_brightness, st.screen_warmth);
+    desktop.b_middle = st.mouse_b_middle;
     st.restore_layout = ov_cfg.restore_layout;
     st.restore_layout_hidden = ov_cfg.restore_layout_hidden;
     st.scroll_speed = ov_cfg.scroll_speed.clamp(0.25, 4.0);
@@ -1169,10 +1170,11 @@ fn run() -> Result<()> {
         }
 
         // Low-battery warning: once per low episode, reset (hysteresis) above 20%.
+        // A switched-off device only has its last reading, so it never warns.
         if let Some(low) = st
             .batteries
             .iter()
-            .filter(|b| !b.charging)
+            .filter(|b| !b.charging && b.state != monado::DevState::Off)
             .min_by(|a, b| a.charge.partial_cmp(&b.charge).unwrap_or(std::cmp::Ordering::Equal))
         {
             if low.charge < 0.15 && !battery_low_warned {
@@ -1187,7 +1189,7 @@ fn run() -> Result<()> {
                 audio.alarm();
             }
         }
-        if !st.batteries.iter().any(|b| !b.charging && b.charge < 0.20) {
+        if !st.batteries.iter().any(|b| !b.charging && b.state != monado::DevState::Off && b.charge < 0.20) {
             battery_low_warned = false;
         }
 
@@ -1263,6 +1265,13 @@ fn run() -> Result<()> {
                         st.game_mode_request = Some(want);
                     }
                 }
+                osc::Cmd::LetGo(v) => {
+                    let letting_go = st.hold_pose == Some(false);
+                    let want = v.unwrap_or(!letting_go);
+                    if st.hold_pose.is_some() && want != letting_go {
+                        st.hold_pose_request = Some(!want);
+                    }
+                }
                 osc::Cmd::Notify { title, body } => {
                     toasts.push(toast::Toast::new(toast::Kind::Notification, title, body).app("OSC").source(toast::Source::Osc));
                 }
@@ -1279,7 +1288,7 @@ fn run() -> Result<()> {
                         let turned = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs() < 0.9976; // ~8°
                         if moved || turned {
                             welcomed = true;
-                            toasts.push(toast::Toast::new(toast::Kind::Welcome, "Monadeck is ready", "Left system button opens the dashboard · Settings › Controllers › Help lists every gesture"));
+                            toasts.push(toast::Toast::new(toast::Kind::Welcome, "Monadeck is ready", "Left system button opens the dashboard · Settings › Controllers lists every gesture"));
                             audio.confirm();
                         } else if t0.elapsed().as_secs() > 150 {
                             welcomed = true;
@@ -1475,6 +1484,11 @@ fn run() -> Result<()> {
                 monado.set_freeze(id, true);
             }
         }
+        // Switched-off controllers: freeze in place or let go (service-wide).
+        if let Some(hold) = st.hold_pose_request.take() {
+            monado.set_hold_pose(hold);
+        }
+        st.hold_pose = monado.hold_pose();
         // Fire a pending freeze when its countdown elapses; expose the remaining
         // seconds for the button label meanwhile.
         match pending_freeze {
@@ -2822,22 +2836,20 @@ fn run() -> Result<()> {
             }
         }
         drain_sounds(&mut st, &audio);
-        // Settings changed in the Settings tab — apply live + persist.
-        let settings_now = (
-            st.audio_enabled,
-            st.audio_volume,
-            st.summon_tilt,
-            st.panel_dist,
-            st.panel_scale,
-            st.panel_curve,
-            st.playspace_x,
-            st.playspace_y,
-            st.playspace_z,
-            st.playspace_yaw,
-            st.uevr_delay,
-            (st.screen_width_m, st.restore_layout, st.watch_enabled, st.gaze_pause, st.keyboard_scale, st.watch_24h, st.watch_locked, st.recenter_on_toggle, (st.capture_max_fps, st.capture_max_height, st.skybox_enabled, st.notif_enabled, st.notif_xso, st.notif_sound, st.screen_restore_tilt, st.notif_volume, st.keyboard_auto, (st.restore_layout_hidden, st.scroll_speed, st.drag_threshold_px), (st.ps_drag_hands.clone(), st.ps_drag_button.clone(), st.ps_drag_vertical, st.ps_drag_follow, st.watch_mini, st.keyboard_haptics, st.osc_enabled, st.osc_port as u16, st.watch_right_hand), (st.game_rumble, st.game_handheld_width, st.game_hide_pad))),
-        );
-        if settings_now != settings_prev {
+        // Settings changed on a page (or over OSC): apply live + persist. The
+        // whole config is compared, so a new setting can't be left out of the
+        // save; the watch's spot and size follow gestures and are saved when
+        // they're let go, so they don't count here.
+        let settings_now = {
+            let mut c = overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale);
+            (c.watch_offset, c.watch_offset_gloves, c.watch_offset_right, c.watch_offset_right_gloves) = (None, None, None, None);
+            c.watch_scale = 1.0;
+            c
+        };
+        if settings_prev.is_none() {
+            settings_prev = Some(settings_now.clone());
+        }
+        if settings_prev.as_ref() != Some(&settings_now) {
             audio.set_enabled(st.audio_enabled);
             audio.set_volume(st.audio_volume);
             desktop.set_width(st.screen_width_m);
@@ -2847,6 +2859,10 @@ fn run() -> Result<()> {
             desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
             desktop.scroll_speed = st.scroll_speed;
             desktop.drag_threshold_px = st.drag_threshold_px as f64;
+            desktop.set_defaults(st.screen_curve, st.screen_opacity);
+            desktop.spawn_dist = st.screen_spawn_dist;
+            desktop.tint = desktop::screen_tint(st.screen_brightness, st.screen_warmth);
+            desktop.b_middle = st.mouse_b_middle;
             game.rumble_enabled = st.game_rumble;
             if st.game_hide_pad != hide_pad_prev {
                 hide_pad_prev = st.game_hide_pad;
@@ -2857,7 +2873,7 @@ fn run() -> Result<()> {
                     st.flash(format!("Pad fix removed from {n} VR games"));
                 }
             }
-            settings_prev = settings_now;
+            settings_prev = Some(settings_now);
             overlay_config_from(&st, &screencast_token, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
@@ -3173,6 +3189,12 @@ fn overlay_config_from(
         freeze_delay_secs: st.freeze_delay_secs,
         screencast_token: screencast_token.clone(),
         screen_width_m: st.screen_width_m,
+        screen_curve: st.screen_curve,
+        screen_opacity: st.screen_opacity,
+        screen_spawn_dist: st.screen_spawn_dist,
+        screen_brightness: st.screen_brightness,
+        screen_warmth: st.screen_warmth,
+        mouse_b_middle: st.mouse_b_middle,
         screen_order: screen_order.to_vec(),
         restore_layout: st.restore_layout,
         restore_layout_hidden: st.restore_layout_hidden,
@@ -3222,6 +3244,7 @@ fn overlay_config_from(
         game_profile: Some(st.game_profile.clone()),
         osc_enabled: st.osc_enabled,
         osc_port: st.osc_port as u16,
+        settings_classic: st.settings_classic,
     }
 }
 

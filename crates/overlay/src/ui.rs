@@ -6,6 +6,17 @@ use egui_phosphor::regular as icon;
 use crate::games::{ArtState, LibGame};
 use crate::gfx::theme;
 
+// The tabbed Settings page. To go back to the classic single-scroll page for
+// good: drop this module, `settings_tab`, and the `Nav::Settings` switch in
+// `central()` (the classic `settings_view` below is untouched).
+mod settings_page;
+pub use settings_page::SettingsTab;
+
+/// Every category of the tabbed Settings page (the preview renders each).
+pub fn settings_page_tabs() -> [SettingsTab; 6] {
+    SettingsTab::ALL
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Nav {
     Home,
@@ -292,6 +303,11 @@ pub struct LibState {
     /// A freeze counting down: (client id, seconds remaining). Set by the loop,
     /// drives the button's countdown label.
     pub freeze_pending: Option<(u32, f32)>,
+    /// Switched-off controllers hold their last pose (`Some(true)`, the fork's
+    /// default) or report untracked; `None` when the runtime lacks the switch.
+    /// Live service state, mirrored each frame.
+    pub hold_pose: Option<bool>,
+    pub hold_pose_request: Option<bool>,
     /// Minutes the currently-running game has been up this session (for the splash).
     pub session_minutes: Option<u32>,
     // Desktop viewer (WayVR-style screen mirror).
@@ -313,6 +329,21 @@ pub struct LibState {
     pub keyboard_layout: String,
     /// Physical width of mirrored screens, metres.
     pub screen_width_m: f32,
+    /// What new screens start with: curve (0..1), opacity, distance (m).
+    pub screen_curve: f32,
+    pub screen_opacity: f32,
+    pub screen_spawn_dist: f32,
+    /// Every screen's brightness (0.2..1) and warm tint (0..1).
+    pub screen_brightness: f32,
+    pub screen_warmth: f32,
+    /// The runtime can scale layer colours (opacity, brightness, tint).
+    pub desktop_color_scale: bool,
+    /// B on a screen sends a middle click (else a cursor-frozen left click).
+    pub mouse_b_middle: bool,
+    /// Show the original single-scroll Settings page.
+    pub settings_classic: bool,
+    /// The tabbed Settings page's open category.
+    pub settings_tab: SettingsTab,
     /// Central-view fade-in animation (resets when the tab / splash changes).
     last_nav: Nav,
     last_splash: bool,
@@ -511,6 +542,8 @@ impl LibState {
             kill_request: None,
             freeze_delay_secs: 3.0,
             freeze_pending: None,
+            hold_pose: None,
+            hold_pose_request: None,
             desktop_rows: Vec::new(),
             desktop_status: String::new(),
             desktop_hid_error: None,
@@ -527,6 +560,15 @@ impl LibState {
             keyboard_toggle_request: false,
             keyboard_layout: String::new(),
             screen_width_m: 1.35,
+            screen_curve: 0.0,
+            screen_opacity: 1.0,
+            screen_spawn_dist: 1.6,
+            screen_brightness: 1.0,
+            screen_warmth: 0.0,
+            desktop_color_scale: false,
+            mouse_b_middle: false,
+            settings_classic: false,
+            settings_tab: SettingsTab::Dashboard,
             session_minutes: None,
             last_nav: Nav::Home,
             last_splash: false,
@@ -599,7 +641,8 @@ const TILE_H: f32 = 252.0; // 2:3 portrait capsule.
 /// The main (centre) panel: search bar, the active view (or active-game splash),
 /// the on-screen keyboard, and the launching/fade overlays.
 pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
-    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::System);
+    // The game search only belongs on the game pages.
+    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::System | Nav::Desktop | Nav::Photos);
     if (searchable || st.naming) && st.keyboard_open {
         keyboard(ctx, st);
     }
@@ -1134,7 +1177,7 @@ pub const ZONE_PRESETS: &[&str] = &[
 ];
 
 /// Everything a watch quick button can do, in cycle order.
-pub const WATCH_BUTTON_IDS: [&str; 10] = ["keyboard", "recenter", "layouts", "freeze", "timer", "screenshot", "screens", "mute", "photos", "gaming"];
+pub const WATCH_BUTTON_IDS: [&str; 11] = ["keyboard", "recenter", "layouts", "freeze", "letgo", "timer", "screenshot", "screens", "mute", "photos", "gaming"];
 
 /// The gaming-mode watch: the quick buttons make way for what you need
 /// mid-game — where the screen hangs, the mouse, remap profiles, and the way
@@ -1197,6 +1240,7 @@ pub fn watch_button_info(id: &str) -> (&'static str, &'static str) {
         "recenter" => (icon::CROSSHAIR, "Recenter playspace"),
         "layouts" => (icon::SQUARES_FOUR, "Screen layouts"),
         "freeze" => (icon::SNOWFLAKE, "Freeze game controllers"),
+        "letgo" => (icon::HAND_ARROW_DOWN, "Let go when off"),
         "timer" => (icon::TIMER, "Timer"),
         "screenshot" => (icon::CAMERA, "Take a screenshot"),
         "screens" => (icon::MONITOR, "Hide / restore all screens"),
@@ -1247,6 +1291,23 @@ fn watch_quick_button(ui: &mut egui::Ui, st: &mut LibState, id: &str, quick: &dy
                         st.freeze_toggle_request = Some(id);
                         st.sound_tab = true;
                     }
+                }
+            });
+        }
+        "letgo" => {
+            // Lit while switched-off controllers are let go (reported off), the
+            // exception to the default freeze-in-place.
+            let enabled = st.hold_pose.is_some();
+            let letting_go = st.hold_pose == Some(false);
+            let tip = if letting_go {
+                "Switched-off controllers are reported off · tap to freeze them in place again"
+            } else {
+                "Switched-off controllers freeze in place · tap to let go (the game sees them off)"
+            };
+            ui.add_enabled_ui(enabled, |ui| {
+                if quick(ui, glyph, letting_go, tip) {
+                    st.hold_pose_request = Some(letting_go);
+                    st.sound_tab = true;
                 }
             });
         }
@@ -1464,11 +1525,46 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
     });
 }
 
+/// Colour for a battery chip: tinted by charge, faded while the device isn't
+/// tracking, grey once it's switched off (SteamVR-style).
+fn battery_color(b: &crate::monado::BatteryInfo) -> egui::Color32 {
+    use crate::monado::DevState;
+    let tint = if b.charge > 0.33 {
+        RUNNING_GREEN
+    } else if b.charge > 0.15 {
+        FAV_GOLD
+    } else {
+        STOP_RED
+    };
+    match b.state {
+        DevState::Live => tint,
+        DevState::Lost => tint.gamma_multiply(0.45),
+        DevState::Off => theme::ON_SURFACE_VAR.gamma_multiply(0.6),
+    }
+}
+
+fn battery_state_note(b: &crate::monado::BatteryInfo) -> &'static str {
+    match b.state {
+        crate::monado::DevState::Live => "",
+        crate::monado::DevState::Lost => " · not tracking",
+        crate::monado::DevState::Off => " · switched off",
+    }
+}
+
 /// One chip for a whole kind of device: the lowest charge in the group (tinted
-/// by it), "×N" when several, and every member's charge on hover.
+/// by it), "×N" when several, and every member's charge on hover. Switched-off
+/// members don't count towards the lowest; a group that's all off goes grey.
 fn battery_group_widget(ui: &mut egui::Ui, kind: crate::monado::BatteryKind, group: &[&crate::monado::BatteryInfo]) {
-    use crate::monado::BatteryKind;
-    let Some(lowest) = group.iter().filter(|b| !b.charging).min_by(|a, b| a.charge.total_cmp(&b.charge)).or(group.first()) else {
+    use crate::monado::{BatteryKind, DevState};
+    let on: Vec<&&crate::monado::BatteryInfo> = group.iter().filter(|b| b.state != DevState::Off).collect();
+    let lowest = on
+        .iter()
+        .filter(|b| !b.charging)
+        .min_by(|a, b| a.charge.total_cmp(&b.charge))
+        .or(on.first())
+        .map(|b| **b)
+        .or(group.first().copied());
+    let Some(lowest) = lowest else {
         return;
     };
     let pct = (lowest.charge * 100.0).round() as i32;
@@ -1483,12 +1579,16 @@ fn battery_group_widget(ui: &mut egui::Ui, kind: crate::monado::BatteryKind, gro
     } else {
         icon::BATTERY_WARNING
     };
-    let color = if lowest.charge > 0.33 {
-        RUNNING_GREEN
-    } else if lowest.charge > 0.15 {
-        FAV_GOLD
+    // Tinted by the lowest live member; faded only when none of them tracks.
+    let all_off = on.is_empty();
+    let color = if all_off {
+        battery_color(lowest)
     } else {
-        STOP_RED
+        let mut c = battery_color(&crate::monado::BatteryInfo { state: DevState::Live, ..lowest.clone() });
+        if on.iter().all(|b| b.state == DevState::Lost) {
+            c = c.gamma_multiply(0.45);
+        }
+        c
     };
     let (dev, name) = match kind {
         BatteryKind::Glove => (icon::HAND, "Gloves"),
@@ -1500,10 +1600,17 @@ fn battery_group_widget(ui: &mut egui::Ui, kind: crate::monado::BatteryKind, gro
     let tip = group
         .iter()
         .enumerate()
-        .map(|(i, b)| format!("{name} {}: {}%{}", i + 1, (b.charge * 100.0).round() as i32, if b.charging { " (charging)" } else { "" }))
+        .map(|(i, b)| {
+            if b.state == DevState::Off {
+                format!("{name} {}: switched off", i + 1)
+            } else {
+                format!("{name} {}: {}%{}{}", i + 1, (b.charge * 100.0).round() as i32, if b.charging { " (charging)" } else { "" }, battery_state_note(b))
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
-    ui.label(egui::RichText::new(format!("{dev} {bat} {pct}%{count}")).size(14.0).color(color))
+    let text = if all_off { format!("{dev} off{count}") } else { format!("{dev} {bat} {pct}%{count}") };
+    ui.label(egui::RichText::new(text).size(14.0).color(color))
         .on_hover_text(format!("Lowest of {}:\n{tip}", name.to_lowercase()));
 }
 
@@ -1521,29 +1628,21 @@ fn battery_widget(ui: &mut egui::Ui, b: &crate::monado::BatteryInfo) {
     } else {
         icon::BATTERY_WARNING
     };
-    let color = if b.charge > 0.33 {
-        RUNNING_GREEN
-    } else if b.charge > 0.15 {
-        FAV_GOLD
-    } else {
-        STOP_RED
-    };
+    let color = battery_color(b);
     let dev = match b.kind {
         BatteryKind::Glove => icon::HAND,
         BatteryKind::Controller => icon::GAME_CONTROLLER,
         _ => icon::CIRCLE,
     };
-    ui.label(
-        egui::RichText::new(format!("{dev} {bat} {pct}%"))
-            .size(14.0)
-            .color(color),
-    )
-    .on_hover_text(match b.kind {
+    // A switched-off device's charge is its last reading: show "off" instead.
+    let text = if b.state == crate::monado::DevState::Off { format!("{dev} off") } else { format!("{dev} {bat} {pct}%") };
+    let what = match b.kind {
         BatteryKind::Glove => "Glove",
         BatteryKind::Controller => "Controller",
         BatteryKind::Tracker => "Tracker",
         BatteryKind::Other => "Device",
-    });
+    };
+    ui.label(egui::RichText::new(text).size(14.0).color(color)).on_hover_text(format!("{what}{}", battery_state_note(b)));
 }
 
 // --- on-panel virtual keyboard ----------------------------------------------
@@ -1711,7 +1810,11 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
             Nav::Settings => {
                 st.visible_now.clear();
                 st.hovered_index = None;
-                settings_view(ui, st);
+                if st.settings_classic {
+                    settings_view(ui, st);
+                } else {
+                    settings_page::settings_page(ui, st);
+                }
             }
         }
     });
@@ -2401,76 +2504,8 @@ fn setting_row(ui: &mut egui::Ui, label: &str, sub: Option<&str>, control: impl 
 /// The gesture reference (Settings → Controllers → Help): one line per gesture,
 /// grouped by what the laser is on.
 fn controls_card(ui: &mut egui::Ui) {
-    const GROUPS: &[(&str, &[(&str, &str)])] = &[
-        (
-            "Anywhere",
-            &[
-                ("Left system button", "summon / dismiss the dashboard (it re-centres in front of you)"),
-                ("Double-B (left hand)", "hide every screen + the keyboard, or bring them back"),
-                ("Hold trackpad, move hand", "drag the playspace (A + B on a UdCap glove) · System › Playspace › Drag"),
-                ("Trackpad twice", "snap the playspace back (A + B twice on a glove)"),
-                ("Trigger", "click on the dashboard, the watch, the keyboard, photo windows"),
-            ],
-        ),
-        (
-            "On a screen",
-            &[
-                ("Point", "moves the mouse"),
-                ("Trigger", "left click · keep holding and move past the drag threshold to drag"),
-                ("A", "right click"),
-                ("B", "left click without moving the cursor (fiddly targets)"),
-                ("Thumbstick", "scroll (speed in Desktop › Behaviour)"),
-                ("Grip", "move the screen (a docked group moves as one)"),
-                ("Grip + trigger, push / pull", "resize"),
-                ("Grip + stick ▲▼", "push it away / pull it closer"),
-                ("Grip + trigger + stick ◀▶", "curve it"),
-                ("Release next to another screen", "dock to that edge (teal bar shows the spot)"),
-                ("Aim just above the top edge", "shows the swap island (also for 2 s when a screen appears) · tap another number to put that screen here"),
-                ("B while gripping", "undock"),
-            ],
-        ),
-        (
-            "Gaming mode",
-            &[
-                ("Watch › gamepad button, or Settings", "controllers become an Xbox pad; the VR app behind stops seeing them"),
-                ("Watch › mouse button", "laser + mouse for the hand that tapped it, until it leaves the screen"),
-                ("Left system button", "dashboard as usual — every hand points while it's up"),
-                ("Watch › screen button", "World · Head (trails you) · Hands (held like a handheld)"),
-                ("Watch › sliders", "remap profile (JSON in ~/.config/monadeck/gamepad_profiles) · Guide button"),
-                ("VR game behind reacts to the pad", "a VR game reads the virtual pad as its own gamepad (VRChat mutes, opens menus). Once Monadeck has seen a game running in VR it hides the pad from it on GE-style Protons, from that game's next launch. On Valve's Proton only launch options work: paste the ones from Monadeck's desktop app (they carry SDL_GAMECONTROLLER_IGNORE_DEVICES=0x045e/0x028e) into the game in Steam"),
-            ],
-        ),
-        (
-            "On the keyboard",
-            &[
-                ("Trigger", "type · hold to repeat"),
-                ("Tap a modifier", "one-shot latch · tap it again within 1.5 s to send it alone (Super opens the launcher)"),
-                ("Shift twice", "lock · a third tap clears"),
-                ("Other hand on a screen", "that hand keeps the mouse; both hands can type"),
-                ("Grip", "move · release under a screen's dock spot to attach it"),
-                ("Top bar", "layout · clipboard · latched modifiers · screen pills · dock / undock · close"),
-            ],
-        ),
-        (
-            "Watch (left wrist by default · Settings › Wrist watch)",
-            &[
-                ("Point with the other hand", "it wins over whatever is behind it"),
-                ("Trigger", "tap a button · corner icons switch the card (media, bell)"),
-                ("Grip (right hand, unlocked)", "move it · the spot is remembered"),
-                ("Grip + trigger, push / pull", "resize it"),
-            ],
-        ),
-        (
-            "Photos",
-            &[
-                ("Finger frame (both hands)", "screenshot, if the gesture is enabled in Photos"),
-                ("Grip a photo window", "move it"),
-                ("Wrist card ‹ ›", "browse new shots · open puts one in a window"),
-            ],
-        ),
-    ];
     ui.add_space(4.0);
-    for (i, (title, rows)) in GROUPS.iter().enumerate() {
+    for (i, (title, rows)) in CONTROLS.iter().enumerate() {
         if i > 0 {
             ui.add_space(8.0);
         }
@@ -2491,6 +2526,76 @@ fn controls_card(ui: &mut egui::Ui) {
     ui.add_space(6.0);
 }
 
+/// Every gesture the overlay understands, grouped by what the laser is on.
+const CONTROLS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Anywhere",
+        &[
+            ("Left system button", "summon / dismiss the dashboard (it re-centres in front of you)"),
+            ("Double-B (left hand)", "hide every screen + the keyboard, or bring them back"),
+            ("Hold trackpad, move hand", "drag the playspace (A + B on a UdCap glove) · System › Playspace › Drag"),
+            ("Trackpad twice", "snap the playspace back (A + B twice on a glove)"),
+            ("Trigger", "click on the dashboard, the watch, the keyboard, photo windows"),
+        ],
+    ),
+    (
+        "On a screen",
+        &[
+            ("Point", "moves the mouse"),
+            ("Trigger", "left click · keep holding and move past the drag threshold to drag"),
+            ("A", "right click"),
+            ("B", "left click without moving the cursor (fiddly targets) · or a middle click (Desktop › Mouse)"),
+            ("Thumbstick", "scroll (speed in Desktop › Mouse)"),
+            ("Grip", "move the screen (a docked group moves as one)"),
+            ("Grip + trigger, push / pull", "resize"),
+            ("Grip + stick up / down", "push it away / pull it closer"),
+            ("Grip + trigger + stick ◀▶", "curve it"),
+            ("Release next to another screen", "dock to that edge (teal bar shows the spot)"),
+            ("Aim just above the top edge", "shows the swap island (also for 2 s when a screen appears) · tap another number to put that screen here"),
+            ("B while gripping", "undock"),
+        ],
+    ),
+    (
+        "Gaming mode",
+        &[
+            ("Watch › gamepad button, or Settings", "controllers become an Xbox pad; the VR app behind stops seeing them"),
+            ("Watch › mouse button", "laser + mouse for the hand that tapped it, until it leaves the screen"),
+            ("Left system button", "dashboard as usual — every hand points while it's up"),
+            ("Watch › screen button", "World · Head (trails you) · Hands (held like a handheld)"),
+            ("Watch › sliders", "remap profile (JSON in ~/.config/monadeck/gamepad_profiles) · Guide button"),
+            ("VR game behind reacts to the pad", "a VR game reads the virtual pad as its own gamepad (VRChat mutes, opens menus). Once Monadeck has seen a game running in VR it hides the pad from it on GE-style Protons, from that game's next launch. On Valve's Proton only launch options work: paste the ones from Monadeck's desktop app (they carry SDL_GAMECONTROLLER_IGNORE_DEVICES=0x045e/0x028e) into the game in Steam"),
+        ],
+    ),
+    (
+        "On the keyboard",
+        &[
+            ("Trigger", "type · hold to repeat"),
+            ("Tap a modifier", "one-shot latch · tap it again within 1.5 s to send it alone (Super opens the launcher)"),
+            ("Shift twice", "lock · a third tap clears"),
+            ("Other hand on a screen", "that hand keeps the mouse; both hands can type"),
+            ("Grip", "move · release under a screen's dock spot to attach it"),
+            ("Top bar", "layout · clipboard · latched modifiers · screen pills · dock / undock · close"),
+        ],
+    ),
+    (
+        "Watch (left wrist by default · Settings › Wrist watch)",
+        &[
+            ("Point with the other hand", "it wins over whatever is behind it"),
+            ("Trigger", "tap a button · corner icons switch the card (media, bell)"),
+            ("Grip (right hand, unlocked)", "move it · the spot is remembered"),
+            ("Grip + trigger, push / pull", "resize it"),
+        ],
+    ),
+    (
+        "Photos",
+        &[
+            ("Finger frame (both hands)", "screenshot, if the gesture is enabled in Photos"),
+            ("Grip a photo window", "move it"),
+            ("Wrist card ‹ ›", "browse new shots · open puts one in a window"),
+        ],
+    ),
+];
+
 /// A faint full-width separator between rows in a card.
 fn divider(ui: &mut egui::Ui) {
     ui.add_space(2.0);
@@ -2504,24 +2609,29 @@ fn divider(ui: &mut egui::Ui) {
     ui.add_space(2.0);
 }
 
-/// A two-segment Off / On switch. Returns true if the value changed.
+/// A two-segment Off / On switch. Returns true if the value changed. Laid out
+/// in its own left-to-right box, so it reads Off · On inside right-to-left rows
+/// too (they used to flip it to On · Off).
 fn seg_toggle(ui: &mut egui::Ui, value: &mut bool) -> bool {
     let before = *value;
-    egui::Frame::default()
-        .fill(egui::Color32::from_rgb(22, 26, 32))
-        .corner_radius(11)
-        .inner_margin(egui::Margin::same(3))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.horizontal(|ui| {
-                if seg_btn(ui, "Off", !*value, false).clicked() {
-                    *value = false;
-                }
-                if seg_btn(ui, "On", *value, true).clicked() {
-                    *value = true;
-                }
+    let size = egui::vec2(58.0 * 2.0 + 2.0 + 6.0, 38.0);
+    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        egui::Frame::default()
+            .fill(egui::Color32::from_rgb(22, 26, 32))
+            .corner_radius(11)
+            .inner_margin(egui::Margin::same(3))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.horizontal(|ui| {
+                    if seg_btn(ui, "Off", !*value, false).clicked() {
+                        *value = false;
+                    }
+                    if seg_btn(ui, "On", *value, true).clicked() {
+                        *value = true;
+                    }
+                });
             });
-        });
+    });
     *value != before
 }
 
@@ -2612,7 +2722,10 @@ fn stepper_inline(
     step: f32,
     fmt: impl Fn(f32) -> String,
 ) {
-    ui.horizontal(|ui| {
+    // Its own left-to-right box: reads − value + inside right-to-left rows too
+    // (they used to flip it to + value −).
+    let size = egui::vec2(42.0 + 8.0 + 70.0 + 8.0 + 42.0, 34.0);
+    ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         if step_btn(ui, icon::MINUS).clicked() {
             *value = (*value - step).max(min);
@@ -3033,6 +3146,14 @@ fn monado_view(ui: &mut egui::Ui, st: &mut LibState) {
         );
         ui.add_space(14.0);
 
+        if st.hold_pose.is_some() {
+            section(ui, "Controllers", |ui| {
+                hold_pose_row(ui, st);
+                ui.label(egui::RichText::new("Also on a watch quick button and over OSC (/monadeck/letgo)").size(12.0).color(theme::ON_SURFACE_VAR));
+                ui.add_space(6.0);
+            });
+        }
+
         let clients = st.monado_clients.clone();
         if clients.is_empty() {
             ui.add_space(24.0);
@@ -3111,6 +3232,23 @@ fn monado_view(ui: &mut egui::Ui, st: &mut LibState) {
             }
         });
     });
+}
+
+/// "When a controller switches off: Freeze / Let go" (the Monado fork's
+/// hold-pose switch), with a trailing divider; nothing on runtimes without it.
+fn hold_pose_row(ui: &mut egui::Ui, st: &mut LibState) {
+    let Some(hold) = st.hold_pose else { return };
+    setting_row(ui, "When a controller switches off", Some("Freeze: game hands stay put · Let go: the game sees it off (avatar idle/sleep poses take over) · back to Freeze when Monado restarts"), |ui| {
+        if pill(ui, "Let go", 96.0, !hold).clicked() && hold {
+            st.hold_pose_request = Some(false);
+            st.sound_tab = true;
+        }
+        if pill(ui, "Freeze", 96.0, hold).clicked() && !hold {
+            st.hold_pose_request = Some(true);
+            st.sound_tab = true;
+        }
+    });
+    divider(ui);
 }
 
 /// The Photos page: screenshot gallery + finger-frame gesture and photo settings.
@@ -3221,26 +3359,23 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                     None => row.detail.clone(),
                 };
                 let mut op = row.opacity;
-                setting_row(ui, &row.name, Some(&sub), |ui| {
+                let title = format!("{}  {}", if row.shown { icon::EYE } else { icon::EYE_CLOSED }, row.name);
+                setting_row(ui, &title, Some(&sub), |ui| {
                     if row.approved {
-                        // Order in the bottom bar: ◀ / ▶ (left = earlier).
+                        // Place in the bottom bar: ◀ / ▶ (left = earlier).
                         ui.add_enabled_ui(i + 1 < approved, |ui| {
-                            if action_button(ui, icon::CARET_RIGHT, "").clicked() {
+                            if icon_button(ui, icon::CARET_RIGHT, "Later in the bottom bar", false).clicked() {
                                 mv = Some((i, 1));
                             }
                         });
                         ui.add_enabled_ui(i > 0, |ui| {
-                            if action_button(ui, icon::CARET_LEFT, "").clicked() {
+                            if icon_button(ui, icon::CARET_LEFT, "Earlier in the bottom bar", false).clicked() {
                                 mv = Some((i, -1));
                             }
                         });
-                        ui.label(
-                            egui::RichText::new(if row.shown { "shown" } else { "hidden" })
-                                .size(13.0)
-                                .color(theme::ON_SURFACE_VAR),
-                        );
-                        ui.add_space(8.0);
+                        ui.add_space(14.0);
                         stepper_inline(ui, &mut op, 0.2, 1.0, 0.1, |v| format!("{:.0}%", v * 100.0));
+                        ui.label(egui::RichText::new("opacity").size(12.0).color(theme::ON_SURFACE_VAR));
                     }
                 });
                 if row.approved && (op - row.opacity).abs() > 1e-3 {
@@ -3251,19 +3386,17 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 st.desktop_move_request = Some(m);
                 st.sound_tab = true;
             }
-        });
-        if st.desktop_ready {
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if st.desktop_ready {
+                divider(ui);
+                setting_row(ui, "Re-pick screens", Some("Choose which monitors VR may show, in the desktop's share dialog"), |ui| {
                     let armed = st.is_armed("repick");
-                    if reset_button(ui, if armed { "Tap again to re-pick" } else { "Re-pick screens" }).clicked() && st.confirm_tap("repick") {
+                    if reset_button(ui, if armed { "Tap again to re-pick" } else { "Re-pick" }).clicked() && st.confirm_tap("repick") {
                         st.desktop_reselect_request = true;
                         st.flash("Pick your screens in the desktop dialog");
                     }
                 });
-            });
-        }
-        ui.add_space(6.0);
+            }
+        });
         section(ui, "Layouts", |ui| {
             ui.label(
                 egui::RichText::new("Named arrangements of your screens + keyboard (e.g. Standing, Lying down).")
@@ -3376,83 +3509,132 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 st.sound_tab = true;
             }
         });
-        ui.add_space(6.0);
-        section(ui, "Behaviour", |ui| {
-            let mut t = false;
-            setting_row(ui, "Pause capture when not looking", Some("Frees GPU/CPU after ~2 s out of view; resumes instantly"), |ui| {
-                t |= seg_toggle(ui, &mut st.gaze_pause);
+        section(ui, "New screens", |ui| {
+            setting_row(ui, "Width", Some("Screens you haven't resized follow it · grip + trigger, push/pull resizes one"), |ui| {
+                stepper_inline(ui, &mut st.screen_width_m, 0.6, 3.0, 0.1, |v| format!("{v:.1} m"));
             });
             divider(ui);
-            setting_row(
-                ui,
-                "Double-B restore follows your head",
-                Some("One screen or a docked group comes back centred in view; several loose screens keep their place around you — except an untouched loaded layout"),
-                |ui| {
-                    t |= seg_toggle(ui, &mut st.recenter_on_toggle);
-                },
-            );
-            divider(ui);
-            setting_row(ui, "Tilt restored screens to match headset angle", Some("Off = upright, like the menu's own toggle"), |ui| {
-                t |= seg_toggle(ui, &mut st.screen_restore_tilt);
+            setting_row(ui, "Curve", Some("0 = flat · grip + trigger + stick ◀▶ curves one screen"), |ui| {
+                let max_deg = crate::desktop::screen::MAX_CURVE_ANGLE.to_degrees();
+                modern_slider(ui, &mut st.screen_curve, 0.0..=1.0, 300.0, move |v| if v < 0.01 { "flat".into() } else { format!("{:.0}°", v * max_deg) });
             });
             divider(ui);
-            setting_row(ui, "Docking", Some("Drop a screen next to another to dock them edge-to-edge (they then move as one) · B while gripping detaches it"), |_| {});
-            divider(ui);
-            setting_row(
-                ui,
-                "Keyboard follows screens & text fields",
-                Some("Hides with its docked screen and returns with it; pops up under the last-used screen when a text field gets focus on the desktop (accessibility bus)"),
-                |ui| {
-                    t |= seg_toggle(ui, &mut st.keyboard_auto);
-                },
-            );
-            divider(ui);
-            let mut fps = st.capture_max_fps as f32;
-            setting_row(ui, "Capture frame-rate cap", Some("Frames above the headset rate are never seen; capping saves compositor GPU work (0 = unlimited)"), |ui| {
-                stepper_inline(ui, &mut fps, 0.0, 240.0, 30.0, |v| if v < 1.0 { "unlimited".into() } else { format!("{v:.0} fps") });
-            });
-            st.capture_max_fps = fps.round() as u32;
-            divider(ui);
-            let mut mh = st.capture_max_height as f32;
-            setting_row(ui, "Screen resolution cap", Some("Downscale mirrored screens in VR (0 = native)"), |ui| {
-                stepper_inline(ui, &mut mh, 0.0, 2160.0, 360.0, |v| if v < 1.0 { "native".into() } else { format!("{v:.0} px tall") });
-            });
-            st.capture_max_height = mh.round() as u32;
-            divider(ui);
-            setting_row(ui, "Keyboard size", Some("Also saved in layouts"), |ui| {
-                stepper_inline(ui, &mut st.keyboard_scale, 0.6, 1.6, 0.1, |v| format!("{:.0}%", v * 100.0));
+            let cs = st.desktop_color_scale;
+            setting_row(ui, "Opacity", Some(if cs { "Per screen above, once it's up" } else { "Not supported by this runtime" }), |ui| {
+                ui.add_enabled_ui(cs, |ui| {
+                    stepper_inline(ui, &mut st.screen_opacity, 0.2, 1.0, 0.1, |v| format!("{:.0}%", v * 100.0));
+                });
             });
             divider(ui);
-            setting_row(ui, "Keyboard haptics", Some("A light tick on each key, a lighter one sliding between keys"), |ui| {
-                t |= seg_toggle(ui, &mut st.keyboard_haptics);
+            setting_row(ui, "Distance", Some("How far in front of you a screen appears when shown"), |ui| {
+                modern_slider(ui, &mut st.screen_spawn_dist, 0.6..=3.0, 300.0, |v| format!("{v:.2} m"));
+            });
+        });
+        section(ui, "Brightness & tint", |ui| {
+            let cs = st.desktop_color_scale;
+            if !cs {
+                ui.label(egui::RichText::new(format!("{}  This runtime can't scale layer colours (XR_KHR_composition_layer_color_scale_bias)", icon::INFO)).size(13.0).color(theme::ON_SURFACE_VAR));
+                ui.add_space(4.0);
+            }
+            ui.add_enabled_ui(cs, |ui| {
+                setting_row(ui, "Brightness", Some("Every screen · handy lying down at night"), |ui| {
+                    modern_slider(ui, &mut st.screen_brightness, 0.2..=1.0, 300.0, |v| format!("{:.0}%", v * 100.0));
+                });
+                divider(ui);
+                setting_row(ui, "Warm tint", Some("Less blue, like a night light"), |ui| {
+                    modern_slider(ui, &mut st.screen_warmth, 0.0..=1.0, 300.0, |v| if v < 0.01 { "off".into() } else { format!("{:.0}%", v * 100.0) });
+                });
+                divider(ui);
+                setting_row(ui, "Presets", None, |ui| {
+                    for (label, b, w) in [("Night", 0.55, 0.7), ("Dim", 0.6, 0.0), ("Normal", 1.0, 0.0)] {
+                        let on = (st.screen_brightness - b).abs() < 0.01 && (st.screen_warmth - w).abs() < 0.01;
+                        if pill(ui, label, 92.0, on).clicked() {
+                            st.screen_brightness = b;
+                            st.screen_warmth = w;
+                            st.sound_tab = true;
+                        }
+                    }
+                });
+            });
+        });
+        section(ui, "Mouse", |ui| {
+            setting_row(ui, "B button", Some("Frozen click: a left click that never moves the cursor (fiddly targets) · or a middle click (paste, open in a new tab, close a tab) · A stays the right click"), |ui| {
+                for (label, middle) in [("Middle click", true), ("Frozen click", false)] {
+                    if pill(ui, label, 128.0, st.mouse_b_middle == middle).clicked() && st.mouse_b_middle != middle {
+                        st.mouse_b_middle = middle;
+                        st.sound_tab = true;
+                    }
+                }
             });
             divider(ui);
             setting_row(ui, "Scroll speed", Some("Thumbstick scrolling on a screen"), |ui| {
                 modern_slider(ui, &mut st.scroll_speed, 0.25..=4.0, 300.0, |v| format!("{v:.2}×"));
             });
             divider(ui);
-            setting_row(ui, "Drag threshold", Some("Trigger-held cursor motion below this stays a click; beyond it, it's a drag"), |ui| {
+            setting_row(ui, "Drag threshold", Some("Trigger-held motion below this stays a click; beyond it, it's a drag"), |ui| {
                 modern_slider(ui, &mut st.drag_threshold_px, 0.0..=60.0, 300.0, |v| format!("{v:.0} px"));
+            });
+        });
+        section(ui, "Keyboard", |ui| {
+            let mut t = false;
+            setting_row(ui, "Follows screens & text fields", Some("Hides with its docked screen and returns with it; pops up under the last-used screen when a text field gets focus"), |ui| {
+                t |= seg_toggle(ui, &mut st.keyboard_auto);
+            });
+            divider(ui);
+            setting_row(ui, "Size", Some("Also saved in layouts"), |ui| {
+                stepper_inline(ui, &mut st.keyboard_scale, 0.6, 1.6, 0.1, |v| format!("{:.0}%", v * 100.0));
+            });
+            divider(ui);
+            setting_row(ui, "Haptics", Some("A light tick on each key, a lighter one sliding between keys"), |ui| {
+                t |= seg_toggle(ui, &mut st.keyboard_haptics);
+            });
+            divider(ui);
+            setting_row(ui, "Layout", Some(&format!("{} · follows the desktop's layout (switch it from the keyboard's top bar)", st.keyboard_layout)), |_| {});
+            if t {
+                st.sound_tab = true;
+            }
+        });
+        section(ui, "Hide & restore", |ui| {
+            let mut t = false;
+            setting_row(
+                ui,
+                "Double-B restore follows your head",
+                Some("One screen or a docked group comes back centred in view; several loose screens keep their place around you, except an untouched loaded layout"),
+                |ui| {
+                    t |= seg_toggle(ui, &mut st.recenter_on_toggle);
+                },
+            );
+            divider(ui);
+            setting_row(ui, "Tilt restored screens to your headset", Some("Off = upright"), |ui| {
+                t |= seg_toggle(ui, &mut st.screen_restore_tilt);
             });
             if t {
                 st.sound_tab = true;
             }
         });
-        ui.add_space(6.0);
-        section(ui, "Placement", |ui| {
-            setting_row(
-                ui,
-                "Default screen width",
-                Some("Applies to all screens · while gripping: trigger + push/pull resizes, stick pushes it away/closer, trigger + stick ◀▶ curves it"),
-                |ui| {
-                stepper_inline(ui, &mut st.screen_width_m, 0.6, 3.0, 0.1, |v| format!("{v:.1} m"));
+        section(ui, "Performance", |ui| {
+            let mut t = false;
+            setting_row(ui, "Pause capture when not looking", Some("Frees GPU/CPU after ~2 s out of view; resumes instantly"), |ui| {
+                t |= seg_toggle(ui, &mut st.gaze_pause);
             });
             divider(ui);
-            setting_row(ui, "Mouse", Some("Trigger clicks & drags · A right-clicks · B clicks without moving (for tricky targets) · stick scrolls · double-B on the left hand hides/restores all screens + keyboard"), |_| {});
+            let mut fps = st.capture_max_fps as f32;
+            setting_row(ui, "Frame-rate cap", Some("Frames above the headset rate are never seen; capping saves compositor work"), |ui| {
+                stepper_inline(ui, &mut fps, 0.0, 240.0, 30.0, |v| if v < 1.0 { "unlimited".into() } else { format!("{v:.0} fps") });
+            });
+            st.capture_max_fps = fps.round() as u32;
+            divider(ui);
+            let mut mh = st.capture_max_height as f32;
+            setting_row(ui, "Resolution cap", Some("Downscale mirrored screens in VR"), |ui| {
+                stepper_inline(ui, &mut mh, 0.0, 2160.0, 360.0, |v| if v < 1.0 { "native".into() } else { format!("{v:.0} px tall") });
+            });
+            st.capture_max_height = mh.round() as u32;
+            if t {
+                st.sound_tab = true;
+            }
         });
-        ui.add_space(6.0);
         section(ui, "Status", |ui| {
-            let cap = if st.desktop_dmabuf { "GPU zero-copy (DMA-BUF)" } else { "CPU copy (SHM) — slower" };
+            let cap = if st.desktop_dmabuf { "GPU zero-copy (DMA-BUF)" } else { "CPU copy (SHM), slower" };
             setting_row(ui, "Capture path", Some(cap), |_| {});
             divider(ui);
             match &st.desktop_hid_error {
@@ -3460,19 +3642,12 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
                 Some(e) => setting_row(
                     ui,
                     "Mouse & keyboard unavailable",
-                    Some(&format!("{e} — add yourself to the `input` group and re-login")),
+                    Some(&format!("{e} · add yourself to the `input` group and re-login")),
                     |_| {},
                 ),
             }
             divider(ui);
             setting_row(ui, "Shown", Some(&format!("{} screen(s) in VR", st.desktop_shown)), |_| {});
-            divider(ui);
-            setting_row(
-                ui,
-                "Keyboard layout",
-                Some(&format!("{} · tap a modifier then a key · grip to move · dock under a screen", st.keyboard_layout)),
-                |_| {},
-            );
         });
     });
 }
@@ -3480,6 +3655,14 @@ fn desktop_view(ui: &mut egui::Ui, st: &mut LibState) {
 fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
     page_header(ui, icon::GEAR, "Settings");
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        section(ui, "", |ui| {
+            setting_row(ui, "Layout", Some("The tabbed page groups these settings by category"), |ui| {
+                if action_button(ui, icon::SQUARES_FOUR, "Tabbed layout").clicked() {
+                    st.settings_classic = false;
+                    st.sound_tab = true;
+                }
+            });
+        });
         section(ui, "Wrist watch", |ui| {
             let mut t = false;
             setting_row(ui, "Show the watch", Some("Clock, time zones, batteries and quick buttons on your wrist"), |ui| {
@@ -3487,7 +3670,8 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
             });
             divider(ui);
             setting_row(ui, "Wrist", Some("Which hand wears it · the other hand points at it · each wrist remembers its own spot"), |ui| {
-                for (label, right) in [("Left", false), ("Right", true)] {
+                // Right-to-left row: added Right first so it reads Left · Right.
+                for (label, right) in [("Right", true), ("Left", false)] {
                     if pill(ui, label, 74.0, st.watch_right_hand == right).clicked() && st.watch_right_hand != right {
                         st.watch_right_hand = right;
                         t = true;
@@ -3506,7 +3690,6 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
             setting_row(ui, "Position locked", Some("Unlock, then grip the watch with the other hand to move it; the spot is remembered"), |ui| {
                 t |= seg_toggle(ui, &mut st.watch_locked);
             });
-            divider(ui);
             for slot in 0..4 {
                 divider(ui);
                 let id = st.watch_buttons.get(slot).cloned().unwrap_or_default();
@@ -3767,6 +3950,7 @@ fn settings_view(ui: &mut egui::Ui, st: &mut LibState) {
         });
 
         section(ui, "Controllers", |ui| {
+            hold_pose_row(ui, st);
             setting_row(
                 ui,
                 "Freeze delay",
