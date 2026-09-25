@@ -35,9 +35,10 @@
   const showFloor = $derived(!isWivrn && app.config?.lighthouse_driver === "steamvr");
   const floorDone = $derived(!!app.floorCal?.calibrated);
 
+  // CAP_SYS_NICE is a monado-service thing: WiVRn neither needs nor counts it.
   const steps = $derived([
     runtimeDone,
-    capsDone,
+    ...(isWivrn ? [] : [capsDone]),
     preflightDone,
     protonDone,
     ...(showFloor ? [floorDone] : []),
@@ -121,31 +122,29 @@
         </div>
       </div>
 
-      <!-- Service capabilities -->
-      <div class="item" class:done={capsDone}>
-        <div class="mark">{capsDone ? "✓" : ""}</div>
-        <div class="text">
-          <div class="t">Service capabilities</div>
-          <div class="d">
-            {isWivrn
-              ? "Not needed for WiVRn."
-              : "CAP_SYS_NICE on monado-service (re-apply after each rebuild)."}
+      <!-- Service capabilities (Monado only) -->
+      {#if !isWivrn}
+        <div class="item" class:done={capsDone}>
+          <div class="mark">{capsDone ? "✓" : ""}</div>
+          <div class="text">
+            <div class="t">Service capabilities</div>
+            <div class="d">CAP_SYS_NICE on monado-service (re-apply after each rebuild).</div>
+          </div>
+          <div class="act">
+            {#if capsDone}
+              <span class="ok">Set</span>
+            {:else if app.caps === "needs_setcap"}
+              <button class="accent" onclick={applyCaps} disabled={app.busy}>
+                {app.busy ? "…" : "Set"}
+              </button>
+            {:else if app.caps === "no_binary"}
+              <span class="muted">After runtime</span>
+            {:else}
+              <span class="muted">Needs getcap/setcap</span>
+            {/if}
           </div>
         </div>
-        <div class="act">
-          {#if capsDone}
-            <span class="ok">Set</span>
-          {:else if app.caps === "needs_setcap"}
-            <button class="accent" onclick={applyCaps} disabled={app.busy}>
-              {app.busy ? "…" : "Set"}
-            </button>
-          {:else if app.caps === "no_binary"}
-            <span class="muted">After runtime</span>
-          {:else}
-            <span class="muted">Needs getcap/setcap</span>
-          {/if}
-        </div>
-      </div>
+      {/if}
 
       <!-- VR prerequisites (preflight) -->
       <div class="item" class:done={preflightDone}>
@@ -218,30 +217,30 @@
           </div>
         </div>
       {/if}
+    </div>
 
-      <!-- Stop SteamVR on start (a preference, not a one-time task) -->
-      <div class="item" class:done={killSteamvrOn}>
-        <div class="mark">{killSteamvrOn ? "✓" : ""}</div>
-        <div class="text">
-          <div class="t">Stop SteamVR on start</div>
-          <div class="d">
-            SteamVR conflicts with monado over the headset, so Monadeck closes it
-            automatically when you start. Recommended — turn it off only if you
-            know you need SteamVR running.
-          </div>
+    <!-- Stop SteamVR on start: a preference, not a step (no check, not counted) -->
+    <div class="item pref">
+      <div class="text">
+        <div class="t">Stop SteamVR on start</div>
+        <div class="d">
+          {isWivrn
+            ? "A running SteamVR holds the OpenVR runtime your games need."
+            : "SteamVR fights Monado for the headset."}
+          Leave on unless you need SteamVR running.
         </div>
-        <div class="act">
-          <Toggle
-            label="Stop SteamVR before starting monado"
-            checked={killSteamvrOn}
-            onchange={(v) => {
-              if (app.config) {
-                app.config.kill_steamvr_on_start = v;
-                saveConfig();
-              }
-            }}
-          />
-        </div>
+      </div>
+      <div class="act">
+        <Toggle
+          label={`Stop SteamVR before starting ${isWivrn ? "WiVRn" : "Monado"}`}
+          checked={killSteamvrOn}
+          onchange={(v) => {
+            if (app.config) {
+              app.config.kill_steamvr_on_start = v;
+              saveConfig();
+            }
+          }}
+        />
       </div>
     </div>
 
