@@ -287,8 +287,9 @@
     </div>
     <span class="note">
       Steam sandboxes games; this prefix lets them reach WiVRn's OpenXR runtime and
-      the OpenVR compatibility layer. Paste it into a game's launch options (or set
-      it via the deck's launch-options helper).
+      the OpenVR compatibility layer. Paste it into the game's launch options in
+      Steam (Properties › General › Launch options). The helper in Settings ›
+      Environment is for the Monado backend and doesn't apply here.
     </span>
   </div>
 

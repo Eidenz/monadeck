@@ -16,6 +16,9 @@ openxr = { version = "0.21", features = ["linked"] }
 ash = "0.38"
 egui = "0.31"
 egui-phosphor = "0.9"
+# Only to check a system CJK font parses before handing it to egui (which
+# panics on a bad font); the same crate egui already uses.
+ab_glyph = "0.2"
 egui-ash-renderer = { version = "0.8", features = ["gpu-allocator"] }
 gpu-allocator = "0.27"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

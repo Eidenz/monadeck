@@ -26,6 +26,97 @@ pub mod theme {
     pub const ON_SURFACE_VAR: Color32 = Color32::from_rgb(160, 172, 186);
 }
 
+/// egui's fonts + the Phosphor icons + a system CJK font as the last
+/// fallback, so Japanese (and Chinese / Korean) titles don't come out as
+/// boxes. Every panel uses this.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    if let Some(cjk) = cjk_font() {
+        fonts.font_data.insert("cjk".into(), cjk);
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().push("cjk".into());
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
+/// The system's CJK font, read once and shared by every panel. egui copies an
+/// owned font into each context, so the bytes are made `'static` (one copy
+/// for the whole overlay, ~4–32 MB depending on the font).
+fn cjk_font() -> Option<std::sync::Arc<egui::FontData>> {
+    use ab_glyph::{Font, VariableFont};
+    static FONT: std::sync::OnceLock<Option<std::sync::Arc<egui::FontData>>> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| {
+        // egui can't pick a weight inside a variable font, so one renders at
+        // its default instance (thin, for Noto Sans CJK VF): take it only if
+        // nothing static turns up.
+        let mut variable: Option<(std::path::PathBuf, u32, Vec<u8>)> = None;
+        let mut pick = None;
+        for (path, index, chosen) in cjk_candidates() {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(font) = ab_glyph::FontRef::try_from_slice_and_index(&bytes, index) else {
+                log::warn!("fonts: {} (face {index}) doesn't parse, skipping", path.display());
+                continue;
+            };
+            // fontconfig answers with a Latin font when there's no CJK one.
+            if font.glyph_id('東').0 == 0 {
+                continue;
+            }
+            if !chosen && !font.variations().is_empty() {
+                variable.get_or_insert((path, index, bytes));
+                continue;
+            }
+            pick = Some((path, index, bytes));
+            break;
+        }
+        let Some((path, index, bytes)) = pick.or(variable) else {
+            log::warn!("fonts: no CJK font found; Japanese/Chinese/Korean text shows as boxes (install Noto Sans CJK)");
+            return None;
+        };
+        log::info!("fonts: CJK fallback {} (face {index})", path.display());
+        let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        let mut data = egui::FontData::from_static(bytes);
+        data.index = index;
+        Some(std::sync::Arc::new(data))
+    })
+    .clone()
+}
+
+/// Where to look for a CJK font, best first: `MONADECK_CJK_FONT=path[:face]`
+/// (taken as is), the static Noto Sans CJK most distros ship, what fontconfig
+/// picks for Japanese, then Droid Sans Fallback.
+fn cjk_candidates() -> Vec<(std::path::PathBuf, u32, bool)> {
+    let mut out = Vec::new();
+    if let Ok(v) = std::env::var("MONADECK_CJK_FONT") {
+        let (path, face) = match v.rsplit_once(':') {
+            Some((p, f)) if f.parse::<u32>().is_ok() => (p.to_string(), f.parse().unwrap_or(0)),
+            _ => (v, 0),
+        };
+        out.push((path.into(), face, true));
+    }
+    for p in [
+        "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
+    ] {
+        out.push((p.into(), 0, false));
+    }
+    // fontconfig's choice for Japanese. Its index packs a named instance into
+    // the high bits; the face is the low 16.
+    if let Ok(o) = std::process::Command::new("fc-match").args(["-f", "%{file}|%{index}", "sans-serif:lang=ja"]).output() {
+        let s = String::from_utf8_lossy(&o.stdout);
+        if let Some((file, idx)) = s.split_once('|') {
+            out.push((file.into(), idx.trim().parse::<u32>().unwrap_or(0) & 0xFFFF, false));
+        }
+    }
+    out.push(("/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf".into(), 0, false));
+    out.push(("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf".into(), 0, false));
+    out
+}
+
 pub fn apply_style(ctx: &egui::Context) {
     use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
     let mut style = (*ctx.style()).clone();
@@ -111,9 +202,7 @@ pub fn make_panel(
     let framebuffers = make_framebuffers(device, render_pass, format, &images, px)?;
 
     let ctx = egui::Context::default();
-    let mut fonts = egui::FontDefinitions::default();
-    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    ctx.set_fonts(fonts);
+    install_fonts(&ctx);
     apply_style(&ctx);
     ctx.set_pixels_per_point(PPP);
     ctx.options_mut(|o| {

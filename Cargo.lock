@@ -1401,7 +1401,7 @@ dependencies = [
 
 [[package]]
 name = "monadeck-core"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1416,8 +1416,9 @@ dependencies = [
 
 [[package]]
 name = "monadeck-overlay"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "ash",
  "ashpd",

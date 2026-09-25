@@ -47,12 +47,53 @@
   }
 
   const LOW_BATTERY = 0.15;
-  // Grey when not detected, a gentle red when the battery is critically low,
-  // otherwise the normal teal→green gradient.
+  // Tracking has to be gone this long before the icon dims, so a hand briefly
+  // blocked from the base stations doesn't flicker.
+  const LOST_AFTER_MS = 1000;
+
+  const keyOf = (d: DeviceInfo) => d.serial ?? `#${d.index}`;
+
+  // When each device was first seen untracked (cleared once it tracks again).
+  let lostSince = new Map<string, number>();
+  let lost = $state(new Set<string>());
+  $effect(() => {
+    const now = Date.now();
+    const next = new Map<string, number>();
+    const shown = new Set<string>();
+    for (const d of devices) {
+      if (d.connected === false || d.tracking !== false) continue;
+      const key = keyOf(d);
+      const since = lostSince.get(key) ?? now;
+      next.set(key, since);
+      if (now - since >= LOST_AFTER_MS) shown.add(key);
+    }
+    lostSince = next;
+    lost = shown;
+  });
+
+  type DevState = "absent" | "off" | "lost" | "ok";
+  function stateOf(dev: DeviceInfo | null): DevState {
+    if (!dev) return "absent";
+    if (dev.connected === false) return "off";
+    if (lost.has(keyOf(dev))) return "lost";
+    return "ok";
+  }
+
+  // Grey when not detected or switched off (like SteamVR), a gentle red when
+  // the battery is critically low, otherwise the normal teal→green gradient.
   function iconFill(dev: DeviceInfo | null): string {
-    if (!dev) return "hsl(var(--muted) / 0.3)";
-    if (dev.battery && dev.battery.charge < LOW_BATTERY) return "url(#devgrad-low)";
+    const st = stateOf(dev);
+    if (st === "absent" || st === "off") return "hsl(var(--muted) / 0.3)";
+    if (dev?.battery && dev.battery.charge < LOW_BATTERY) return "url(#devgrad-low)";
     return "url(#devgrad)";
+  }
+
+  function tip(dev: DeviceInfo): string {
+    const base = `${dev.name}${dev.serial ? `\n${dev.serial}` : ""}`;
+    const st = stateOf(dev);
+    if (st === "off") return `${base}\nSwitched off`;
+    if (st === "lost") return `${base}\nNot tracking`;
+    return base;
   }
 </script>
 
@@ -71,10 +112,12 @@
 
 <div class="strip">
   {#each slots as slot (slot.key)}
+    {@const st = stateOf(slot.dev)}
     <div
       class="dev"
-      class:off={!slot.dev}
-      title={slot.dev ? `${slot.dev.name}${slot.dev.serial ? `\n${slot.dev.serial}` : ""}` : `${slot.label} — not detected`}
+      class:off={st === "absent" || st === "off"}
+      class:lost={st === "lost"}
+      title={slot.dev ? tip(slot.dev) : `${slot.label} — not detected`}
     >
       <svg viewBox="0 0 24 24" width="46" height="46" aria-hidden="true" style={slot.flip ? "transform:scaleX(-1)" : ""}>
         <path
@@ -82,7 +125,7 @@
           fill={iconFill(slot.dev)}
         />
       </svg>
-      {#if slot.dev?.battery}
+      {#if slot.dev?.battery && st !== "off"}
         <span class="batt" style={`--c:${batteryColor(slot.dev.battery.charge)}`}>
           {Math.round(slot.dev.battery.charge * 100)}
         </span>
@@ -91,11 +134,12 @@
   {/each}
 
   {#each extras as d (d.index)}
-    <div class="dev" title={`${d.name}${d.serial ? `\n${d.serial}` : ""}`}>
+    {@const st = stateOf(d)}
+    <div class="dev" class:off={st === "off"} class:lost={st === "lost"} title={tip(d)}>
       <svg viewBox="0 0 24 24" width="46" height="46" aria-hidden="true">
         <path d={ICONS[d.kind] ?? ICONS.unknown} fill={iconFill(d)} />
       </svg>
-      {#if d.battery}
+      {#if d.battery && st !== "off"}
         <span class="batt" style={`--c:${batteryColor(d.battery.charge)}`}>
           {Math.round(d.battery.charge * 100)}
         </span>
@@ -130,6 +174,16 @@
   }
   .dev.off {
     filter: none;
+  }
+  /* On but not tracking: the device's colours, faded, without the glow. */
+  .dev.lost {
+    filter: none;
+  }
+  .dev.lost svg {
+    opacity: 0.4;
+  }
+  .dev svg {
+    transition: opacity 0.25s ease;
   }
   .batt {
     position: absolute;

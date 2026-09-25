@@ -776,6 +776,27 @@ fn build_photo(ctx: &egui::Context, v: &PhotoView, action: &mut PhotoAction) {
     });
 }
 
+/// The photo window's pixel size (for the preview rig).
+pub const WINDOW_PX: (u32, u32) = PHOTO_PX;
+
+/// A photo window showing `tex`, as the preview rig renders it.
+pub fn preview_window(ctx: &egui::Context, tex: egui::TextureHandle, when: &str, translate_ok: bool, share_ok: bool) {
+    let view = PhotoView {
+        tex: Some(tex),
+        text: None,
+        show_text: false,
+        loading: false,
+        translating: false,
+        sharing: false,
+        share_msg: None,
+        when: when.to_string(),
+        translate_ok,
+        share_ok,
+    };
+    let mut action = PhotoAction::None;
+    build_photo(ctx, &view, &mut action);
+}
+
 /// The wrist card, drawn inside the watch's clock area when a shot is queued.
 pub fn wrist_card(
     ui: &mut egui::Ui,
@@ -836,71 +857,6 @@ pub fn wrist_card(
         }
         if ui.add_enabled(idx > 0, egui::Button::new(egui::RichText::new(icon::CARET_RIGHT).size(18.0)).min_size(arrow)).clicked() {
             req.newer = true;
-        }
-    });
-    req
-}
-
-/// The gallery grid for the dashboard's Photos page.
-pub fn gallery_ui(
-    ui: &mut egui::Ui,
-    items: &[(egui::TextureHandle, String)],
-    page: usize,
-    pages: usize,
-    total: usize,
-    loading: bool,
-) -> GalleryRequests {
-    let mut req = GalleryRequests::default();
-    const COLS: usize = 4;
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("{total} screenshot(s)")).color(theme::ON_SURFACE_VAR));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button(format!("{}  Refresh", icon::ARROWS_CLOCKWISE)).clicked() {
-                req.refresh = true;
-            }
-            let next = egui::Button::new(egui::RichText::new(icon::CARET_RIGHT).size(18.0));
-            if ui.add_enabled(page + 1 < pages, next).clicked() {
-                req.next = true;
-            }
-            ui.label(egui::RichText::new(format!("Page {} / {pages}", page + 1)).color(theme::ON_SURFACE_VAR));
-            let prev = egui::Button::new(egui::RichText::new(icon::CARET_LEFT).size(18.0));
-            if ui.add_enabled(page > 0, prev).clicked() {
-                req.prev = true;
-            }
-        });
-    });
-    ui.add_space(8.0);
-    if total == 0 {
-        ui.label(egui::RichText::new("No screenshots yet — make the finger-frame gesture in a game.").color(theme::ON_SURFACE_VAR));
-        return req;
-    }
-    if loading {
-        ui.add_space(40.0);
-        ui.vertical_centered(|ui| {
-            ui.add(egui::Spinner::new().size(36.0));
-        });
-        ui.add_space(40.0);
-        return req;
-    }
-    egui::Grid::new("gallery_grid").spacing(egui::vec2(14.0, 14.0)).show(ui, |ui| {
-        for (k, (tex, when)) in items.iter().enumerate() {
-            ui.vertical(|ui| {
-                let img = egui::Image::new(tex).fit_to_exact_size(egui::vec2(280.0, 175.0)).corner_radius(8);
-                if ui.add(egui::ImageButton::new(img).frame(false)).clicked() {
-                    req.open = Some(k);
-                }
-                ui.horizontal(|ui| {
-                    ui.small(egui::RichText::new(when).color(theme::ON_SURFACE_VAR));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button(egui::RichText::new(icon::TRASH).color(theme::ON_SURFACE_VAR)).on_hover_text("Delete").clicked() {
-                            req.delete = Some(k);
-                        }
-                    });
-                });
-            });
-            if (k + 1) % COLS == 0 {
-                ui.end_row();
-            }
         }
     });
     req

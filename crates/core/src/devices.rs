@@ -43,6 +43,14 @@ pub struct DeviceInfo {
     pub kind: DeviceKind,
     pub serial: Option<String>,
     pub battery: Option<Battery>,
+    /// Powered on / linked. `None` when the runtime doesn't say (stock Monado,
+    /// WiVRn): treat as connected.
+    #[serde(default)]
+    pub connected: Option<bool>,
+    /// Pose fully tracked right now (`None` = unknown). Raw, not debounced: a
+    /// UI should wait out brief occlusions before showing it.
+    #[serde(default)]
+    pub tracking: Option<bool>,
 }
 
 fn classify(role: Option<&str>, name: &str) -> DeviceKind {
@@ -178,8 +186,11 @@ fn devices_from(monado: &Monado) -> Result<Vec<DeviceInfo>, String> {
             .find(|(i, _)| *i == index)
             .map(|(_, r)| (*r).to_string());
         let serial = dev.serial().ok().filter(|s| !s.is_empty());
+        let state = dev.tracking_state().ok();
+        let connected = state.map(|s| s.connected);
         let battery = match dev.battery_status() {
-            Ok(b) if b.present => Some(Battery {
+            // A powered-off device keeps reporting its last reading; drop it.
+            Ok(b) if b.present && connected != Some(false) => Some(Battery {
                 charging: b.charging,
                 charge: b.charge,
             }),
@@ -194,6 +205,8 @@ fn devices_from(monado: &Monado) -> Result<Vec<DeviceInfo>, String> {
             kind,
             serial,
             battery,
+            connected,
+            tracking: state.map(|s| s.connected && s.tracking),
         });
     }
     Ok(out)

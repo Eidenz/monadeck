@@ -3,11 +3,11 @@
 //! handling one-shot commands: recenter the playspace, and arbitrate input
 //! (block the game's controller input while the dashboard is in use — the same
 //! pattern monado-frame uses, so summoning over a game doesn't double-input).
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libmonado::{BlockFlags, ClientLogic, ClientState, DeviceLogic, DeviceRole, Monado};
 use monadeck_core::devices::service_connected;
@@ -21,6 +21,8 @@ enum Cmd {
     SetFreeze { client_id: u32, freeze: bool },
     /// Make a specific client the active/displayed app (Monado "primary").
     SetPrimary { client_id: u32 },
+    /// Powered-off controllers hold their last pose (true) or go untracked.
+    SetHoldPose(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,11 +33,24 @@ pub enum BatteryKind {
     Other,
 }
 
+/// Whether a device is live, on but not tracking, or switched off. Needs the
+/// fork's libmonado (API 1.9); elsewhere everything reads as `Live`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DevState {
+    #[default]
+    Live,
+    /// On, but its pose has been untracked for over a second.
+    Lost,
+    /// Switched off: the charge is its last reading, not a live one.
+    Off,
+}
+
 #[derive(Clone)]
 pub struct BatteryInfo {
     pub kind: BatteryKind,
     pub charge: f32, // 0..1
     pub charging: bool,
+    pub state: DevState,
 }
 
 /// A running app client (non-overlay session) shown on the Monado page.
@@ -63,6 +78,9 @@ struct Status {
     freeze_supported: bool,
     /// The left / right hand role is a UdCap glove (no trackpad: A+B drags).
     gloves: (bool, bool),
+    /// The service's hold-pose-when-off mode; `None` when unsupported (not our
+    /// fork, or not connected).
+    hold_pose: Option<bool>,
 }
 
 pub struct MonadoLink {
@@ -106,6 +124,23 @@ impl MonadoLink {
         self.status.lock().unwrap().gloves
     }
 
+    /// Whether switched-off controllers hold their last pose (`Some(true)`) or
+    /// report untracked; `None` when the runtime doesn't have the switch.
+    pub fn hold_pose(&self) -> Option<bool> {
+        self.status.lock().unwrap().hold_pose
+    }
+
+    /// Switch what apps see when a controller turns off. The service forgets it
+    /// on restart (it starts out holding), so the link keeps the choice and
+    /// re-applies it on every (re)connect.
+    pub fn set_hold_pose(&self, hold: bool) {
+        // Reflect at once; the next poll confirms.
+        if let Some(h) = self.status.lock().unwrap().hold_pose.as_mut() {
+            *h = hold;
+        }
+        let _ = self.cmd_tx.send(Cmd::SetHoldPose(hold));
+    }
+
     /// Freeze (hold in place) or unfreeze a client's hand-controller poses.
     pub fn set_freeze(&self, client_id: u32, freeze: bool) {
         let _ = self.cmd_tx.send(Cmd::SetFreeze { client_id, freeze });
@@ -143,6 +178,10 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
     // Clients we currently hold frozen. Dropped on disconnect, since a service
     // restart re-allocates client ids (a stale id would freeze the wrong app).
     let mut frozen_ids: HashSet<u32> = HashSet::new();
+    // When each device (by serial) was first seen untracked.
+    let mut lost_since: HashMap<String, Instant> = HashMap::new();
+    // The hold-pose-when-off choice, re-applied on every (re)connect.
+    let mut desired_hold: Option<bool> = None;
     loop {
         let was_connected = mon.is_some();
         if mon.is_none() && service_connected() {
@@ -151,6 +190,11 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
         if !was_connected && mon.is_some() {
             if let Some((x, y, z, yaw)) = desired_origin {
                 set_origin_offset(&mon, x, y, z, yaw);
+            }
+            if let (Some(m), Some(hold)) = (&mon, desired_hold) {
+                if m.supports_hold_pose_when_off() {
+                    let _ = m.set_hold_pose_when_off(hold);
+                }
             }
         }
         match cmd_rx.recv_timeout(Duration::from_millis(500)) {
@@ -185,12 +229,22 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
                 let clients = poll_clients(&mon, &frozen_ids);
                 status.lock().unwrap().clients = clients;
             }
+            Ok(Cmd::SetHoldPose(hold)) => {
+                desired_hold = Some(hold);
+                if let Some(m) = mon.as_ref().filter(|m| m.supports_hold_pose_when_off()) {
+                    let _ = m.set_hold_pose_when_off(hold);
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {
                 let running = poll_running(&mut mon);
                 if mon.is_none() {
                     frozen_ids.clear();
                 }
-                let batteries = poll_batteries(&mon);
+                let batteries = poll_batteries(&mon, &mut lost_since);
+                let hold_pose = mon
+                    .as_ref()
+                    .filter(|m| m.supports_hold_pose_when_off())
+                    .and_then(|m| m.hold_pose_when_off().ok());
                 let clients = poll_clients(&mon, &frozen_ids);
                 let freeze_supported = mon.as_ref().map(|m| m.supports_controller_freeze()).unwrap_or(false);
                 let gloves = poll_gloves(&mon);
@@ -200,6 +254,7 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
                 s.clients = clients;
                 s.freeze_supported = freeze_supported;
                 s.gloves = gloves;
+                s.hold_pose = hold_pose;
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -254,12 +309,22 @@ fn poll_gloves(mon: &Option<Monado>) -> (bool, bool) {
     (is_glove(left), is_glove(right))
 }
 
-/// Battery levels for devices that report one (controllers/gloves/trackers).
-fn poll_batteries(mon: &Option<Monado>) -> Vec<BatteryInfo> {
-    let Some(m) = mon else { return Vec::new() };
+/// Tracking has to be gone this long before a device reads as `Lost`, so a
+/// hand briefly blocked from the base stations doesn't flicker.
+const LOST_AFTER: Duration = Duration::from_secs(1);
+
+/// Battery levels for devices that report one (controllers/gloves/trackers),
+/// with whether each is live, untracked or switched off.
+fn poll_batteries(mon: &Option<Monado>, lost_since: &mut HashMap<String, Instant>) -> Vec<BatteryInfo> {
+    let Some(m) = mon else {
+        lost_since.clear();
+        return Vec::new();
+    };
     let left = m.device_index_from_role(DeviceRole::Left).ok();
     let right = m.device_index_from_role(DeviceRole::Right).ok();
     let Ok(devices) = m.devices() else { return Vec::new() };
+    let now = Instant::now();
+    let mut seen = HashSet::new();
     let mut out = Vec::new();
     for dev in devices {
         let idx = dev.index();
@@ -267,6 +332,20 @@ fn poll_batteries(mon: &Option<Monado>) -> Vec<BatteryInfo> {
         if !b.present {
             continue;
         }
+        let key = dev.serial().unwrap_or_else(|_| format!("#{idx}"));
+        let state = match dev.tracking_state() {
+            Ok(t) if !t.connected => DevState::Off,
+            Ok(t) if !t.tracking => {
+                let since = *lost_since.entry(key.clone()).or_insert(now);
+                seen.insert(key);
+                if now.duration_since(since) >= LOST_AFTER {
+                    DevState::Lost
+                } else {
+                    DevState::Live
+                }
+            }
+            _ => DevState::Live,
+        };
         let name = dev.name.to_lowercase();
         let is_glove = name.contains("glove") || name.contains("udcap");
         let is_ctrl = Some(idx) == left
@@ -283,8 +362,9 @@ fn poll_batteries(mon: &Option<Monado>) -> Vec<BatteryInfo> {
         } else {
             BatteryKind::Other
         };
-        out.push(BatteryInfo { kind, charge: b.charge, charging: b.charging });
+        out.push(BatteryInfo { kind, charge: b.charge, charging: b.charging && state != DevState::Off, state });
     }
+    lost_since.retain(|k, _| seen.contains(k));
     out
 }
 

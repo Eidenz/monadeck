@@ -44,6 +44,9 @@ pub struct ScreenPanel {
     pub custom_size: bool,
     /// Layer opacity 0.2..=1 (needs XR_KHR_composition_layer_color_scale_bias).
     pub opacity: f32,
+    /// Colour multiplier (brightness × warm tint), same extension; set by the
+    /// viewer each frame.
+    pub tint: [f32; 3],
     /// Capture paused because nobody's looking at it.
     pub gaze_paused: bool,
     pub unseen_since: Option<Instant>,
@@ -81,6 +84,7 @@ impl ScreenPanel {
             resize_ref: None,
             custom_size: false,
             opacity: 1.0,
+            tint: [1.0; 3],
             gaze_paused: false,
             unseen_since: None,
             island_until: None,
@@ -216,14 +220,22 @@ impl ScreenPanel {
         }
     }
 
-    /// Refresh the opacity chain; returns the `next` pointer for the layer.
+    /// Whether the layer is see-through (needs source-alpha blending).
+    fn translucent(&self, color_scale_ok: bool) -> bool {
+        color_scale_ok && self.opacity < 0.995
+    }
+
+    /// Refresh the opacity/tint chain; returns the `next` pointer for the layer
+    /// (null when there's nothing to scale).
     fn opacity_next(&mut self, color_scale_ok: bool) -> *const std::ffi::c_void {
-        if !color_scale_ok || self.opacity >= 0.995 {
+        let tinted = self.tint.iter().any(|c| *c < 0.995);
+        if !color_scale_ok || (self.opacity >= 0.995 && !tinted) {
             return std::ptr::null();
         }
         let a = self.opacity.clamp(0.05, 1.0);
+        let [r, g, b] = self.tint.map(|c| c.clamp(0.0, 1.0));
         // Premultiplied: scale colour and alpha together.
-        self.scale_bias.color_scale = xr::Color4f { r: a, g: a, b: a, a };
+        self.scale_bias.color_scale = xr::Color4f { r: r * a, g: g * a, b: b * a, a };
         &self.scale_bias as *const _ as *const std::ffi::c_void
     }
 
@@ -376,6 +388,7 @@ impl ScreenPanel {
         }
         let l = self.cyl(curved_ok)?;
         let next = self.opacity_next(color_scale_ok);
+        let blend = self.translucent(color_scale_ok);
         let swap = self.swap.as_ref()?;
         let mut c = xr::CompositionLayerCylinderKHR::new()
             .space(space)
@@ -385,8 +398,10 @@ impl ScreenPanel {
             .radius(l.radius)
             .central_angle(l.central_angle)
             .aspect_ratio(swap.px.0 as f32 / swap.px.1 as f32);
-        if !next.is_null() {
+        if blend {
             c = c.layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA);
+        }
+        if !next.is_null() {
             // The safe wrapper is repr(transparent) over the sys struct.
             let raw: &mut xr::sys::CompositionLayerCylinderKHR =
                 unsafe { &mut *(&mut c as *mut _ as *mut xr::sys::CompositionLayerCylinderKHR) };
@@ -406,6 +421,7 @@ impl ScreenPanel {
             return None;
         }
         let next = self.opacity_next(color_scale_ok);
+        let blend = self.translucent(color_scale_ok);
         let swap = self.swap.as_ref()?;
         let sub = xr::SwapchainSubImage::new().swapchain(&swap.swapchain).image_array_index(0).image_rect(
             xr::Rect2Di {
@@ -420,8 +436,10 @@ impl ScreenPanel {
             .sub_image(sub)
             .pose(self.pose)
             .size(xr::Extent2Df { width: size.0, height: size.1 });
-        if !next.is_null() {
+        if blend {
             q = q.layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA);
+        }
+        if !next.is_null() {
             let raw: &mut xr::sys::CompositionLayerQuad =
                 unsafe { &mut *(&mut q as *mut _ as *mut xr::sys::CompositionLayerQuad) };
             raw.next = next;
