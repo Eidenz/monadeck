@@ -1,0 +1,5 @@
+# esbuild (Vite's bundler) installs its binary from a postinstall script, which
+# pnpm only runs for packages allowed here (pnpm 10.26+; pnpm 11 fails the
+# install until it's decided).
+allowBuilds:
+  esbuild: true

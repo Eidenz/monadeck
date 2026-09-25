@@ -58,6 +58,8 @@ pnpm tauri build
 
 The bundles land in `desktop/src-tauri/target/release/bundle/`. The in-headset overlay is inside the package, so there's nothing else to set up.
 
+On NVIDIA's driver, Monadeck turns off WebKit's DMA-BUF renderer by itself (set `WEBKIT_DISABLE_DMABUF_RENDERER=0` to keep it on). The deck is a fixed-size window, so tiling compositors such as Hyprland, Sway and niri float it on their own.
+
 ## Using it
 
 1. Open **Settings → General**. Install the built-in Monado and xrizer, or point Monadeck at your own build prefix and xrizer path (it also tries to autodetect both).

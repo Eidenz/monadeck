@@ -44,6 +44,15 @@ fn toggle_deck(app: &tauri::AppHandle) {
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // WebKitGTK's DMA-BUF renderer leaves the window blank on NVIDIA's own
+    // driver: use its fallback there. Before any GTK/WebKit setup; a value
+    // already in the environment (e.g. 0 to opt out) wins.
+    const NO_DMABUF: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    if std::env::var_os(NO_DMABUF).is_none() && std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        std::env::set_var(NO_DMABUF, "1");
+        log::info!("NVIDIA driver: {NO_DMABUF}=1");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

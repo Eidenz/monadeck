@@ -132,8 +132,11 @@
   // window only ever grows downward from a fixed top-left (a resize is anchored
   // top-left on KWin/Wayland), so the deck stays pinned in place. We deliberately
   // never reposition the window — moving it to grow upward is a no-op on Wayland
-  // and only ever shoved the deck down.
+  // and only ever shoved the deck down. Its min and max size are pinned to that
+  // size too: a fixed-size window, which tiling compositors (Hyprland, Sway,
+  // niri…) float instead of tiling (the config pins the first frame the same way).
   const WIN_W = 380;
+  const WIN_MIN_H = 140;
   let contentH = $state(0); // measured deck (+ error) height
   let toastSlotH = $state(0); // measured notice card height
   const toastH = $derived(
@@ -160,10 +163,11 @@
     applying = true;
     const win = getCurrentWindow();
     while (desiredH !== null) {
-      const total = desiredH;
+      const h = Math.max(WIN_MIN_H, Math.round(desiredH));
       desiredH = null;
       try {
-        await win.setSize(new LogicalSize(WIN_W, Math.max(1, Math.round(total))));
+        await win.setSizeConstraints({ minWidth: WIN_W, maxWidth: WIN_W, minHeight: h, maxHeight: h });
+        await win.setSize(new LogicalSize(WIN_W, h));
       } catch {
         // transient window-op failures are harmless; next change re-applies
       }
