@@ -187,25 +187,26 @@ pub fn run(dir: &Path) -> Result<()> {
     // The dashboard's bottom bar with three screens up, under a growing pile of
     // devices: the batteries must fold into per-kind chips before they reach
     // the screen pills.
-    use crate::monado::{BatteryInfo, BatteryKind, DevState};
-    let bat = |kind, charge| BatteryInfo { kind, charge, charging: false, state: DevState::Live };
+    use crate::monado::{BatteryInfo, BatteryKind, DevState, Hand};
+    let bat = |kind, charge| BatteryInfo { kind, charge, charging: false, state: DevState::Live, hand: None };
     let with = |b: BatteryInfo, state| BatteryInfo { state, ..b };
+    let hand = |b: BatteryInfo, hand| BatteryInfo { hand: Some(hand), ..b };
     // A controller switched off (grey "off"), a tracker out of sight (faded).
     let states = vec![
-        bat(BatteryKind::Controller, 0.86),
-        with(bat(BatteryKind::Controller, 0.40), DevState::Off),
+        hand(bat(BatteryKind::Controller, 0.86), Hand::Left),
+        hand(with(bat(BatteryKind::Controller, 0.40), DevState::Off), Hand::Right),
         with(bat(BatteryKind::Tracker, 0.67), DevState::Lost),
         bat(BatteryKind::Glove, 0.80),
         bat(BatteryKind::Glove, 0.60),
     ];
     let rigs: [(&str, Vec<BatteryInfo>); 4] = [
         ("bottom-bar-states", states.clone()),
-        ("bottom-bar-controllers", vec![bat(BatteryKind::Controller, 0.86), bat(BatteryKind::Controller, 0.83)]),
+        ("bottom-bar-controllers", vec![hand(bat(BatteryKind::Controller, 0.86), Hand::Left), hand(bat(BatteryKind::Controller, 0.83), Hand::Right)]),
         (
             "bottom-bar-five-devices",
             vec![
-                bat(BatteryKind::Controller, 0.86),
-                bat(BatteryKind::Controller, 0.83),
+                hand(bat(BatteryKind::Controller, 0.86), Hand::Left),
+                hand(bat(BatteryKind::Controller, 0.83), Hand::Right),
                 bat(BatteryKind::Tracker, 0.67),
                 bat(BatteryKind::Glove, 0.72),
                 bat(BatteryKind::Other, 0.65),
@@ -214,8 +215,8 @@ pub fn run(dir: &Path) -> Result<()> {
         (
             "bottom-bar-full-body",
             vec![
-                bat(BatteryKind::Controller, 0.86),
-                bat(BatteryKind::Controller, 0.83),
+                hand(bat(BatteryKind::Controller, 0.86), Hand::Left),
+                hand(bat(BatteryKind::Controller, 0.83), Hand::Right),
                 bat(BatteryKind::Tracker, 0.67),
                 bat(BatteryKind::Tracker, 0.41),
                 bat(BatteryKind::Tracker, 0.12),
@@ -276,8 +277,10 @@ fn readme(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir
         st.selected = Some(0);
         st.running_index = None;
         st.nav = nav;
-        use crate::monado::{BatteryInfo, BatteryKind, DevState};
-        st.batteries = [0.86, 0.83].map(|charge| BatteryInfo { kind: BatteryKind::Controller, charge, charging: false, state: DevState::Live }).to_vec();
+        use crate::monado::{BatteryInfo, BatteryKind, DevState, Hand};
+        st.batteries = [(0.86, Hand::Left), (0.83, Hand::Right)]
+            .map(|(charge, hand)| BatteryInfo { kind: BatteryKind::Controller, charge, charging: false, state: DevState::Live, hand: Some(hand) })
+            .to_vec();
         for r in &mut st.desktop_rows {
             r.shown = false;
         }
@@ -581,11 +584,12 @@ fn dashboard(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, 
 }
 
 fn sample_batteries() -> Vec<crate::monado::BatteryInfo> {
-    use crate::monado::{BatteryInfo, BatteryKind, DevState};
-    let b = |kind, charge, state| BatteryInfo { kind, charge, charging: false, state };
+    use crate::monado::{BatteryInfo, BatteryKind, DevState, Hand};
+    let b = |kind, charge, state| BatteryInfo { kind, charge, charging: false, state, hand: None };
+    let c = |charge, hand| BatteryInfo { hand: Some(hand), ..b(BatteryKind::Controller, charge, DevState::Live) };
     vec![
-        b(BatteryKind::Controller, 0.86, DevState::Live),
-        b(BatteryKind::Controller, 0.64, DevState::Live),
+        c(0.86, Hand::Left),
+        c(0.64, Hand::Right),
         b(BatteryKind::Tracker, 0.41, DevState::Lost),
         b(BatteryKind::Glove, 0.80, DevState::Live),
         b(BatteryKind::Glove, 0.60, DevState::Off),

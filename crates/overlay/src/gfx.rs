@@ -26,12 +26,26 @@ pub mod theme {
     pub const ON_SURFACE_VAR: Color32 = Color32::from_rgb(160, 172, 186);
 }
 
-/// egui's fonts + the Phosphor icons + a system CJK font as the last
-/// fallback, so Japanese (and Chinese / Korean) titles don't come out as
-/// boxes. Every panel uses this.
+/// Monadeck's own glyphs, the ones Phosphor lacks, drawn on its grid:
+/// `assets/fonts/monadeck-icons.otf` (built by `build_icons.py` beside it).
+pub mod glyph {
+    pub const QUEST_LEFT: &str = "\u{F0000}";
+    pub const QUEST_RIGHT: &str = "\u{F0001}";
+    pub const INDEX_LEFT: &str = "\u{F0002}";
+    pub const INDEX_RIGHT: &str = "\u{F0003}";
+}
+
+/// egui's fonts + the Phosphor icons + Monadeck's own + a system CJK font as
+/// the last fallback, so Japanese (and Chinese / Korean) titles don't come
+/// out as boxes. Every panel uses this.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    fonts.font_data.insert(
+        "monadeck-icons".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/monadeck-icons.otf"))),
+    );
+    fonts.families.entry(egui::FontFamily::Proportional).or_default().push("monadeck-icons".into());
     if let Some(cjk) = cjk_font() {
         fonts.font_data.insert("cjk".into(), cjk);
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {

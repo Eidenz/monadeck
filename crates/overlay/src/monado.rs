@@ -45,12 +45,35 @@ pub enum DevState {
     Off,
 }
 
+/// The hand a controller holds (Monado's left / right roles).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hand {
+    Left,
+    Right,
+}
+
 #[derive(Clone)]
 pub struct BatteryInfo {
     pub kind: BatteryKind,
     pub charge: f32, // 0..1
     pub charging: bool,
     pub state: DevState,
+    /// Whose hand it's in, when it holds the left or right role.
+    pub hand: Option<Hand>,
+}
+
+impl BatteryInfo {
+    /// "Left controller", "Glove", …
+    pub fn label(&self) -> &'static str {
+        match (self.kind, self.hand) {
+            (BatteryKind::Controller, Some(Hand::Left)) => "Left controller",
+            (BatteryKind::Controller, Some(Hand::Right)) => "Right controller",
+            (BatteryKind::Controller, None) => "Controller",
+            (BatteryKind::Glove, _) => "Glove",
+            (BatteryKind::Tracker, _) => "Tracker",
+            (BatteryKind::Other, _) => "Device",
+        }
+    }
 }
 
 /// A running app client (non-overlay session) shown on the Monado page.
@@ -362,9 +385,24 @@ fn poll_batteries(mon: &Option<Monado>, lost_since: &mut HashMap<String, Instant
         } else {
             BatteryKind::Other
         };
-        out.push(BatteryInfo { kind, charge: b.charge, charging: b.charging && state != DevState::Off, state });
+        let hand = if Some(idx) == left {
+            Some(Hand::Left)
+        } else if Some(idx) == right {
+            Some(Hand::Right)
+        } else {
+            None
+        };
+        out.push(BatteryInfo { kind, charge: b.charge, charging: b.charging && state != DevState::Off, state, hand });
     }
     lost_since.retain(|k, _| seen.contains(k));
+    // Controllers first, left before right (the chips read in hand order);
+    // everything else keeps Monado's device order.
+    out.sort_by_key(|b| match (b.kind, b.hand) {
+        (BatteryKind::Controller, Some(Hand::Left)) => 0,
+        (BatteryKind::Controller, Some(Hand::Right)) => 1,
+        (BatteryKind::Controller, None) => 2,
+        _ => 3,
+    });
     out
 }
 

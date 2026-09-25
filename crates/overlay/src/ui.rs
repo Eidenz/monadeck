@@ -4,7 +4,7 @@
 use egui_phosphor::regular as icon;
 
 use crate::games::{ArtState, LibGame};
-use crate::gfx::theme;
+use crate::gfx::{glyph, theme};
 
 // The tool pages (Settings, System, Desktop, Photos): a category list on the
 // left, cards on the right, all built from the shared `kit`.
@@ -1516,8 +1516,8 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
             let clock_w = if st.clock.is_empty() { 0.0 } else { measure(ui, st.clock.clone(), 22.0) + 8.0 };
             let avail = (ui.max_rect().right() - limit - clock_w - 18.0).max(0.0);
             // Widest a chip gets ("100%", and "×N" for a group), with its padding and spacing.
-            let w_single = measure(ui, format!("{} {} 100%", icon::GAME_CONTROLLER, icon::BATTERY_FULL), 13.5) + BATTERY_PILL_PAD + 8.0;
-            let w_group = measure(ui, format!("{} {} 100% ×9", icon::GAME_CONTROLLER, icon::BATTERY_FULL), 13.5) + BATTERY_PILL_PAD + 8.0;
+            let w_single = measure(ui, format!("{} {} 100%", controller_glyph(None), icon::BATTERY_FULL), 13.5) + BATTERY_PILL_PAD + 8.0;
+            let w_group = measure(ui, format!("{} {} 100% ×9", controller_glyph(None), icon::BATTERY_FULL), 13.5) + BATTERY_PILL_PAD + 8.0;
             let of_kind = |k: BatteryKind| -> Vec<&BatteryInfo> { st.batteries.iter().filter(|b| b.kind == k).collect() };
             let others = [BatteryKind::Glove, BatteryKind::Tracker, BatteryKind::Other];
             let groups = |kinds: &[BatteryKind]| -> Vec<Chip> {
@@ -1552,12 +1552,14 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                     ui.label(egui::RichText::new(&st.clock).size(22.0).strong().color(egui::Color32::WHITE));
                 }
                 ui.add_space(14.0);
+                // Laid out right to left: each row is drawn backwards so it
+                // reads in device order (left controller, then right, …).
                 if chips.len() <= per_row {
-                    for chip in &chips {
+                    for chip in chips.iter().rev() {
                         draw(ui, chip);
                     }
                 } else {
-                    // Two rows, split evenly (the first devices stay top-right).
+                    // Two rows, split evenly (the first devices on top).
                     let top = chips.len().div_ceil(2);
                     let block_w = avail.min(top as f32 * w_single.max(w_group));
                     ui.allocate_ui_with_layout(egui::vec2(block_w, 60.0), egui::Layout::top_down(egui::Align::Max), |ui| {
@@ -1565,7 +1567,7 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                         for row in [&chips[..top], &chips[top..]] {
                             ui.allocate_ui_with_layout(egui::vec2(block_w, 26.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                for chip in row {
+                                for chip in row.iter().rev() {
                                     draw(ui, chip);
                                 }
                             });
@@ -1623,7 +1625,7 @@ fn one_chip(b: &crate::monado::BatteryInfo, compact: bool) -> (String, egui::Col
     use crate::monado::BatteryKind;
     let dev = match b.kind {
         BatteryKind::Glove => icon::HAND,
-        BatteryKind::Controller => icon::GAME_CONTROLLER,
+        BatteryKind::Controller => controller_glyph(b.hand),
         _ => icon::CIRCLE,
     };
     // A switched-off device's charge is its last reading: show "off" instead.
@@ -1634,13 +1636,21 @@ fn one_chip(b: &crate::monado::BatteryInfo, compact: bool) -> (String, egui::Col
     } else {
         format!("{dev} {} {}%", battery_glyph(b), (b.charge * 100.0).round() as i32)
     };
-    let what = match b.kind {
-        BatteryKind::Glove => "Glove",
-        BatteryKind::Controller => "Controller",
-        BatteryKind::Tracker => "Tracker",
-        BatteryKind::Other => "Device",
-    };
-    (text, battery_color(b), format!("{what}{}", battery_state_note(b)))
+    (text, battery_color(b), format!("{}{}", b.label(), battery_state_note(b)))
+}
+
+/// A VR controller glyph facing the controller's hand (right when unknown):
+/// Quest-style on WiVRn (standalone headsets), Index-style on Monado.
+fn controller_glyph(hand: Option<crate::monado::Hand>) -> &'static str {
+    use monadeck_core::{config::Backend, devices::current_backend};
+    static QUEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let quest = *QUEST.get_or_init(|| current_backend() == Backend::Wivrn);
+    match (quest, hand == Some(crate::monado::Hand::Left)) {
+        (true, true) => glyph::QUEST_LEFT,
+        (true, false) => glyph::QUEST_RIGHT,
+        (false, true) => glyph::INDEX_LEFT,
+        (false, false) => glyph::INDEX_RIGHT,
+    }
 }
 
 /// A kind's chip (see `battery_group_widget`); `None` for an empty group.
@@ -1662,7 +1672,7 @@ fn group_chip(kind: crate::monado::BatteryKind, group: &[&crate::monado::Battery
     let (dev, name) = match kind {
         BatteryKind::Glove => (icon::HAND, "Gloves"),
         BatteryKind::Tracker => (icon::CIRCLE, "Trackers"),
-        BatteryKind::Controller => (icon::GAME_CONTROLLER, "Controllers"),
+        BatteryKind::Controller => (controller_glyph(None), "Controllers"),
         BatteryKind::Other => (icon::CIRCLE, "Devices"),
     };
     let count = if group.len() > 1 { format!(" ×{}", group.len()) } else { String::new() };
@@ -1670,10 +1680,14 @@ fn group_chip(kind: crate::monado::BatteryKind, group: &[&crate::monado::Battery
         .iter()
         .enumerate()
         .map(|(i, b)| {
+            let who = match b.hand {
+                Some(_) => b.label().to_string(),
+                None => format!("{name} {}", i + 1),
+            };
             if b.state == DevState::Off {
-                format!("{name} {}: switched off", i + 1)
+                format!("{who}: switched off")
             } else {
-                format!("{name} {}: {}%{}{}", i + 1, (b.charge * 100.0).round() as i32, if b.charging { " (charging)" } else { "" }, battery_state_note(b))
+                format!("{who}: {}%{}{}", (b.charge * 100.0).round() as i32, if b.charging { " (charging)" } else { "" }, battery_state_note(b))
             }
         })
         .collect::<Vec<_>>()

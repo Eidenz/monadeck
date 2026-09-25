@@ -1181,13 +1181,7 @@ fn run() -> Result<()> {
         {
             if low.charge < 0.15 && !battery_low_warned {
                 battery_low_warned = true;
-                let kind = match low.kind {
-                    monado::BatteryKind::Glove => "Glove",
-                    monado::BatteryKind::Controller => "Controller",
-                    monado::BatteryKind::Tracker => "Tracker",
-                    monado::BatteryKind::Other => "Device",
-                };
-                toasts.push(toast::Toast::new(toast::Kind::Battery, "Low battery", format!("{kind} at {}%", (low.charge * 100.0).round() as i32)));
+                toasts.push(toast::Toast::new(toast::Kind::Battery, "Low battery", format!("{} at {}%", low.label(), (low.charge * 100.0).round() as i32)));
                 audio.alarm();
             }
         }
