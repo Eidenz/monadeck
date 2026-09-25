@@ -43,9 +43,7 @@ fn wanted(name: &str) -> bool {
 pub fn run(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let ctx = egui::Context::default();
-    let mut fonts = egui::FontDefinitions::default();
-    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    ctx.set_fonts(fonts);
+    crate::gfx::install_fonts(&ctx);
     apply_style(&ctx);
     ctx.set_pixels_per_point(PPP);
     if std::env::var_os("MONADECK_PREVIEW_NOFEATHER").is_some() {
@@ -482,6 +480,10 @@ fn dashboard(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, 
             st.running_index = None;
             st.selected = Some(2);
         })),
+        ("dash-home-jp", Box::new(|st| {
+            st.running_index = None;
+            st.selected = Some(13);
+        })),
         ("dash-library", Box::new(|st| st.nav = Nav::Library)),
         ("dash-collections", Box::new(|st| {
             st.nav = Nav::Library;
@@ -628,7 +630,7 @@ fn sample_games(ctx: &egui::Context) -> Vec<crate::games::LibGame> {
     use crate::games::{ArtState, LibGame};
     let names = [
         "VRChat", "Half-Life: Alyx", "Beat Saber", "Hollow Knight", "Pistol Whip", "Bonelab", "The Midnight Walk",
-        "Hades II", "Blade & Sorcery", "Stray", "Outer Wilds", "Ramage", "GOAT", "Celeste",
+        "Hades II", "Blade & Sorcery", "Stray", "Outer Wilds", "Ramage", "GOAT", "東方紅魔郷 〜 the Embodiment of Scarlet Devil",
     ];
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let tex = |name: &str, w: usize, h: usize, seed: usize| {
