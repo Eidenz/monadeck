@@ -13,6 +13,7 @@
   } from "$lib/state.svelte";
   import { wivrnGetConfig, wivrnSetConfig } from "$lib/api";
   import Toggle from "$lib/components/Toggle.svelte";
+  import LaunchOptions from "$lib/components/LaunchOptions.svelte";
 
   const status = $derived(app.service.wivrn);
   const up = $derived(status !== null);
@@ -135,15 +136,6 @@
       save(parsed);
     } catch (e) {
       cfgError = String(e);
-    }
-  }
-
-  async function copySteam() {
-    if (!status?.steam_command) return;
-    try {
-      await navigator.clipboard.writeText(status.steam_command);
-    } catch {
-      /* clipboard unavailable — the text is selectable anyway */
     }
   }
 
@@ -279,19 +271,9 @@
     {/if}
   </div>
 
-  <div class="field">
-    <span class="lbl">Steam launch options</span>
-    <div class="row">
-      <input readonly value={status?.steam_command ?? ""} placeholder="shown while the server runs" />
-      <button onclick={copySteam} disabled={!status?.steam_command}>Copy</button>
-    </div>
-    <span class="note">
-      Steam sandboxes games; this prefix lets them reach WiVRn's OpenXR runtime and
-      the OpenVR compatibility layer. Paste it into the game's launch options in
-      Steam (Properties › General › Launch options). The helper in Settings ›
-      Environment is for the Monado backend and doesn't apply here.
-    </span>
-  </div>
+  <!-- Monadeck's line, as in Settings › Environment: Monadeck registers xrizer
+       itself, so WiVRn's own suggestion (its OpenComposite path) doesn't apply. -->
+  <LaunchOptions />
 
   <div class="field">
     <span class="lbl">Video encoding</span>

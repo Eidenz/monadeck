@@ -322,6 +322,10 @@ pub struct LibState {
     pub desktop_pending: bool, // portal dialog in flight
     pub desktop_setup_request: bool,
     pub desktop_reselect_request: bool,
+    /// Share one more monitor in a new portal session.
+    pub desktop_add_request: bool,
+    /// Call off the share dialog request in flight.
+    pub desktop_cancel_request: bool,
     pub desktop_move_request: Option<(usize, i32)>, // reorder approved screen (row, ±1)
     /// Bottom bar: approved screens (name, shown) in user order + keyboard state.
     pub desktop_bar: Vec<(String, bool)>,
@@ -555,6 +559,8 @@ impl LibState {
             desktop_pending: false,
             desktop_setup_request: false,
             desktop_reselect_request: false,
+            desktop_add_request: false,
+            desktop_cancel_request: false,
             desktop_move_request: None,
             desktop_bar: Vec::new(),
             desktop_bar_toggle: None,

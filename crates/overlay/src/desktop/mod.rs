@@ -22,7 +22,7 @@ pub mod pw;
 pub mod screen;
 pub mod selftest;
 
-use std::sync::mpsc::Receiver;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -202,13 +202,6 @@ pub struct InputOut {
     pub island_ptr: Option<(usize, f32, f32, bool)>,
 }
 
-enum PortalState {
-    Idle,
-    Pending(Receiver<Result<portal::Cast, String>>),
-    Ready(portal::Cast),
-    Failed(String),
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
     Screen(usize),
@@ -223,9 +216,16 @@ pub struct DesktopViewer {
     outputs: Vec<outputs::OutputInfo>,
     hid: Option<UInput>,
     pub hid_error: Option<String>,
-    portal: PortalState,
-    token: Option<String>,
-    token_changed: bool,
+    /// Approved portal sessions, each keeping its screens' streams alive. A
+    /// portal whose dialog shares one monitor gets one session per screen.
+    casts: Vec<portal::Cast>,
+    /// The share request in flight (one dialog at a time).
+    request: Option<portal::Request>,
+    /// Saved sessions still to restore, one request each, in order.
+    restore: VecDeque<String>,
+    /// Why the last request failed, until the next one.
+    portal_error: Option<String>,
+    tokens_changed: bool,
     screens: Vec<ScreenPanel>,
     /// Bottom-bar order (output names). Unknown names go last.
     order: Vec<String>,
@@ -321,7 +321,7 @@ pub struct DesktopViewer {
 }
 
 impl DesktopViewer {
-    pub fn new(caps: Caps, importer: Option<Importer>, token: Option<String>, order: Vec<String>) -> Self {
+    pub fn new(caps: Caps, importer: Option<Importer>, tokens: Vec<String>, order: Vec<String>) -> Self {
         let outputs = outputs::list();
         for o in &outputs {
             log::info!(
@@ -350,9 +350,11 @@ impl DesktopViewer {
             outputs,
             hid,
             hid_error,
-            portal: PortalState::Idle,
-            token,
-            token_changed: false,
+            casts: Vec::new(),
+            request: None,
+            restore: tokens.into(),
+            portal_error: None,
+            tokens_changed: false,
             screens: Vec::new(),
             order,
             keyboard: KeyboardState::new(),
@@ -945,9 +947,7 @@ impl DesktopViewer {
     pub fn apply_hidden(&mut self, layout: &DesktopLayout) {
         self.pending_layout = Some(layout.clone());
         self.pending_hidden = true;
-        if matches!(self.portal, PortalState::Idle | PortalState::Failed(_)) {
-            self.start_portal();
-        }
+        self.setup_screens();
     }
 
     /// Apply an arrangement. Screens the layout doesn't mention are hidden.
@@ -957,9 +957,7 @@ impl DesktopViewer {
             self.pending_hidden = false;
             // Wait for the streams and for the STAGE relation (poll applies it).
             self.pending_layout = Some(layout.clone());
-            if matches!(self.portal, PortalState::Idle | PortalState::Failed(_)) {
-                self.start_portal();
-            }
+            self.setup_screens();
             return;
         }
         let from_stage = |a: &[f32; 7], me: &Self| me.from_stage(&arr_to_pose(a));
@@ -1217,7 +1215,7 @@ impl DesktopViewer {
     }
 
     pub fn rows(&self) -> Vec<ScreenRow> {
-        let ready = matches!(self.portal, PortalState::Ready(_));
+        let ready = !self.casts.is_empty();
         let mut rows: Vec<ScreenRow> = self
             .ordered_screens()
             .iter()
@@ -1239,7 +1237,7 @@ impl DesktopViewer {
                     name: o.name.clone(),
                     detail: output_detail(o),
                     hint: Some(if ready {
-                        "Not approved — re-pick screens to add it".into()
+                        "Not shared — Add a screen to share it".into()
                     } else {
                         "Set up screens to approve it".into()
                     }),
@@ -1253,71 +1251,115 @@ impl DesktopViewer {
     }
 
     pub fn status(&self) -> String {
-        match &self.portal {
-            PortalState::Idle => {
-                if self.outputs.is_empty() {
-                    "No Wayland outputs found — the screen-share dialog will list what's available.".into()
-                } else {
-                    "Set up screens once: approve the share dialog on your desktop (tick every monitor you want).".into()
-                }
+        if self.request.is_some() {
+            return "Waiting for the screen-share dialog on your desktop…".into();
+        }
+        if !self.casts.is_empty() {
+            let mode = if self.caps.dmabuf { "GPU (DMA-BUF)" } else { "CPU (SHM)" };
+            let mut s = format!("{} screen(s) shared · capture: {mode} · toggle them from the bottom bar", self.screens.len());
+            if let Some(e) = &self.portal_error {
+                s.push_str(&format!(" · last request: {e}"));
             }
-            PortalState::Pending(_) => "Waiting for the screen-share dialog on your desktop…".into(),
-            PortalState::Ready(c) => {
-                let mode = if self.caps.dmabuf { "GPU (DMA-BUF)" } else { "CPU (SHM)" };
-                format!("{} screen(s) approved · capture: {mode} · toggle them from the bottom bar", c.streams.len())
-            }
-            PortalState::Failed(e) => format!("Screen share failed: {e}"),
+            return s;
+        }
+        if let Some(e) = &self.portal_error {
+            return format!("Screen share failed: {e}");
+        }
+        if self.outputs.is_empty() {
+            "No Wayland outputs found — the screen-share dialog will list what's available.".into()
+        } else {
+            "Set up screens once: approve the share dialog on your desktop (tick every monitor you want, or add them one by one).".into()
         }
     }
 
+    /// At least one session is shared.
     pub fn portal_ready(&self) -> bool {
-        matches!(self.portal, PortalState::Ready(_))
+        !self.casts.is_empty()
     }
 
+    /// A share dialog request is in flight.
     pub fn portal_pending(&self) -> bool {
-        matches!(self.portal, PortalState::Pending(_))
+        self.request.is_some()
     }
 
     pub fn shown_count(&self) -> usize {
         self.screens.iter().filter(|s| s.shown).count()
     }
 
-    /// Ask the portal for screens (no-op while a request is in flight or done).
+    /// Ask the portal for screens: the saved sessions (they restore one after
+    /// another in `poll`), else the dialog. No-op while a request is in flight
+    /// or once screens are shared.
     pub fn setup_screens(&mut self) {
-        if matches!(self.portal, PortalState::Idle | PortalState::Failed(_)) {
-            self.start_portal();
+        if self.request.is_some() {
+            return;
+        }
+        if let Some(token) = self.restore.pop_front() {
+            self.request = Some(portal::start(Some(token)));
+        } else if self.casts.is_empty() {
+            self.portal_error = None;
+            self.request = Some(portal::start(None));
         }
     }
 
-    /// Forget the saved approval and ask the user to pick screens again.
-    pub fn reselect(&mut self) {
-        self.teardown_screens();
-        self.token = None;
-        self.token_changed = true;
-        self.start_portal();
+    /// Share one more monitor in a new session, next to those already shared
+    /// (for portals whose dialog takes a single monitor).
+    pub fn add_screens(&mut self) {
+        if self.request.is_none() {
+            self.portal_error = None;
+            self.request = Some(portal::start(None));
+        }
     }
 
-    fn start_portal(&mut self) {
-        self.portal = PortalState::Pending(portal::start(self.token.clone()));
+    /// Call off the request in flight: a dialog that closed without answering
+    /// would otherwise keep it waiting until the portal's timeout.
+    pub fn cancel_request(&mut self) {
+        if let Some(r) = self.request.take() {
+            log::info!("desktop: share request cancelled");
+            // A saved session that didn't come back silently is dropped.
+            if r.token.is_some() {
+                self.tokens_changed = true;
+            }
+        }
+    }
+
+    /// Forget every approval and ask the user to pick screens again.
+    pub fn reselect(&mut self) {
+        self.teardown_screens();
+        self.restore.clear();
+        self.tokens_changed = true;
+        self.portal_error = None;
+        self.request = Some(portal::start(None));
     }
 
     fn teardown_screens(&mut self) {
         // GPU resources are freed via destroy_gpu in poll (needs the device);
-        // here we just stop captures and drop the session.
+        // here we just stop captures and drop the sessions.
         for s in &mut self.screens {
             s.hide();
             s.capture = None;
         }
         self.keyboard.attached = None;
         self.pending_gpu_teardown = true;
-        self.portal = PortalState::Idle;
+        self.casts.clear();
+        self.request = None;
     }
 
-    /// `Some(token)` once when the persisted restore token should change.
-    pub fn take_token_change(&mut self) -> Option<Option<String>> {
-        if self.token_changed {
-            self.token_changed = false;
-            Some(self.token.clone())
+    /// The restore tokens to save: the shared sessions', then those still to
+    /// restore (the one in flight included, in case the overlay stops first).
+    fn tokens(&self) -> Vec<String> {
+        self.casts
+            .iter()
+            .filter_map(|c| c.restore_token.clone())
+            .chain(self.request.as_ref().and_then(|r| r.token.clone()))
+            .chain(self.restore.iter().cloned())
+            .collect()
+    }
+
+    /// `Some(tokens)` once when the persisted restore tokens should change.
+    pub fn take_token_change(&mut self) -> Option<Vec<String>> {
+        if self.tokens_changed {
+            self.tokens_changed = false;
+            Some(self.tokens())
         } else {
             None
         }
@@ -1472,25 +1514,24 @@ impl DesktopViewer {
             self.screens.clear();
             self.last_screen = None;
         }
-        if let PortalState::Pending(rx) = &self.portal {
-            match rx.try_recv() {
-                Ok(Ok(cast)) => {
-                    if cast.restore_token != self.token {
-                        self.token = cast.restore_token.clone();
-                        self.token_changed = true;
-                    }
-                    self.build_screens(&cast);
-                    self.portal = PortalState::Ready(cast);
+        if let Some(answer) = self.request.as_ref().and_then(|r| r.try_recv()) {
+            self.request = None;
+            match answer {
+                Ok(cast) => {
+                    self.portal_error = None;
+                    self.add_cast_screens(&cast);
+                    self.casts.push(cast);
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     log::error!("desktop: {e}");
-                    self.portal = PortalState::Failed(e);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.portal = PortalState::Failed("portal thread died".into());
+                    self.portal_error = Some(e);
                 }
             }
+            self.tokens_changed = true;
+        }
+        // Saved sessions come back one after another (one dialog at a time).
+        if self.request.is_none() && !self.restore.is_empty() {
+            self.setup_screens();
         }
         // A queued layout applies once the screens exist and STAGE is known.
         if self.pending_layout.is_some() && !self.screens.is_empty() && self.local_in_stage.is_some() {
@@ -1567,9 +1608,10 @@ impl DesktopViewer {
         }
     }
 
-    fn build_screens(&mut self, cast: &portal::Cast) {
-        self.screens.clear();
-        for (i, st) in cast.streams.iter().enumerate() {
+    /// Screens for a newly shared session, after those already up. A monitor
+    /// that's already shared (picked again in a later dialog) is skipped.
+    fn add_cast_screens(&mut self, cast: &portal::Cast) {
+        for st in &cast.streams {
             // Link the stream to an output by connector name, else by geometry.
             let out = self
                 .outputs
@@ -1595,12 +1637,16 @@ impl DesktopViewer {
                     let pos = st.position.unwrap_or((0, 0));
                     let size = st.size.unwrap_or((1920, 1080));
                     (
-                        st.mapping_id.clone().unwrap_or_else(|| format!("Screen {}", i + 1)),
+                        st.mapping_id.clone().unwrap_or_else(|| self.unused_screen_name()),
                         format!("{}×{}", size.0, size.1),
                         (pos.0 as f64, pos.1 as f64, size.0 as f64, size.1 as f64),
                     )
                 }
             };
+            if self.screens.iter().any(|s| s.name == name) {
+                log::info!("desktop: {name} is already shared; ignoring stream node {}", st.node_id);
+                continue;
+            }
             log::info!("desktop: stream node {} -> {name} {detail} rect {rect:?}", st.node_id);
             let mut panel = ScreenPanel::new(name, detail, st.node_id, rect);
             panel.width_m = self.width_m;
@@ -1622,6 +1668,11 @@ impl DesktopViewer {
                 h.set_desktop(origin, extent);
             }
         }
+    }
+
+    /// "Screen N" for a stream with no output to name it after.
+    fn unused_screen_name(&self) -> String {
+        (1..).map(|n| format!("Screen {n}")).find(|n| !self.screens.iter().any(|s| &s.name == n)).unwrap_or_default()
     }
 
     /// Laser interaction with the shown screens + keyboard. `max_t`: distance

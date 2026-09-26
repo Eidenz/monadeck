@@ -48,10 +48,19 @@ pub(super) fn desktop_page(ui: &mut egui::Ui, st: &mut LibState) {
 
 fn screens(ui: &mut egui::Ui, st: &mut LibState) {
     card(ui, |ui| {
-        if !st.desktop_ready {
-            let (glyph, label) = if st.desktop_pending { (icon::HOURGLASS, "Waiting…") } else { (icon::MONITOR, "Set up") };
+        if st.desktop_pending {
+            // Always cancellable: a dialog that closed without answering would
+            // otherwise leave this waiting.
+            row(ui, "Waiting for the share dialog", "Approve it on your desktop · if it closed or got stuck, cancel and try again", 170.0, |ui| {
+                if button(ui, icon::X, "Cancel", Tone::Neutral, 150.0).clicked() {
+                    st.desktop_cancel_request = true;
+                    st.sound_tab = true;
+                }
+            });
+            divider(ui);
+        } else if !st.desktop_ready {
             row(ui, "Set up screens", "Approve the monitors in the desktop's share dialog, once", 170.0, |ui| {
-                if button_enabled(ui, glyph, label, Tone::Primary, 150.0, !st.desktop_pending).clicked() {
+                if button(ui, icon::MONITOR, "Set up", Tone::Primary, 150.0).clicked() {
                     st.desktop_setup_request = true;
                     st.sound_tab = true;
                 }
@@ -103,6 +112,16 @@ fn screens(ui: &mut egui::Ui, st: &mut LibState) {
             st.desktop_opacity_request = opacity;
         }
         if st.desktop_ready {
+            divider(ui);
+            // Hyprland, Sway and other wlroots desktops share one monitor per
+            // dialog: each extra one is its own session.
+            row(ui, "Add a screen", "Share another monitor, for desktops whose dialog takes one at a time", 200.0, |ui| {
+                if button_enabled(ui, icon::PLUS, "Add", Tone::Neutral, 150.0, !st.desktop_pending).clicked() {
+                    st.desktop_add_request = true;
+                    st.sound_tab = true;
+                    st.flash("Pick the monitor in the desktop dialog");
+                }
+            });
             divider(ui);
             row(ui, "Re-pick screens", "Choose again which monitors VR may show, in the desktop's share dialog", 200.0, |ui| {
                 let armed = st.is_armed("repick");

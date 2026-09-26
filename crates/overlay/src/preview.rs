@@ -701,6 +701,24 @@ fn pages(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir:
             st.desktop_tab = tab;
         })));
     }
+    // The share dialog in flight: the first setup, then adding one more screen.
+    shots.push(("page-desktop-screens-waiting".into(), Box::new(|st| {
+        st.nav = Nav::Desktop;
+        st.desktop_tab = DesktopTab::Screens;
+        st.desktop_ready = false;
+        st.desktop_pending = true;
+        st.desktop_status = "Waiting for the screen-share dialog on your desktop…".into();
+        for r in &mut st.desktop_rows {
+            r.approved = false;
+            r.shown = false;
+            r.hint = Some("Set up screens to approve it".into());
+        }
+    })));
+    shots.push(("page-desktop-screens-adding".into(), Box::new(|st| {
+        st.nav = Nav::Desktop;
+        st.desktop_tab = DesktopTab::Screens;
+        st.desktop_pending = true;
+    })));
     for tab in PhotosTab::ALL {
         shots.push((name("photos", &tab), Box::new(move |st| {
             st.nav = Nav::Photos;

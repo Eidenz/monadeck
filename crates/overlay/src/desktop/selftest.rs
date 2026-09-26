@@ -110,12 +110,12 @@ pub fn run() -> Result<()> {
 
     println!("== portal (approve the screen-share dialog on your desktop) ==");
     // Reuse the overlay's saved approval when there is one (no dialog).
-    let token = monadeck_core::overlay_config::OverlayConfig::load().screencast_token;
-    let rx = portal::start(token);
-    let cast = match rx.recv_timeout(Duration::from_secs(90)) {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => bail!("portal: {e}"),
-        Err(_) => bail!("portal: no answer within 90 s (dialog not approved?)"),
+    let token = monadeck_core::overlay_config::OverlayConfig::load().saved_screencast_tokens().into_iter().next();
+    let request = portal::start(token);
+    let cast = match request.recv_timeout(Duration::from_secs(90)) {
+        Some(Ok(c)) => c,
+        Some(Err(e)) => bail!("portal: {e}"),
+        None => bail!("portal: no answer within 90 s (dialog not approved?)"),
     };
     println!("  restore token: {}", cast.restore_token.as_deref().map(|t| format!("{}…", &t[..t.len().min(8)])).unwrap_or("none".into()));
     for s in &cast.streams {

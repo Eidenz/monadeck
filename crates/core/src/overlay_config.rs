@@ -30,7 +30,13 @@ pub struct OverlayConfig {
     pub freeze_delay_secs: f32,
     /// xdg-desktop-portal ScreenCast restore token (desktop viewer): lets the
     /// next launch re-use the approved monitors without the share dialog.
+    /// Superseded by `screencast_tokens`; still written (the first one) so an
+    /// older Monadeck keeps its first screen.
     pub screencast_token: Option<String>,
+    /// One restore token per ScreenCast session, restored in order. Portals
+    /// whose dialog shares a single monitor (Hyprland, Sway…) get a session
+    /// per screen. See [`OverlayConfig::saved_screencast_tokens`].
+    pub screencast_tokens: Vec<String>,
     /// Physical width of mirrored screens, metres.
     pub screen_width_m: f32,
     /// Curve new screens start with (0 = flat, 1 = the widest wrap).
@@ -173,6 +179,7 @@ impl Default for OverlayConfig {
             uevr_delay: 30,
             freeze_delay_secs: 3.0,
             screencast_token: None,
+            screencast_tokens: Vec::new(),
             screen_width_m: 1.35,
             screen_curve: 0.0,
             screen_opacity: 1.0,
@@ -239,6 +246,16 @@ impl OverlayConfig {
         monadeck_config_dir().join("overlay.json")
     }
 
+    /// The saved ScreenCast sessions: `screencast_tokens`, or the single token
+    /// an older version saved.
+    pub fn saved_screencast_tokens(&self) -> Vec<String> {
+        if self.screencast_tokens.is_empty() {
+            self.screencast_token.iter().cloned().collect()
+        } else {
+            self.screencast_tokens.clone()
+        }
+    }
+
     pub fn load() -> Self {
         fs::read_to_string(Self::file())
             .ok()
@@ -254,5 +271,21 @@ impl OverlayConfig {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = fs::write(path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screencast_tokens_migrate_from_the_single_token() {
+        // An older config: one token, no list.
+        let old: OverlayConfig = serde_json::from_str(r#"{"screencast_token":"abc"}"#).unwrap();
+        assert_eq!(old.saved_screencast_tokens(), vec!["abc".to_string()]);
+        // The list wins once there is one.
+        let new: OverlayConfig = serde_json::from_str(r#"{"screencast_token":"abc","screencast_tokens":["abc","def"]}"#).unwrap();
+        assert_eq!(new.saved_screencast_tokens(), vec!["abc".to_string(), "def".to_string()]);
+        assert!(OverlayConfig::default().saved_screencast_tokens().is_empty());
     }
 }

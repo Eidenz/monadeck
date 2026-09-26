@@ -42,7 +42,7 @@ chrono-tz = "0.10"
 # --- Desktop viewer (WayVR-style screen mirror) -------------------------------
 # xdg-desktop-portal ScreenCast negotiation (KDE/GNOME/wlroots all speak it).
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
-tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "macros"] }
 # The negotiated screencast stream is a PipeWire video node; frames arrive as
 # DMA-BUFs (zero-copy into Vulkan) or SHM (staging upload fallback).
 pipewire = { version = "0.10", features = ["v0_3_33", "v0_3_65"] }

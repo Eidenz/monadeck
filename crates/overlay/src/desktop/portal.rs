@@ -5,8 +5,13 @@
 //!
 //! The portal session must stay alive for the streams to keep flowing, so the
 //! thread parks on the session until the returned [`Cast`] is dropped.
+//!
+//! A request never waits forever: dropping its [`Request`] calls it off, and
+//! it gives up by itself after [`ANSWER_TIMEOUT`] (a share picker that dies
+//! without answering leaves the portal silent).
 use std::os::fd::OwnedFd;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType, StartCastOptions};
 use ashpd::desktop::{CreateSessionOptions, PersistMode};
@@ -33,11 +38,40 @@ pub struct Cast {
     _keepalive: tokio::sync::oneshot::Sender<()>,
 }
 
-/// Kick off a portal request. With `multiple`, the user may tick several
-/// monitors in the dialog; each becomes one stream. `token` skips the dialog
-/// when it's still valid for this app.
-pub fn start(token: Option<String>) -> mpsc::Receiver<Result<Cast, String>> {
+/// How long a request waits for the share dialog before giving up.
+pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// A portal request in flight. Dropping it calls the request off.
+pub struct Request {
+    rx: mpsc::Receiver<Result<Cast, String>>,
+    _cancel: tokio::sync::oneshot::Sender<()>,
+    /// The restore token it was started with (a saved session being restored).
+    pub token: Option<String>,
+}
+
+impl Request {
+    /// Wait up to `timeout` for the answer (the self-test).
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<Result<Cast, String>> {
+        self.rx.recv_timeout(timeout).ok()
+    }
+
+    /// The answer, once there is one.
+    pub fn try_recv(&self) -> Option<Result<Cast, String>> {
+        match self.rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err("portal thread died".into())),
+        }
+    }
+}
+
+/// Kick off a portal request (one session). The user may tick several monitors
+/// in the dialog where the portal allows it (GNOME, KDE); each becomes one
+/// stream. `token` skips the dialog when it's still valid for this app.
+pub fn start(token: Option<String>) -> Request {
     let (tx, rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let restore = token.clone();
     std::thread::Builder::new()
         .name("screencast-portal".into())
         .spawn(move || {
@@ -50,7 +84,19 @@ pub fn start(token: Option<String>) -> mpsc::Receiver<Result<Cast, String>> {
             };
             rt.block_on(async move {
                 let (keep_tx, keep_rx) = tokio::sync::oneshot::channel::<()>();
-                match negotiate(token.as_deref()).await {
+                let answer = tokio::select! {
+                    r = negotiate(restore.as_deref()) => r,
+                    // Sender dropped: the viewer called it off (or went away).
+                    _ = cancel_rx => {
+                        log::info!("screencast: request cancelled");
+                        return;
+                    }
+                    _ = tokio::time::sleep(ANSWER_TIMEOUT) => Err(format!(
+                        "no answer from the share dialog after {} minutes; try again",
+                        ANSWER_TIMEOUT.as_secs() / 60
+                    )),
+                };
+                match answer {
                     Ok((fd, streams, restore_token, _session)) => {
                         let _ = tx.send(Ok(Cast { _fd: fd, streams, restore_token, _keepalive: keep_tx }));
                         // Park until the Cast is dropped; `_session` lives here.
@@ -64,7 +110,7 @@ pub fn start(token: Option<String>) -> mpsc::Receiver<Result<Cast, String>> {
             });
         })
         .expect("spawn portal thread");
-    rx
+    Request { rx, _cancel: cancel_tx, token }
 }
 
 type Negotiated = (
