@@ -272,7 +272,7 @@ fn playspace(ui: &mut egui::Ui, st: &mut LibState) {
             }
         });
         divider(ui);
-        row(ui, "Button", "Auto: the trackpad, or A + B on a glove", 330.0, |ui| {
+        row(ui, "Button", "Auto: the trackpad, or A + B on a glove or a controller without one", 330.0, |ui| {
             let ids = ["auto", "pad", "ab"];
             let cur = ids.iter().position(|i| st.ps_drag_button == *i).unwrap_or(usize::MAX);
             if let Some(i) = segmented(ui, &["Auto", "Trackpad", "A + B"], cur) {

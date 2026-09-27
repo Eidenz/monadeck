@@ -657,6 +657,40 @@ fn run() -> Result<()> {
             xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/right/input/grip/pose")?),
         ],
     )?;
+    // Quest controllers (WiVRn). Through the Index bindings they had no squeeze
+    // force (grab never fired) and no trackpad; Monado picks this profile for
+    // them, as it's their device's own, and keeps Index for Index controllers.
+    // No trackpad here: the playspace drag falls back to A + B (see below).
+    let touch_profile = xr_instance.string_to_path("/interaction_profiles/oculus/touch_controller")?;
+    let touch_bindings = (|| -> xr::Result<Vec<xr::Binding>> {
+        let p = |s: &str| xr_instance.string_to_path(s);
+        Ok(vec![
+            xr::Binding::new(&aim_action, p("/user/hand/left/input/aim/pose")?),
+            xr::Binding::new(&aim_action, p("/user/hand/right/input/aim/pose")?),
+            xr::Binding::new(&select_action, p("/user/hand/left/input/trigger/value")?),
+            xr::Binding::new(&select_action, p("/user/hand/right/input/trigger/value")?),
+            xr::Binding::new(&grab_action, p("/user/hand/left/input/squeeze/value")?),
+            xr::Binding::new(&grab_action, p("/user/hand/right/input/squeeze/value")?),
+            xr::Binding::new(&scroll_action, p("/user/hand/left/input/thumbstick")?),
+            xr::Binding::new(&scroll_action, p("/user/hand/right/input/thumbstick")?),
+            // The left menu button, as WiVRn maps Index's left system click.
+            xr::Binding::new(&system_action, p("/user/hand/left/input/menu/click")?),
+            // Index A / B = Touch X / Y on the left, A / B on the right.
+            xr::Binding::new(&secondary_action, p("/user/hand/left/input/x/click")?),
+            xr::Binding::new(&secondary_action, p("/user/hand/right/input/a/click")?),
+            xr::Binding::new(&precise_action, p("/user/hand/left/input/y/click")?),
+            xr::Binding::new(&precise_action, p("/user/hand/right/input/b/click")?),
+            xr::Binding::new(&haptic_action, p("/user/hand/left/output/haptic")?),
+            xr::Binding::new(&haptic_action, p("/user/hand/right/output/haptic")?),
+            xr::Binding::new(&stick_click_action, p("/user/hand/left/input/thumbstick/click")?),
+            xr::Binding::new(&stick_click_action, p("/user/hand/right/input/thumbstick/click")?),
+            xr::Binding::new(&grip_pose_action, p("/user/hand/left/input/grip/pose")?),
+            xr::Binding::new(&grip_pose_action, p("/user/hand/right/input/grip/pose")?),
+        ])
+    })();
+    if let Err(e) = touch_bindings.and_then(|b| xr_instance.suggest_interaction_profile_bindings(touch_profile, &b)) {
+        log::warn!("input: Touch controller bindings refused ({e}); Quest controllers go through the Index ones");
+    }
     session.attach_action_sets(&[&action_set])?;
     let aim_left = aim_action.create_space(&session, left_path, xr::Posef::IDENTITY)?;
     let aim_right = aim_action.create_space(&session, right_path, xr::Posef::IDENTITY)?;
@@ -935,6 +969,8 @@ fn run() -> Result<()> {
     let mut pad_last: [Option<Instant>; 2] = [None; 2];
     let mut pad_suppressed = [false; 2]; // held after a double press: no drag until release
     let mut glove_mode = [false; 2]; // this hand drags with A+B (its A/B clicks are then ignored)
+    // The hand's controller has no trackpad (Touch profile): auto drags with A+B.
+    let mut no_trackpad = [false; 2];
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     let mut kb_hover_prev: [Option<usize>; 2] = [None, None]; // key under each hand (typing haptics)
     // Re-scan to refresh last-played ordering when a game starts/stops.
@@ -972,6 +1008,14 @@ fn run() -> Result<()> {
                     }
                 }
                 InstanceLossPending(_) => return Ok(()),
+                InteractionProfileChanged(_) => {
+                    for (hi, path) in [left_path, right_path].into_iter().enumerate() {
+                        let profile = session.current_interaction_profile(path).unwrap_or(xr::Path::NULL);
+                        no_trackpad[hi] = profile == touch_profile;
+                        let name = if profile == xr::Path::NULL { "none".into() } else { xr_instance.path_to_string(profile).unwrap_or_default() };
+                        log::info!("input: hand {hi} uses {name}");
+                    }
+                }
                 _ => {}
             }
         }
@@ -1567,7 +1611,7 @@ fn run() -> Result<()> {
                 glove_mode[hi] = match drag_button.as_str() {
                     "pad" => false,
                     "ab" => true,
-                    _ => if hi == 0 { gloves.0 } else { gloves.1 },
+                    _ => (if hi == 0 { gloves.0 } else { gloves.1 }) || no_trackpad[hi],
                 };
                 let pad = pad_action.state(&session, h.path)?.current_state > 0.5;
                 pressed[hi] = h.active && allowed[hi] && if glove_mode[hi] { h.secondary && h.precise } else { pad };
