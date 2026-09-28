@@ -1,90 +1,153 @@
-<script lang="ts">
-  import { onMount } from "svelte";
-  import { gameCover, type DetectedGame } from "./api";
-
-  let {
-    game,
-    active,
-    onpick,
-  }: { game: DetectedGame; active: boolean; onpick: () => void } = $props();
-
-  let cover = $state<string | null>(null);
-  onMount(async () => {
-    if (game.appId) {
-      try {
-        cover = await gameCover(game.appId, game.gamePath);
-      } catch {
-        cover = null;
-      }
+<script lang="ts" module>
+  // Covers are data URLs from Rust; fetched once each, when a tile scrolls in.
+  const covers = new Map<string, Promise<string | null>>();
+  function cover(id: string): Promise<string | null> {
+    let p = covers.get(id);
+    if (!p) {
+      p = import("./api").then((api) => api.gameCover(id)).catch(() => null);
+      covers.set(id, p);
     }
-  });
+    return p;
+  }
 </script>
 
-<button class="tile state-layer" class:active onclick={onpick}>
-  <div class="art">
-    {#if cover}
-      <img src={cover} alt="" />
+<script lang="ts">
+  import Icon from "./Icon.svelte";
+  import type { Game } from "./api";
+
+  let { game, opening, onpick }: { game: Game; opening: boolean; onpick: () => void } = $props();
+  let src = $state<string | null>(null);
+  let el: HTMLElement;
+
+  $effect(() => {
+    const id = game.coverId;
+    if (!id) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        io.disconnect();
+        cover(id).then((u) => (src = u));
+      }
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  });
+
+  // A name-seeded tint for games without art.
+  const TINTS = ["210 30% 22%", "275 25% 21%", "170 30% 17%", "30 32% 19%", "335 27% 20%", "130 20% 18%"];
+  const tint = $derived(TINTS[[...game.name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % TINTS.length]);
+</script>
+
+<button class="tile" bind:this={el} onclick={onpick} title={game.name}>
+  <span class="art" style:--tint={tint}>
+    {#if src}
+      <img {src} alt="" />
     {:else}
-      <span class="ph">{game.name.slice(0, 1).toUpperCase()}</span>
+      <span class="ph"><Icon name="game-controller" size={26} /><span>{game.name}</span></span>
     {/if}
-  </div>
-  <div class="meta">
-    <div class="name" title={game.name}>{game.name}</div>
-    <div class="src">{game.source} · {game.bindingFiles.length} binding{game.bindingFiles.length === 1 ? "" : "s"}</div>
-  </div>
+    {#if game.personal.length}
+      <span class="badge"><Icon name="sparkle" size={11} /> Customized</span>
+    {/if}
+    {#if opening}
+      <span class="busy"><span class="spinner"></span></span>
+    {/if}
+  </span>
+  <span class="name">{game.name}</span>
 </button>
 
 <style>
   .tile {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    text-align: left;
+    flex-direction: column;
+    gap: 7px;
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius-s);
-    padding: 6px;
-  }
-  .tile.active {
-    background: hsl(var(--primary) / 0.14);
-    border-color: hsl(var(--primary) / 0.4);
+    border: none;
+    padding: 0;
+    color: hsl(var(--muted));
+    text-align: left;
+    min-width: 0;
   }
   .art {
-    flex: none;
-    width: 34px;
-    height: 50px;
-    border-radius: 4px;
+    position: relative;
+    display: block;
+    aspect-ratio: 2 / 3;
+    border-radius: 12px;
     overflow: hidden;
-    background: hsl(var(--surface-2));
-    display: grid;
-    place-items: center;
+    background: linear-gradient(180deg, hsl(var(--tint)), hsl(var(--tint) / 0.55));
+    border: 1px solid hsl(var(--foreground) / 0.06);
+    transition:
+      transform 0.14s ease,
+      box-shadow 0.14s ease,
+      border-color 0.14s ease;
   }
-  .art img {
+  .tile:hover .art {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 22px hsl(0 0% 0% / 0.45);
+    border-color: hsl(var(--foreground) / 0.25);
+  }
+  .tile:hover {
+    color: hsl(var(--foreground));
+  }
+  img {
     width: 100%;
     height: 100%;
     object-fit: cover;
+    display: block;
   }
   .ph {
-    font-size: 18px;
-    font-weight: 700;
-    color: hsl(var(--muted));
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 12px;
+    text-align: center;
+    color: hsl(var(--foreground) / 0.85);
+    font-size: 13px;
   }
-  .meta {
-    min-width: 0;
+  .ph :global(.icon) {
+    opacity: 0.4;
+  }
+  .badge {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: hsl(var(--primary));
+    background: hsl(0 0% 0% / 0.7);
+    border: 1px solid hsl(var(--primary) / 0.4);
+    border-radius: 99px;
+    padding: 2px 8px;
+  }
+  .busy {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: hsl(0 0% 0% / 0.55);
+  }
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid hsl(0 0% 100% / 0.25);
+    border-top-color: white;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .name {
-    font-size: 13px;
-    color: hsl(var(--foreground));
+    font-size: 12.5px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  .src {
-    font-size: 10.5px;
-    color: hsl(var(--muted));
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    padding: 0 2px;
   }
 </style>
