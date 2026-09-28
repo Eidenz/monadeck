@@ -306,14 +306,16 @@ fn display(ui: &mut egui::Ui, st: &mut LibState) {
 fn input(ui: &mut egui::Ui, st: &mut LibState) {
     group(ui, "Mouse");
     card(ui, |ui| {
-        row(ui, "B button", "Frozen click: a left click that never moves the cursor · Middle click: paste, open in a new tab · A stays the right click", 340.0, |ui| {
-            if let Some(i) = segmented(ui, &["Frozen click", "Middle click"], st.mouse_b_middle as usize) {
-                st.mouse_b_middle = i == 1;
+        let sub = if st.mouse_summary.is_empty() { "What each button does while you point at a screen".to_string() } else { st.mouse_summary.clone() };
+        row(ui, "Buttons", &sub, 190.0, |ui| {
+            if button(ui, icon::GAME_CONTROLLER, "Edit buttons", Tone::Neutral, 170.0).clicked() {
+                st.nav = super::Nav::Bindings;
+                st.binds.open_at(crate::bindings::Target::Monadeck, monadeck_core::bindings::own::MOUSE_SET);
                 st.sound_tab = true;
             }
         });
         divider(ui);
-        row(ui, "Scroll speed", "Thumbstick scrolling on a screen", SLIDER_W, |ui| {
+        row(ui, "Scroll speed", "How fast the scroll wheel turns on a screen", SLIDER_W, |ui| {
             slider(ui, &mut st.scroll_speed, 0.25..=4.0, SLIDER_W, |v| format!("{v:.2}×"));
         });
         divider(ui);
@@ -350,6 +352,8 @@ fn behaviour(ui: &mut egui::Ui, st: &mut LibState) {
         );
         divider(ui);
         t |= switch_row(ui, "Tilt restored screens to your headset", "Off keeps them upright", &mut st.screen_restore_tilt);
+        divider(ui);
+        t |= switch_row(ui, "Snap level", "A screen carried or brought back within a few degrees of level straightens out", &mut st.screen_level);
         if t {
             st.sound_tab = true;
         }

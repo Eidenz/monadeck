@@ -34,6 +34,12 @@ pub struct DetectedGame {
     /// `LastPlayTime`), for recency ordering. `None`/0 if never played or unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_played: Option<u64>,
+    /// The Steam install folder, when the game's executable (`game_path`) sits
+    /// in a subfolder of it: where the game runs from isn't known, so personal
+    /// bindings go in both. `None` when they're the same, or when the folder
+    /// holds several games (a copy there would be shared by all of them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -970,25 +976,50 @@ fn find_game_actions(game_dir: &Path) -> Vec<PathBuf> {
         found.push(direct);
     }
     // One level down (incl. the Unity `<*_Data>/StreamingAssets/...` layout).
+    let probe_unity = |data: &Path, found: &mut Vec<PathBuf>| {
+        let sa = data.join("StreamingAssets");
+        for cand in [sa.join("actions.json"), sa.join("SteamVR").join("actions.json"), sa.join("input").join("actions.json"), sa.join("bindings").join("actions.json")] {
+            if cand.is_file() {
+                found.push(cand);
+            }
+        }
+    };
     if let Ok(entries) = fs::read_dir(game_dir) {
         for entry in entries.flatten() {
             let sub = entry.path();
-            let sa = sub.join("StreamingAssets");
-            let candidates = [
-                sub.join("actions.json"),
-                sa.join("actions.json"),
-                sa.join("SteamVR").join("actions.json"),
-                sa.join("input").join("actions.json"),
-                sa.join("bindings").join("actions.json"),
-            ];
-            for cand in candidates {
-                if cand.is_file() {
-                    found.push(cand);
+            let direct = sub.join("actions.json");
+            if direct.is_file() {
+                found.push(direct);
+            }
+            probe_unity(&sub, &mut found);
+            // Two levels: a Unity game in a subfolder (`<sub>/<Name>_Data`), as
+            // Resonite's renderer or several games sharing one install. Only
+            // `*_Data` names are looked at, so big asset folders aren't walked.
+            let is_data = |n: &str| n.ends_with("_Data");
+            if entry.file_name().to_str().is_some_and(is_data) {
+                continue;
+            }
+            if let Ok(inner) = fs::read_dir(&sub) {
+                for e in inner.flatten() {
+                    if e.file_name().to_str().is_some_and(is_data) {
+                        probe_unity(&e.path(), &mut found);
+                    }
                 }
             }
         }
     }
     found
+}
+
+/// Where a game's executable sits: the folder holding its Unity `*_Data`
+/// folder, else `root`.
+fn exe_dir(actions_path: &Path, root: &Path) -> PathBuf {
+    actions_path
+        .ancestors()
+        .take_while(|a| a.starts_with(root) && *a != root)
+        .find(|a| a.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_Data")))
+        .and_then(Path::parent)
+        .map_or_else(|| root.to_path_buf(), Path::to_path_buf)
 }
 
 fn scan_directory_for_bindings(
@@ -1008,17 +1039,34 @@ fn scan_directory_for_bindings(
         let game_folder_name = entry.file_name().to_string_lossy().to_string();
 
         let found_actions = find_game_actions(&game_dir);
+        let mut here: Vec<DetectedGame> = Vec::new();
         for actions_path in &found_actions {
-            if let Some(game) = try_load_actions_manifest(
-                actions_path,
-                &game_folder_name,
-                app_name_map,
-                source,
-                Some(&game_dir),
-            ) {
-                games.push(game);
+            let dir = exe_dir(actions_path, &game_dir);
+            if let Some(mut game) = try_load_actions_manifest(actions_path, &game_folder_name, app_name_map, source, Some(&dir)) {
+                if dir != game_dir {
+                    game.root_dir = Some(game_dir.to_string_lossy().to_string());
+                }
+                here.push(game);
             }
         }
+        // Several games in one install folder: tell them apart by executable,
+        // and keep their personal bindings apart (no shared copy at the root).
+        if here.len() > 1 {
+            for g in &mut here {
+                g.root_dir = None;
+                // `<Name>_Data` is named after the executable.
+                let exe = Path::new(&g.actions_path)
+                    .ancestors()
+                    .filter_map(|a| a.file_name()?.to_str()?.strip_suffix("_Data"))
+                    .next()
+                    .or_else(|| Path::new(&g.game_path).file_name().and_then(|n| n.to_str()))
+                    .map(str::to_string);
+                if let Some(exe) = exe.filter(|n| *n != game_folder_name && *n != g.name) {
+                    g.name = format!("{} · {exe}", g.name);
+                }
+            }
+        }
+        games.extend(here);
 
         let xrizer_dir = game_dir.join("xrizer");
         if xrizer_dir.is_dir() {
@@ -1048,11 +1096,8 @@ fn try_load_xrizer_override(
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
             if fname.ends_with(".json") && fname != "actions.json" {
-                let without_prefix = fname
-                    .strip_prefix("bindings_")
-                    .or_else(|| fname.strip_prefix("binding_"))
-                    .unwrap_or(&fname);
-                let controller_type = without_prefix.strip_suffix(".json").unwrap_or(without_prefix).to_string();
+                // xrizer's own names (`oculustouch.json`) and older spellings.
+                let controller_type = crate::bindings::type_from_xrizer_file(&fname);
                 binding_files.push(BindingFile {
                     controller_type,
                     file_path: entry.path().to_string_lossy().to_string(),
@@ -1083,6 +1128,7 @@ fn try_load_xrizer_override(
         source: "xrizer (game override)".to_string(),
         shortcut_id: None,
         last_played: None,
+        root_dir: None,
     })
 }
 
@@ -1180,6 +1226,7 @@ fn try_load_actions_manifest(
         source: source.to_string(),
         shortcut_id: None,
         last_played: None,
+        root_dir: None,
     })
 }
 

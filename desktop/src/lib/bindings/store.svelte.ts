@@ -1,416 +1,342 @@
-// Binding-editor state (its own window): scan games, pick a binding file, then
-// edit it either visually (controller diagram + panels) or as raw JSON.
-//
-// `bindingJson` is the raw text (Raw tab); `bindingConfig` is the parsed object
-// the visual editor mutates. They're kept in sync: a visual edit re-serializes
-// to `bindingJson`; a raw edit re-parses into `bindingConfig`.
+// Binding-editor state (its own window), the desktop twin of the in-headset
+// editor: the games that have bindings (and Monadeck's own controls), then one
+// binding being edited. The binding is JSON the page keeps; every edit goes
+// through core (`bind_edit`), and what's drawn comes back from `bind_view`.
 import * as api from "./api";
-import type { BindingFile, DetectedGame } from "./api";
-import type {
-  ActionManifest,
-  BindingConfig,
-  HapticEntry,
-  SourceEntry,
-} from "./types";
-import { getProfile } from "./data/profileRegistry";
-import { getMirrorPath, type ControllerProfile } from "./data/controllers";
-import { getActionName } from "./types";
+import type { Controller, Doc, EditOp, Game, HandId, Manifest, ModeDef, Target, View } from "./api";
 
-export const editor = $state({
-  // game browser
-  games: [] as DetectedGame[],
+export type Popup =
+  | { kind: "addMode"; hand: HandId; input: string }
+  | { kind: "changeMode"; index: number }
+  | { kind: "action"; index: number; slot: string }
+  | { kind: "controller" }
+  | { kind: "haptics" }
+  | { kind: "poses" }
+  | { kind: "chords" }
+  | { kind: "leave"; to: "list" | { controller: string } };
+
+export interface Editing {
+  target: Target;
+  /** Monadeck's own controls (else a game's). */
+  own: boolean;
+  game: Game | null;
+  name: string;
+  ty: string;
+  ctrl: Controller;
+  manifest: Manifest;
+  doc: Doc;
+  /** The doc as last opened / saved (JSON), for "unsaved changes". */
+  saved: string;
+  personal: boolean;
+  set: string;
+  mirror: boolean;
+  view: View | null;
+  popup: Popup | null;
+  busy: boolean;
+  /** Editing the JSON by hand instead. */
+  json: boolean;
+  jsonText: string;
+  jsonError: string;
+}
+
+export const bind = $state({
+  games: [] as Game[],
   scanning: false,
   scanned: false,
-  game: null as DetectedGame | null,
-  binding: null as BindingFile | null,
-  // raw + parsed
-  actionsJson: "",
-  bindingJson: "",
-  actionManifest: null as ActionManifest | null,
-  bindingConfig: null as BindingConfig | null,
-  // editor selection
-  activeActionSet: null as string | null,
-  selectedInput: null as string | null,
-  hoveredInput: null as string | null,
-  mirrorMode: false,
-  // user-added scan folders
+  onlyCustomized: false,
+  query: "",
+  ownPersonal: [] as string[],
+  /** The xrizer games run on picks up a saved binding while they run. */
+  live: false,
   customPaths: [] as string[],
-  // preferred controller, auto-selected when opening a game (persisted)
-  defaultController: "knuckles",
-  // status
-  dirty: false,
-  saving: false,
+  modes: [] as ModeDef[],
+  gameControllers: [] as Controller[],
+  ownControllers: [] as Controller[],
+  usual: "knuckles",
+  editing: null as Editing | null,
+  /** The actions path of a game being opened ("own" for Monadeck's). */
+  opening: null as string | null,
   error: "",
+  notice: "",
 });
 
-const DEFAULT_CTRL_KEY = "monadeck.bindings.defaultController";
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+function notify(msg: string) {
+  bind.notice = msg;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => (bind.notice = ""), 2600);
+}
 
-export function loadDefaultController() {
+export async function init() {
   try {
-    editor.defaultController = localStorage.getItem(DEFAULT_CTRL_KEY) ?? "knuckles";
-  } catch {
-    /* no localStorage during prerender — keep the default */
+    [bind.modes, bind.gameControllers, bind.ownControllers, bind.customPaths, bind.usual] = await Promise.all([
+      api.modes(),
+      api.controllers(false),
+      api.controllers(true),
+      api.getCustomPaths(),
+      api.usualController(),
+    ]);
+  } catch (e) {
+    bind.error = `${e}`;
   }
 }
 
-export function setDefaultController(ctrl: string) {
-  editor.defaultController = ctrl;
+export async function scan() {
+  if (bind.scanning) return;
+  bind.scanning = true;
   try {
-    localStorage.setItem(DEFAULT_CTRL_KEY, ctrl);
-  } catch {
-    /* ignore */
-  }
-}
-
-export async function loadCustomPaths() {
-  try {
-    editor.customPaths = await api.getCustomPaths();
-  } catch {
-    editor.customPaths = [];
+    const [games, own, live] = await Promise.all([api.games(), api.ownPersonal(), api.liveReload()]);
+    bind.games = games;
+    bind.ownPersonal = own;
+    bind.live = live;
+    // Keep an open game's editor on it (its list entry was replaced).
+    const e = bind.editing;
+    if (e?.game) e.game = games.find((g) => g.actionsPath === e.game!.actionsPath) ?? e.game;
+  } catch (e) {
+    bind.error = `Couldn't look for games: ${e}`;
+  } finally {
+    bind.scanning = false;
+    bind.scanned = true;
   }
 }
 
 export async function addCustomPath(path: string) {
-  if (editor.customPaths.includes(path)) return;
-  editor.customPaths = [...editor.customPaths, path];
-  await api.setCustomPaths([...editor.customPaths]);
+  if (bind.customPaths.includes(path)) return;
+  bind.customPaths = [...bind.customPaths, path];
+  await api.setCustomPaths([...bind.customPaths]);
   await scan();
 }
 
 export async function removeCustomPath(path: string) {
-  editor.customPaths = editor.customPaths.filter((p) => p !== path);
-  await api.setCustomPaths([...editor.customPaths]);
+  bind.customPaths = bind.customPaths.filter((p) => p !== path);
+  await api.setCustomPaths([...bind.customPaths]);
   await scan();
 }
 
-// --- game browser -------------------------------------------------------------
+// --- opening -----------------------------------------------------------------------------------
 
-export async function scan() {
-  editor.scanning = true;
-  editor.error = "";
+const LAST = (own: boolean) => `monadeck.bindings.controller.${own ? "own" : "games"}`;
+
+function remembered(own: boolean): string | null {
   try {
-    editor.games = await api.scanSteamGames();
-  } catch (e) {
-    editor.error = `Scan failed: ${e}`;
-  } finally {
-    editor.scanning = false;
-    editor.scanned = true;
-  }
-}
-
-export async function selectGame(game: DetectedGame) {
-  editor.game = game;
-  resetEditing();
-  // Prefer the user's default controller, falling back to the first available.
-  const bf =
-    game.bindingFiles.find((b) => b.controllerType === editor.defaultController) ??
-    game.bindingFiles[0];
-  if (bf) await selectBinding(bf);
-}
-
-export async function selectBinding(binding: BindingFile) {
-  if (!editor.game) return;
-  editor.binding = binding;
-  editor.error = "";
-  try {
-    const [actions, bind] = await api.loadGameBindings(
-      editor.game.actionsPath,
-      binding.filePath,
-    );
-    editor.actionsJson = actions;
-    editor.bindingJson = bind;
-    editor.actionManifest = tryParse<ActionManifest>(actions);
-    editor.bindingConfig = tryParse<BindingConfig>(bind);
-    editor.activeActionSet = editor.bindingConfig
-      ? (Object.keys(editor.bindingConfig.bindings)[0] ?? null)
-      : null;
-    editor.selectedInput = null;
-    editor.dirty = false;
-  } catch (e) {
-    editor.error = `Failed to load bindings: ${e}`;
-  }
-}
-
-function resetEditing() {
-  editor.binding = null;
-  editor.actionsJson = "";
-  editor.bindingJson = "";
-  editor.actionManifest = null;
-  editor.bindingConfig = null;
-  editor.activeActionSet = null;
-  editor.selectedInput = null;
-  editor.dirty = false;
-}
-
-function tryParse<T>(text: string): T | null {
-  try {
-    return JSON.parse(text) as T;
+    return localStorage.getItem(LAST(own));
   } catch {
     return null;
   }
 }
 
-/** Raw-tab edit: update the text and re-parse into the config when it's valid. */
-export function editBindingText(text: string) {
-  editor.bindingJson = text;
-  editor.dirty = true;
-  const parsed = tryParse<BindingConfig>(text);
-  if (parsed) editor.bindingConfig = parsed;
-}
-
-function validJson(): boolean {
+function remember(own: boolean, ty: string) {
   try {
-    JSON.parse(editor.bindingJson);
-    return true;
-  } catch (e) {
-    editor.error = `Invalid JSON, not saved: ${e}`;
-    return false;
+    localStorage.setItem(LAST(own), ty);
+  } catch {
+    /* no storage: fine */
   }
 }
 
-/** Save in place (overwrites the file currently open). */
-export async function save() {
-  if (!editor.binding || !validJson()) return;
-  editor.saving = true;
-  editor.error = "";
+/** The controller to open on: the last one picked, the usual one, the first. */
+function pickController(own: boolean, available: string[]): string {
+  return [remembered(own), bind.usual].find((t): t is string => !!t && available.includes(t)) ?? available[0] ?? "knuckles";
+}
+
+export function openGame(game: Game, ty?: string, set?: string) {
+  return openTarget({ actionsPath: game.actionsPath, dirs: game.dirs }, false, game, game.name, ty ?? pickController(false, game.controllers), set);
+}
+
+export function openOwn(ty?: string, set?: string) {
+  const all = bind.ownControllers.map((c) => c.ty);
+  return openTarget({}, true, null, "Monadeck", ty ?? pickController(true, all), set);
+}
+
+async function openTarget(target: Target, own: boolean, game: Game | null, name: string, ty: string, set?: string) {
+  const ctrl = (own ? bind.ownControllers : bind.gameControllers).find((c) => c.ty === ty);
+  if (!ctrl) return;
+  bind.opening = own ? "own" : (target.actionsPath ?? "");
+  bind.error = "";
   try {
-    await api.writeJsonFile(editor.binding.filePath, editor.bindingJson);
-    editor.dirty = false;
+    const o = await api.open(target, ty);
+    // Open on the first set that binds something, else the first shown one.
+    const probe = await api.view(o.doc, "", own);
+    const shown = o.manifest.sets.filter((s) => !s.hidden || (probe.counts[s.key] ?? 0) > 0);
+    const first = set ?? (shown.find((s) => (probe.counts[s.key] ?? 0) > 0) ?? shown[0])?.key ?? "";
+    const mirror = bind.editing?.mirror ?? false;
+    bind.editing = {
+      target,
+      own,
+      game,
+      name,
+      ty,
+      ctrl,
+      manifest: o.manifest,
+      doc: o.doc,
+      saved: JSON.stringify(o.doc),
+      personal: o.personal,
+      set: first,
+      mirror,
+      view: null,
+      popup: null,
+      busy: false,
+      json: false,
+      jsonText: "",
+      jsonError: "",
+    };
+    remember(own, ty);
+    await refresh();
   } catch (e) {
-    editor.error = `Save failed: ${e}`;
+    bind.error = `Couldn't open it: ${e}`;
   } finally {
-    editor.saving = false;
+    bind.opening = null;
   }
 }
 
-/** Whether the open binding is already a per-game xrizer override. */
-export function isOverride(): boolean {
-  return !!editor.game?.source.includes("xrizer (game override)");
+export function close() {
+  bind.editing = null;
+  bind.error = "";
 }
 
-/** Write to `<game>/xrizer/<ctrl>.json` so the game's default file (which Steam
- *  may overwrite on update) is left untouched — the proper xrizer workflow. xrizer
- *  loads its overrides as `<controller>.json` directly (e.g. `knuckles.json`), NOT
- *  the `bindings_<ctrl>.json` SteamVR-style name. */
-export async function saveAsOverride() {
-  if (!editor.game || !editor.binding || !validJson()) return;
-  const ctrl = editor.binding.controllerType;
-  const gamePath = editor.game.gamePath;
-  const path = `${gamePath}/xrizer/${ctrl}.json`;
-  editor.saving = true;
-  editor.error = "";
+// --- editing -----------------------------------------------------------------------------------
+
+export async function refresh() {
+  const e = bind.editing;
+  if (!e) return;
   try {
-    await api.writeJsonFile(path, editor.bindingJson);
-    editor.dirty = false;
-    await scan(); // the new override now appears (and hides the default entry)
-    const overrideGame = editor.games.find(
-      (g) => g.gamePath === gamePath && g.source.includes("xrizer (game override)"),
-    );
-    if (overrideGame) {
-      editor.game = overrideGame;
-      const bf =
-        overrideGame.bindingFiles.find((b) => b.controllerType === ctrl) ??
-        overrideGame.bindingFiles[0];
-      if (bf) await selectBinding(bf);
+    e.view = await api.view(e.doc, e.set, e.own);
+  } catch (err) {
+    bind.error = `${err}`;
+  }
+}
+
+/** Apply one edit. Returns the new source / chord index for adds. */
+export async function apply(op: EditOp): Promise<number | null> {
+  const e = bind.editing;
+  if (!e) return null;
+  try {
+    const r = await api.edit(e.doc, e.ty, e.own, e.set, e.mirror, op);
+    e.doc = r.doc;
+    await refresh();
+    return r.index;
+  } catch (err) {
+    bind.error = `${err}`;
+    return null;
+  }
+}
+
+export function setSet(key: string) {
+  const e = bind.editing;
+  if (!e || e.set === key) return;
+  e.set = key;
+  e.view = null;
+  refresh();
+}
+
+export function dirty(): boolean {
+  const e = bind.editing;
+  return !!e && JSON.stringify(e.doc) !== e.saved;
+}
+
+export async function save(then?: "list" | { controller: string }) {
+  const e = bind.editing;
+  if (!e || e.busy) return;
+  e.busy = true;
+  bind.error = "";
+  try {
+    const saved = await api.save(e.target, e.ty, e.doc);
+    e.saved = JSON.stringify(e.doc);
+    e.personal = true;
+    if (e.own) {
+      bind.ownPersonal = await api.ownPersonal();
+      notify("Saved · in use in the headset now");
+    } else {
+      if (e.game && !e.game.personal.includes(e.ty)) e.game.personal = [...e.game.personal, e.ty];
+      bind.live = saved.live;
+      notify(saved.live ? `Saved · ${e.name} picks it up right away` : `Saved · ${e.name} uses it next time it starts`);
     }
-  } catch (e) {
-    editor.error = `Save failed: ${e}`;
+    if (then === "list") close();
+    else if (then) switchController(then.controller, true);
+  } catch (err) {
+    bind.error = `Couldn't save: ${err}`;
   } finally {
-    editor.saving = false;
+    if (bind.editing === e) e.busy = false;
   }
 }
 
-// --- selection ---------------------------------------------------------------
-
-export function setActiveActionSet(setPath: string) {
-  editor.activeActionSet = setPath;
-  editor.selectedInput = null;
-}
-export function setSelectedInput(path: string | null) {
-  editor.selectedInput = path;
-}
-export function setHoveredInput(path: string | null) {
-  editor.hoveredInput = path;
-}
-export function setMirrorMode(enabled: boolean) {
-  editor.mirrorMode = enabled;
-}
-
-// --- source operations (mirror-aware), ported from xrbind editorStore --------
-
-function mirrorPath(path: string, profile: ControllerProfile | null): string {
-  if (profile) return getMirrorPath(profile, path) || path;
-  if (path.includes("/hand/left/")) return path.replace("/hand/left/", "/hand/right/");
-  if (path.includes("/hand/right/")) return path.replace("/hand/right/", "/hand/left/");
-  return path;
-}
-
-export function handFromPath(path: string): "left" | "right" | null {
-  if (path.includes("/hand/left/")) return "left";
-  if (path.includes("/hand/right/")) return "right";
-  return null;
-}
-
-const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
-
-/** Re-serialize the config to the raw text and flag unsaved. */
-function commitConfig() {
-  if (editor.bindingConfig) {
-    editor.bindingJson = JSON.stringify(editor.bindingConfig, null, 3);
-  }
-  editor.dirty = true;
-}
-
-function ensureSet(setPath: string) {
-  const c = editor.bindingConfig!;
-  if (!c.bindings[setPath]) c.bindings[setPath] = { sources: [], haptics: [] };
-}
-
-export function addSource(setPath: string, source: SourceEntry) {
-  const c = editor.bindingConfig;
-  if (!c) return;
-  const profile = getProfile(c.controller_type);
-  ensureSet(setPath);
-  c.bindings[setPath].sources.push(source);
-  if (editor.mirrorMode) {
-    c.bindings[setPath].sources.push({
-      ...clone(source),
-      path: mirrorPath(source.path, profile),
-    });
-  }
-  commitConfig();
-}
-
-export function updateSource(setPath: string, index: number, source: SourceEntry) {
-  const c = editor.bindingConfig;
-  if (!c) return;
-  const profile = getProfile(c.controller_type);
-  const sources = c.bindings[setPath]?.sources;
-  if (!sources?.[index]) return;
-  const oldPath = sources[index].path;
-  sources[index] = source;
-  if (editor.mirrorMode) {
-    const mirroredOld = mirrorPath(oldPath, profile);
-    const mi = sources.findIndex(
-      (s, i) => i !== index && s.path === mirroredOld && s.mode === source.mode,
-    );
-    if (mi !== -1) {
-      sources[mi] = { ...clone(source), path: mirrorPath(source.path, profile) };
+/** Back to the default binding (the personal one is kept as `.bak`). */
+export async function reset() {
+  const e = bind.editing;
+  if (!e || e.busy) return;
+  e.busy = true;
+  try {
+    await api.reset(e.target, e.ty);
+    if (e.own) {
+      bind.ownPersonal = await api.ownPersonal();
+      notify("Back to Monadeck's default controls");
+    } else {
+      if (e.game) e.game.personal = e.game.personal.filter((t) => t !== e.ty);
+      notify(`${e.name} is back to its own controls`);
     }
+    await reopen(e.ty, e.set);
+  } catch (err) {
+    bind.error = `Couldn't reset: ${err}`;
+    e.busy = false;
   }
-  commitConfig();
 }
 
-export function removeSource(setPath: string, index: number) {
-  const c = editor.bindingConfig;
-  if (!c) return;
-  const profile = getProfile(c.controller_type);
-  const sources = c.bindings[setPath]?.sources;
-  if (!sources) return;
-  const removed = sources[index];
-  sources.splice(index, 1);
-  if (editor.mirrorMode && removed) {
-    const mp = mirrorPath(removed.path, profile);
-    const mi = sources.findIndex((s) => s.path === mp && s.mode === removed.mode);
-    if (mi !== -1) sources.splice(mi, 1);
+function reopen(ty: string, set?: string) {
+  const e = bind.editing;
+  if (!e) return;
+  return e.own ? openOwn(ty, set) : e.game ? openGame(e.game, ty, set) : undefined;
+}
+
+export function undo() {
+  const e = bind.editing;
+  if (!e) return;
+  e.doc = JSON.parse(e.saved);
+  refresh();
+}
+
+/** Another controller's binding (asks first when there are unsaved changes). */
+export function switchController(ty: string, force = false) {
+  const e = bind.editing;
+  if (!e || (e.ty === ty && !force)) return;
+  if (!force && dirty()) {
+    e.popup = { kind: "leave", to: { controller: ty } };
+    return;
   }
-  commitConfig();
+  reopen(ty);
 }
 
-export function addHaptic(setPath: string, haptic: HapticEntry) {
-  const c = editor.bindingConfig;
-  if (!c) return;
-  const profile = getProfile(c.controller_type);
-  ensureSet(setPath);
-  if (!c.bindings[setPath].haptics) c.bindings[setPath].haptics = [];
-  c.bindings[setPath].haptics!.push(haptic);
-  if (editor.mirrorMode) {
-    c.bindings[setPath].haptics!.push({
-      ...haptic,
-      path: mirrorPath(haptic.path, profile),
-    });
+/** Back to the list (asks first when there are unsaved changes). */
+export function leave() {
+  const e = bind.editing;
+  if (!e) return;
+  if (dirty()) e.popup = { kind: "leave", to: "list" };
+  else close();
+}
+
+/** The JSON view: edits the binding as text (applied while it parses). */
+export function setJson(on: boolean) {
+  const e = bind.editing;
+  if (!e) return;
+  e.json = on;
+  e.jsonText = JSON.stringify(e.doc, null, 2);
+  e.jsonError = "";
+}
+
+export async function editJson(text: string) {
+  const e = bind.editing;
+  if (!e) return;
+  e.jsonText = text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    e.jsonError = `${err}`;
+    return;
   }
-  commitConfig();
-}
-
-export function removeHaptic(setPath: string, index: number) {
-  const c = editor.bindingConfig;
-  if (!c) return;
-  const profile = getProfile(c.controller_type);
-  const haptics = c.bindings[setPath]?.haptics;
-  if (!haptics) return;
-  const removed = haptics[index];
-  haptics.splice(index, 1);
-  if (editor.mirrorMode && removed) {
-    const mp = mirrorPath(removed.path, profile);
-    const mi = haptics.findIndex((h) => h.path === mp && h.output === removed.output);
-    if (mi !== -1) haptics.splice(mi, 1);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    e.jsonError = "A binding is a JSON object";
+    return;
   }
-  commitConfig();
-}
-
-// --- selectors (call from $derived / template; they read editor.* reactively) -
-
-export function activeProfile(): ControllerProfile {
-  return getProfile(editor.bindingConfig?.controller_type ?? "knuckles");
-}
-
-export function actionSets(): string[] {
-  return editor.bindingConfig ? Object.keys(editor.bindingConfig.bindings) : [];
-}
-
-export function activeBindingSources(): SourceEntry[] {
-  if (!editor.bindingConfig || !editor.activeActionSet) return [];
-  return editor.bindingConfig.bindings[editor.activeActionSet]?.sources ?? [];
-}
-
-/** Input (non-vibration/pose/skeleton) action paths, scoped to the active set if any. */
-export function inputActions(): string[] {
-  const m = editor.actionManifest;
-  if (!m) return [];
-  const usable = m.actions.filter(
-    (a) => a.type !== "vibration" && a.type !== "pose" && a.type !== "skeleton",
-  );
-  if (editor.activeActionSet) {
-    const prefix = editor.activeActionSet + "/";
-    const scoped = usable.filter((a) => a.name.startsWith(prefix));
-    if (scoped.length > 0) return scoped.map((a) => a.name);
-  }
-  return usable.map((a) => a.name);
-}
-
-/** Sources bound to a given physical input path, with their index in the set. */
-export function sourcesForInput(
-  inputPath: string,
-): { source: SourceEntry; globalIndex: number }[] {
-  return activeBindingSources()
-    .map((source, globalIndex) => ({ source, globalIndex }))
-    .filter(({ source }) => source.path === inputPath);
-}
-
-/** Output (vibration) action paths, scoped to the active set if any. */
-export function outputActions(): string[] {
-  const m = editor.actionManifest;
-  if (!m) return [];
-  const vib = m.actions.filter((a) => a.type === "vibration");
-  if (editor.activeActionSet) {
-    const prefix = editor.activeActionSet + "/";
-    const scoped = vib.filter((a) => a.name.startsWith(prefix));
-    if (scoped.length > 0) return scoped.map((a) => a.name);
-  }
-  return vib.map((a) => a.name);
-}
-
-export function activeHaptics(): HapticEntry[] {
-  if (!editor.bindingConfig || !editor.activeActionSet) return [];
-  return editor.bindingConfig.bindings[editor.activeActionSet]?.haptics ?? [];
-}
-
-/** Friendly name for an action path (uses the manifest localization if present). */
-export function localizeAction(path: string): string {
-  const loc = editor.actionManifest?.localization;
-  if (loc) {
-    for (const entry of loc) if (entry[path]) return entry[path];
-  }
-  return getActionName(path);
+  e.jsonError = "";
+  e.doc = parsed as Doc;
+  await refresh();
 }

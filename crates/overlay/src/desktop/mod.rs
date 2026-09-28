@@ -29,7 +29,7 @@ use std::time::Instant;
 use ash::vk;
 use openxr as xr;
 
-use crate::mathx::{cross, facing_head, forward, front_pose, normalize, offset_pose, pose_compose, pose_invert, qf, quat_from_axes, quat_nlerp, quat_rotate, quatf, raycast, vec3f};
+use crate::mathx::{cross, facing_head, forward, front_pose, level_within, normalize, offset_pose, pose_compose, pose_invert, qf, quat_from_axes, quat_nlerp, quat_rotate, quatf, raycast, vec3f, LevelSnap, LEVEL_SNAP};
 use monadeck_core::desktop_layouts::{DesktopLayout, KeyboardPlacement, ScreenPlacement};
 use dmabuf::{Caps, Importer};
 use hid::UInput;
@@ -65,12 +65,28 @@ pub struct HandInput {
     pub aim: xr::Posef,
     #[allow(dead_code)]
     pub path: xr::Path,
+    /// Trigger: keys, the swap island, resizing while gripping.
     pub select: bool,
-    pub secondary: bool,
-    /// B: a click with the cursor frozen.
+    /// B (Y): undocks a gripped screen.
     pub precise: bool,
     pub grip: f32,
+    /// The stick, for the gestures while gripping.
     pub scroll: (f32, f32),
+    /// The mouse on a screen, from Monadeck's bindings.
+    pub mouse: MouseInput,
+}
+
+/// What a hand's buttons do to the mouse this frame (Monadeck's own bindings,
+/// which only apply while its laser is on a screen: see
+/// [`DesktopViewer::mouse_context`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MouseInput {
+    pub click: bool,
+    pub right: bool,
+    pub middle: bool,
+    /// A left click that holds the cursor where it was pressed.
+    pub still: bool,
+    pub wheel: (f32, f32),
 }
 
 /// One row of the in-headset Desktop settings page.
@@ -200,6 +216,8 @@ pub struct InputOut {
     pub secondary_ray: Option<(xr::Posef, f32)>,
     /// Pointer on a screen's swap island: (screen index, u, v, trigger down).
     pub island_ptr: Option<(usize, f32, f32, bool)>,
+    /// A carried screen just snapped level: the hand carrying it (a tick).
+    pub level_snap: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -244,8 +262,10 @@ pub struct DesktopViewer {
     frozen: bool,
     hover_prev: Option<(f64, f64)>,
     select_prev: [bool; 2],
-    secondary_prev: [bool; 2],
+    mouse_prev: [MouseInput; 2],
     precise_prev: [bool; 2],
+    /// Each hand's laser was on a screen last frame.
+    on_screen: [bool; 2],
     clipboard: clipboard::ClipboardWatcher,
     pub gaze_pause: bool,
     pending_gpu_teardown: bool,
@@ -272,6 +292,9 @@ pub struct DesktopViewer {
     stash_kb_attached: Option<usize>,
     /// Restore screens tilted to the headset's pitch (else upright).
     pub restore_tilt: bool,
+    /// Snap a carried or restored screen exactly level within a few degrees.
+    pub level: bool,
+    grab_level: LevelSnap,
     /// While a docked group is gripped: the other members' poses relative to
     /// the gripped screen.
     grab_group: Vec<(usize, xr::Posef)>,
@@ -316,8 +339,6 @@ pub struct DesktopViewer {
     default_opacity: f32,
     /// Colour multiplier for every screen (brightness × warm tint).
     pub tint: [f32; 3],
-    /// B sends a middle click instead of a cursor-frozen left click.
-    pub b_middle: bool,
 }
 
 impl DesktopViewer {
@@ -366,8 +387,9 @@ impl DesktopViewer {
             frozen: false,
             hover_prev: None,
             select_prev: [false; 2],
-            secondary_prev: [false; 2],
+            mouse_prev: [MouseInput::default(); 2],
             precise_prev: [false; 2],
+            on_screen: [false; 2],
             clipboard: clipboard::ClipboardWatcher::new(),
             gaze_pause: true,
             pending_gpu_teardown: false,
@@ -385,6 +407,8 @@ impl DesktopViewer {
             stash_center: None,
             stash_kb_attached: None,
             restore_tilt: false,
+            level: true,
+            grab_level: LevelSnap::default(),
             grab_group: Vec::new(),
             grab_screen: None,
             keyboard_dock_pending: None,
@@ -404,7 +428,6 @@ impl DesktopViewer {
             default_curve: 0.0,
             default_opacity: 1.0,
             tint: [1.0; 3],
-            b_middle: false,
         }
     }
 
@@ -852,7 +875,10 @@ impl DesktopViewer {
         if let (Some(h), true) = (hmd, recentre_now) {
             if let Some((root, cx, dist)) = center {
                 // Menu logic: the group's centre lands in front of you.
-                let c = front_pose(h, dist, 0.0, 0.0, self.restore_tilt);
+                let mut c = front_pose(h, dist, 0.0, 0.0, self.restore_tilt);
+                if self.level {
+                    c = level_within(&c, LEVEL_SNAP).unwrap_or(c);
+                }
                 if root < self.screens.len() {
                     self.screens[root].pose = offset_pose(&c, -cx, 0.0, 0.0);
                     self.screens[root].placed = true;
@@ -861,6 +887,9 @@ impl DesktopViewer {
                 for (i, r) in &rel {
                     if let Some(s) = self.screens.get_mut(*i) {
                         s.pose = pose_compose(h, r);
+                        if self.level {
+                            s.pose = level_within(&s.pose, LEVEL_SNAP).unwrap_or(s.pose);
+                        }
                     }
                 }
             }
@@ -883,9 +912,15 @@ impl DesktopViewer {
         ToggleAll::Shown(valid.len() + kb as usize)
     }
 
-    /// Which hand the laser is on a screen/keyboard with this frame.
-    pub fn pointing_hand(&self) -> Option<usize> {
-        self.pointing.map(|(_, h)| h)
+    /// Per hand: its laser is on a screen, or it holds a mouse button down
+    /// there. Monadeck's mouse bindings apply to that hand, and the buttons
+    /// they use do nothing else on it.
+    pub fn mouse_context(&self) -> [bool; 2] {
+        let mut c = self.on_screen;
+        if let Some((h, _)) = self.held.filter(|(h, _)| *h < 2) {
+            c[h] = true;
+        }
+        c
     }
 
     /// Per-frame: where LOCAL sits in STAGE (None if the runtime has no STAGE).
@@ -1720,6 +1755,13 @@ impl DesktopViewer {
                             offset.position.z -= sy * PUSH_SPEED;
                         }
                         s.pose = pose_compose(&h.aim, &offset);
+                        if self.level {
+                            let snapped;
+                            (s.pose, snapped) = self.grab_level.apply(s.pose);
+                            if snapped {
+                                out.level_snap = Some(hand);
+                            }
+                        }
                     }
                     s.grab = Some((hand, offset));
                     // The rest of a docked group rides along rigidly.
@@ -1882,6 +1924,7 @@ impl DesktopViewer {
         let mouse_hand = (0..2usize)
             .filter(|&i| Some(i) != kb_hand && scr_hits[i].is_some())
             .min_by(|&a, &b| scr_hits[a].unwrap().3.total_cmp(&scr_hits[b].unwrap().3));
+        self.on_screen = [0, 1].map(|i| Some(i) != kb_hand && scr_hits[i].is_some());
 
         // Grip while pointing grabs the thing (a grabbed keyboard undocks).
         let mut grabbed = false;
@@ -1899,6 +1942,7 @@ impl DesktopViewer {
             } else if let Some((si, _, _, _)) = scr_hits[hi] {
                 self.layout_untouched = false;
                 self.screens[si].start_grab(hi, &aim);
+                self.grab_level.start(&self.screens[si].pose);
                 self.grab_screen = Some(si);
                 let root = self.screens[si].pose;
                 self.grab_group = self
@@ -1985,19 +2029,16 @@ impl DesktopViewer {
                             hid.mouse_move(x, y);
                             self.hover_prev = Some((x, y));
                         }
-                        // Clicks: rising edge of trigger / A / B on the pointing hand.
+                        // Clicks: whatever the bindings press on the pointing hand.
                         if self.held.is_none() {
-                            let (code, frozen) = if h.select && !self.select_prev[hi] {
+                            let (m, was) = (h.mouse, self.mouse_prev[hi]);
+                            let (code, frozen) = if m.click && !was.click {
                                 (Some(hid::BTN_LEFT), false)
-                            } else if h.precise && !self.precise_prev[hi] {
-                                // B: a click that never moves the cursor, or a
-                                // plain middle click (Desktop › Mouse).
-                                if self.b_middle {
-                                    (Some(hid::BTN_MIDDLE), false)
-                                } else {
-                                    (Some(hid::BTN_LEFT), true)
-                                }
-                            } else if h.secondary && !self.secondary_prev[hi] {
+                            } else if m.still && !was.still {
+                                (Some(hid::BTN_LEFT), true)
+                            } else if m.middle && !was.middle {
+                                (Some(hid::BTN_MIDDLE), false)
+                            } else if m.right && !was.right {
                                 (Some(hid::BTN_RIGHT), false)
                             } else {
                                 (None, false)
@@ -2012,8 +2053,8 @@ impl DesktopViewer {
                                 self.frozen = frozen;
                             }
                         }
-                        // Thumbstick scroll.
-                        let (sx, sy) = h.scroll;
+                        // The wheel (the stick, by default).
+                        let (sx, sy) = h.mouse.wheel;
                         if sx != 0.0 || sy != 0.0 {
                             let sp = SCROLL_BASE * self.scroll_speed;
                             hid.wheel(sx * sp, sy * sp);
@@ -2024,10 +2065,10 @@ impl DesktopViewer {
         // Release a held button when that hand lets go, wherever it points now.
         if let Some((hi, code)) = self.held {
             let still = hands.get(hi).is_some_and(|h| match (code, self.frozen) {
-                (hid::BTN_LEFT, true) => h.precise,
-                (hid::BTN_LEFT, false) => h.select,
-                (hid::BTN_RIGHT, _) => h.secondary,
-                (hid::BTN_MIDDLE, _) => h.precise,
+                (hid::BTN_LEFT, true) => h.mouse.still,
+                (hid::BTN_LEFT, false) => h.mouse.click,
+                (hid::BTN_RIGHT, _) => h.mouse.right,
+                (hid::BTN_MIDDLE, _) => h.mouse.middle,
                 _ => false,
             });
             if !still {
@@ -2042,13 +2083,14 @@ impl DesktopViewer {
         }
         for (i, h) in hands.iter().enumerate().take(2) {
             self.select_prev[i] = h.select;
-            self.secondary_prev[i] = h.secondary;
+            self.mouse_prev[i] = h.mouse;
             self.precise_prev[i] = h.precise;
         }
         if hands.is_empty() {
             self.select_prev = [false; 2];
-            self.secondary_prev = [false; 2];
+            self.mouse_prev = [MouseInput::default(); 2];
             self.precise_prev = [false; 2];
+            self.on_screen = [false; 2];
         }
         out
     }

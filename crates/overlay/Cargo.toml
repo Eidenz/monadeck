@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Same in-headset stack as monado-frame (proven on the user's Monado fork).
-openxr = { version = "0.21", features = ["linked"] }
+openxr = { version = "0.21", features = ["static"] }
 ash = "0.38"
 egui = "0.31"
 egui-phosphor = "0.9"
@@ -45,7 +45,7 @@ ashpd = { version = "0.13", default-features = false, features = ["tokio", "scre
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "macros"] }
 # The negotiated screencast stream is a PipeWire video node; frames arrive as
 # DMA-BUFs (zero-copy into Vulkan) or SHM (staging upload fallback).
-pipewire = { version = "0.10", features = ["v0_3_33", "v0_3_65"] }
+pipewire = { version = "0.10", features = ["v0_3_33"] }
 drm-fourcc = "2.2"
 # Virtual mouse + keyboard through /dev/uinput (works on every compositor —
 # KWin has no wlr virtual-pointer protocol, so this is the portable route).

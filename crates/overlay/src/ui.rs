@@ -8,6 +8,7 @@ use crate::gfx::{glyph, theme};
 
 // The tool pages (Settings, System, Desktop, Photos): a category list on the
 // left, cards on the right, all built from the shared `kit`.
+mod bindings_page;
 mod desktop_page;
 mod kit;
 mod photos_page;
@@ -22,6 +23,8 @@ pub enum Nav {
     Home,
     Library,
     Favorites,
+    /// Controller bindings: the games that have them, then one game's editor.
+    Bindings,
     /// Timer · Playspace · Monado, as tabs.
     System,
     Desktop,
@@ -56,6 +59,8 @@ pub enum SortMode {
 /// All mutable UI state for the launcher panel.
 pub struct LibState {
     pub games: Vec<LibGame>,
+    /// The controller-binding editor (its games, the open binding, file work).
+    pub binds: crate::bindings::BindState,
     pub scanning: bool,
     pub search: String,
     pub nav: Nav,
@@ -107,6 +112,7 @@ pub struct LibState {
     pub gaze_pause: bool,
     pub recenter_on_toggle: bool,
     pub screen_restore_tilt: bool,
+    pub screen_level: bool,
     pub keyboard_scale: f32,
     pub capture_max_fps: u32,
     pub capture_max_height: u32,
@@ -238,6 +244,7 @@ pub struct LibState {
     /// Whether protontricks-launch is installed — the UEVR UI is hidden if not.
     pub uevr_available: bool,
     pub summon_tilt: bool,
+    pub panel_level: bool,
     /// Panel placement comfort knobs (mirrored to/from the overlay config).
     pub panel_dist: f32,
     pub panel_scale: f32,
@@ -250,9 +257,11 @@ pub struct LibState {
     pub playspace_yaw: f32,
     pub playspace_step: f32,     // metres per nudge
     pub playspace_yaw_step: f32, // degrees per nudge
-    // Playspace drag (hold trackpad / A+B on gloves, move the hand).
+    // Playspace drag (hold its binding — trackpad / A+B by default — and move the hand).
     pub ps_drag_hands: String,  // both | left | right | off
-    pub ps_drag_button: String, // auto | pad | ab
+    pub ps_drag_button: String, // auto (the rest moved into Monadeck's own bindings)
+    /// What drives the drag, in words (from Monadeck's own bindings).
+    pub ps_drag_summary: String,
     pub ps_drag_vertical: bool,
     pub ps_drag_follow: bool,
     pub ps_drag_offset: [f32; 3], // live session offset from dragging (readout)
@@ -344,8 +353,8 @@ pub struct LibState {
     pub screen_warmth: f32,
     /// The runtime can scale layer colours (opacity, brightness, tint).
     pub desktop_color_scale: bool,
-    /// B on a screen sends a middle click (else a cursor-frozen left click).
-    pub mouse_b_middle: bool,
+    /// What the buttons do on a screen, in words (Monadeck's mouse bindings).
+    pub mouse_summary: String,
     /// The open category of each tool page.
     pub settings_tab: SettingsTab,
     pub desktop_tab: DesktopTab,
@@ -360,6 +369,7 @@ impl LibState {
     pub fn new() -> Self {
         Self {
             games: Vec::new(),
+            binds: crate::bindings::BindState::new(),
             scanning: true,
             search: String::new(),
             nav: Nav::Home,
@@ -401,6 +411,7 @@ impl LibState {
             gaze_pause: true,
             recenter_on_toggle: true,
             screen_restore_tilt: false,
+            screen_level: true,
             keyboard_scale: 1.0,
             capture_max_fps: 90,
             capture_max_height: 0,
@@ -504,6 +515,7 @@ impl LibState {
             uevr_delay: 30,
             uevr_available: false,
             summon_tilt: false,
+            panel_level: true,
             panel_dist: 1.5,
             panel_scale: 1.0,
             panel_curve: 1.0,
@@ -525,6 +537,7 @@ impl LibState {
             ps_game_clear_request: false,
             ps_drag_hands: "both".into(),
             ps_drag_button: "auto".into(),
+            ps_drag_summary: String::new(),
             ps_drag_vertical: true,
             ps_drag_follow: true,
             ps_drag_offset: [0.0; 3],
@@ -574,7 +587,7 @@ impl LibState {
             screen_brightness: 1.0,
             screen_warmth: 0.0,
             desktop_color_scale: false,
-            mouse_b_middle: false,
+            mouse_summary: String::new(),
             settings_tab: SettingsTab::Dashboard,
             desktop_tab: DesktopTab::Screens,
             photos_tab: PhotosTab::Gallery,
@@ -654,8 +667,10 @@ const TILE_CAPTION_H: f32 = 32.0;
 /// The main (centre) panel: search bar, the active view (or active-game splash),
 /// the on-screen keyboard, and the launching/fade overlays.
 pub fn build_main(ctx: &egui::Context, st: &mut LibState) {
-    // The game search only belongs on the game pages.
-    let searchable = !st.show_splash && !matches!(st.nav, Nav::Settings | Nav::System | Nav::Desktop | Nav::Photos);
+    // The game search only belongs on the game pages (and the binding list,
+    // not a binding being edited).
+    let editing_binding = st.nav == Nav::Bindings && st.binds.editor.is_some();
+    let searchable = !st.show_splash && !editing_binding && !matches!(st.nav, Nav::Settings | Nav::System | Nav::Desktop | Nav::Photos);
     if (searchable || st.naming) && st.keyboard_open {
         keyboard(ctx, st);
     }
@@ -718,6 +733,7 @@ pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
         go(ui, icon::HOUSE, "Home", Nav::Home);
         go(ui, icon::SQUARES_FOUR, "Library", Nav::Library);
         go(ui, icon::STAR, "Favorites", Nav::Favorites);
+        go(ui, icon::GAME_CONTROLLER, "Bindings", Nav::Bindings);
         // The tool pages pinned to the bottom (4 items + their spacing).
         let reserve = 4.0 * RAIL_ITEM_H + 3.0 * 6.0;
         ui.add_space((ui.available_height() - reserve).max(0.0));
@@ -1886,6 +1902,7 @@ fn central(ctx: &egui::Context, st: &mut LibState) {
             Nav::Home => home_view(ui, st),
             Nav::Library => library_view(ui, st),
             Nav::Favorites => favorites_view(ui, st),
+            Nav::Bindings => bindings_page::bindings_page(ui, st),
             Nav::System => {
                 st.visible_now.clear();
                 st.hovered_index = None;
@@ -2323,8 +2340,8 @@ const CONTROLS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("Left system button", "summon / dismiss the dashboard (it re-centres in front of you)"),
             ("Double-B (left hand)", "hide every screen + the keyboard, or bring them back"),
-            ("Hold trackpad, move hand", "drag the playspace (A + B on a UdCap glove) · System › Playspace › Drag"),
-            ("Trackpad twice", "snap the playspace back (A + B twice on a glove)"),
+            ("Hold trackpad, move hand", "drag the playspace (A + B on a glove or Touch controller) · rebind it in Bindings › Monadeck"),
+            ("Trackpad twice", "snap the playspace back (the same buttons, twice)"),
             ("Trigger", "click on the dashboard, the watch, the keyboard, photo windows"),
         ],
     ),
@@ -2334,8 +2351,8 @@ const CONTROLS: &[(&str, &[(&str, &str)])] = &[
             ("Point", "moves the mouse"),
             ("Trigger", "left click · keep holding and move past the drag threshold to drag"),
             ("A", "right click"),
-            ("B", "left click without moving the cursor (fiddly targets) · or a middle click (Desktop › Mouse)"),
-            ("Thumbstick", "scroll (speed in Desktop › Mouse)"),
+            ("B", "free by default, so double-B works here too · make it a middle click or a click that doesn't move the cursor in Bindings › Monadeck › Mouse"),
+            ("Thumbstick", "scroll (speed in Desktop › Mouse) · every button here is rebindable in Bindings › Monadeck › Mouse"),
             ("Grip", "move the screen (a docked group moves as one)"),
             ("Grip + trigger, push / pull", "resize"),
             ("Grip + stick up / down", "push it away / pull it closer"),
@@ -2466,6 +2483,7 @@ enum HeroAction {
     Stop,
     ToggleFavorite,
     ToggleUevr,
+    EditBindings,
 }
 
 const RUNNING_GREEN: egui::Color32 = egui::Color32::from_rgb(90, 220, 120);
@@ -2476,8 +2494,9 @@ fn hero(ui: &mut egui::Ui, st: &mut LibState) {
     let sel = st.selected.filter(|&i| i < st.games.len());
     let running = sel.is_some() && sel == st.running_index;
     let session = if running { st.session_minutes } else { None };
+    let bindable = sel.is_some_and(|i| st.binds.find(st.games[i].app_id.as_deref(), st.games[i].shortcut_id.as_deref()).is_some());
     let action = match sel {
-        Some(i) => hero_banner(ui, &st.games[i], running, session, st.uevr_available),
+        Some(i) => hero_banner(ui, &st.games[i], running, session, st.uevr_available, bindable),
         None => {
             hero_empty(ui);
             HeroAction::None
@@ -2488,6 +2507,14 @@ fn hero(ui: &mut egui::Ui, st: &mut LibState) {
         HeroAction::Stop => st.stop_request = sel,
         HeroAction::ToggleFavorite => st.favorite_toggle_request = sel,
         HeroAction::ToggleUevr => st.uevr_toggle_request = sel,
+        HeroAction::EditBindings => {
+            if let Some(g) = sel.and_then(|i| st.games.get(i)) {
+                let (app, shortcut) = (g.app_id.clone(), g.shortcut_id.clone());
+                st.binds.open_for(app, shortcut);
+                st.nav = Nav::Bindings;
+                st.sound_tab = true;
+            }
+        }
         HeroAction::None => {}
     }
 }
@@ -2495,7 +2522,7 @@ fn hero(ui: &mut egui::Ui, st: &mut LibState) {
 /// The selected game's banner: its hero art (or a name-tinted gradient while
 /// that loads, so the shape never jumps) under a scrim, badges on top, the
 /// logo or title and what's known about it bottom-left, actions bottom-right.
-fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, session: Option<u32>, uevr_available: bool) -> HeroAction {
+fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, session: Option<u32>, uevr_available: bool, bindable: bool) -> HeroAction {
     let w = ui.available_width();
     let h = (w * 0.24).clamp(200.0, 280.0);
     let (rect, base) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
@@ -2574,14 +2601,25 @@ fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, session: Option<u3
         .clicked();
 
     // VR-Mod (UEVR) toggle, only for Unreal Engine games we can inject.
+    let mut left_edge = star.left();
     let uevr_clicked = uevr_available && g.uevr_capable && {
         let r = egui::Rect::from_min_size(egui::pos2(star.left() - 12.0 - 124.0, play.top()), egui::vec2(124.0, 56.0));
+        left_edge = r.left();
         kit::glass_button(ui, r, base.id.with("uevr"), icon::VIRTUAL_REALITY, "UEVR", g.uevr, theme::PRIMARY)
             .on_hover_text(if g.uevr { "VR Mod on: launches through UEVR" } else { "Launch through UEVR (VR Mod)" })
             .clicked()
     };
+    // Its controller bindings, for games that use SteamVR Input.
+    let binds_clicked = bindable && {
+        let r = egui::Rect::from_min_size(egui::pos2(left_edge - 12.0 - 140.0, play.top()), egui::vec2(140.0, 56.0));
+        kit::glass_button(ui, r, base.id.with("binds"), icon::GAME_CONTROLLER, "Controls", false, theme::PRIMARY)
+            .on_hover_text("What each button does in this game")
+            .clicked()
+    };
 
-    if uevr_clicked {
+    if binds_clicked {
+        HeroAction::EditBindings
+    } else if uevr_clicked {
         HeroAction::ToggleUevr
     } else if star_clicked {
         HeroAction::ToggleFavorite

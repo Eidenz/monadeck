@@ -19,7 +19,7 @@ use pw::spa;
 use pw::spa::buffer::meta::{MetaHeader, MetaHeaderFlags};
 use pw::stream::{StreamFlags, StreamRc};
 use spa::buffer::DataType;
-use spa::param::video::{VideoFlags, VideoFormat, VideoInfoRaw};
+use spa::param::video::{VideoFormat, VideoInfoRaw};
 use spa::param::ParamType;
 use spa::pod::serialize::GenError;
 use spa::pod::{ChoiceValue, Object, Pod, Property, PropertyFlags, Value};
@@ -172,7 +172,9 @@ fn main_loop(
                         return;
                     }
                 };
-                let dmabuf = info.flags().contains(VideoFlags::MODIFIER);
+                // The raw bit: libspa only names it behind its `v0_3_65` feature,
+                // which also asks for things PipeWire 0.3.65 itself doesn't have.
+                let dmabuf = info.flags().bits() & spa::sys::SPA_VIDEO_FLAG_MODIFIER != 0;
                 format.modifier = if dmabuf { info.modifier() } else { MOD_INVALID };
                 log::info!(
                     "{name}: format {}x{} {} modifier 0x{:016x} ({})",

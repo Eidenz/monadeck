@@ -9,6 +9,7 @@
 
 mod a11y;
 mod audio;
+mod bindings;
 mod desktop;
 mod gamemode;
 mod gamepad;
@@ -42,7 +43,7 @@ use gfx::{
     cyl_layout, cylinder_layer, fill_laser, laser_quad, make_laser, make_panel, quad_layer,
     render_panel,
 };
-use mathx::{front_pose, locate_pose, offset_pose, pose_compose, pose_invert, posef, qf, quat_rotate, raycast, raycast_cylinder};
+use mathx::{front_pose, level_within, locate_pose, offset_pose, pose_compose, pose_invert, posef, qf, quat_rotate, raycast, raycast_cylinder};
 
 static VK_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
 
@@ -637,8 +638,10 @@ fn run() -> Result<()> {
             xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/force")?),
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick")?),
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
-            // Summon/dismiss is the LEFT system (menu) click only.
+            // The system buttons: the left one opens the dashboard by default,
+            // either can in Monadeck's own bindings.
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
+            xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/right/input/system/click")?),
             xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
             xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
             xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/left/input/b/click")?),
@@ -808,9 +811,12 @@ fn run() -> Result<()> {
     let mut collections = monadeck_core::collections::load();
 
     let mut st = ui::LibState::new();
+    // Games with controller bindings: a Steam walk, off the render thread.
+    st.binds.scan();
     st.audio_enabled = ov_cfg.audio_enabled;
     st.audio_volume = ov_cfg.audio_volume;
     st.summon_tilt = ov_cfg.summon_tilt;
+    st.panel_level = ov_cfg.panel_level;
     st.panel_dist = ov_cfg.panel_dist;
     st.panel_scale = ov_cfg.panel_scale;
     st.panel_curve = ov_cfg.panel_curve;
@@ -826,7 +832,6 @@ fn run() -> Result<()> {
     st.screen_spawn_dist = ov_cfg.screen_spawn_dist.clamp(0.6, 3.0);
     st.screen_brightness = ov_cfg.screen_brightness.clamp(0.2, 1.0);
     st.screen_warmth = ov_cfg.screen_warmth.clamp(0.0, 1.0);
-    st.mouse_b_middle = ov_cfg.mouse_b_middle;
     st.desktop_color_scale = color_scale;
     st.hold_pose_pref = ov_cfg.hold_pose_when_off;
     // Kept by the link and applied whenever Monado comes up.
@@ -834,7 +839,6 @@ fn run() -> Result<()> {
     desktop.set_defaults(st.screen_curve, st.screen_opacity);
     desktop.spawn_dist = st.screen_spawn_dist;
     desktop.tint = desktop::screen_tint(st.screen_brightness, st.screen_warmth);
-    desktop.b_middle = st.mouse_b_middle;
     st.restore_layout = ov_cfg.restore_layout;
     st.restore_layout_hidden = ov_cfg.restore_layout_hidden;
     st.scroll_speed = ov_cfg.scroll_speed.clamp(0.25, 4.0);
@@ -843,6 +847,8 @@ fn run() -> Result<()> {
     st.recenter_on_toggle = ov_cfg.recenter_on_toggle;
     st.screen_restore_tilt = ov_cfg.screen_restore_tilt;
     desktop.restore_tilt = ov_cfg.screen_restore_tilt;
+    st.screen_level = ov_cfg.screen_level;
+    desktop.level = ov_cfg.screen_level;
     st.capture_max_fps = ov_cfg.capture_max_fps;
     st.capture_max_height = ov_cfg.capture_max_height;
     st.skybox_enabled = ov_cfg.skybox_enabled;
@@ -868,6 +874,31 @@ fn run() -> Result<()> {
     st.watch_buttons = ov_cfg.watch_buttons.clone();
     st.keyboard_auto = ov_cfg.keyboard_auto;
     desktop.keyboard_auto = ov_cfg.keyboard_auto;
+    // The drag's Hands / Button settings became Monadeck's own bindings (1.8):
+    // carry a non-default choice over once, then drop it.
+    {
+        use monadeck_core::bindings::own;
+        let (hands, button) = (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone());
+        if button != "auto" || matches!(hands.as_str(), "left" | "right") {
+            if own::migrate_legacy(&hands, &button) {
+                log::info!("bindings: playspace drag settings (hands {hands}, button {button}) moved into Monadeck's bindings");
+            }
+            ov_cfg.ps_drag_button = "auto".into();
+            if hands != "off" {
+                ov_cfg.ps_drag_hands = "both".into();
+            }
+            ov_cfg.save();
+        }
+        // B as a middle click on a screen (Desktop › Mouse before 1.8) is a
+        // binding now; B does nothing there by default.
+        if ov_cfg.mouse_b_middle {
+            if own::migrate_b_middle() {
+                log::info!("bindings: B's middle click on screens moved into Monadeck's bindings");
+            }
+            ov_cfg.mouse_b_middle = false;
+            ov_cfg.save();
+        }
+    }
     st.ps_drag_hands = ov_cfg.ps_drag_hands.clone();
     st.ps_drag_button = ov_cfg.ps_drag_button.clone();
     st.ps_drag_vertical = ov_cfg.ps_drag_vertical;
@@ -930,12 +961,12 @@ fn run() -> Result<()> {
     let mut focused = false;
     let mut recenter = true;
     let mut visible = false; // default off — summon with a left system click
-    let mut sys_prev = false;
     let mut sys_active_prev = false; // system action active-state edge
     let mut last_active_change: Option<Instant> = None; // when is_active last flipped
     let mut blocked_prev = false; // game-input arbitration edge state
     // (hand index, controller->panel offset) while grabbing.
     let mut grab: Option<(usize, xr::Posef)> = None;
+    let mut grab_level = mathx::LevelSnap::default();
     let start = Instant::now(); // egui clock (animations)
     let mut summon_at: Option<Instant> = None; // summon fade-in
     // The active launch popup (own layer; persists after the dashboard closes).
@@ -958,8 +989,6 @@ fn run() -> Result<()> {
     // Laser fade over mirrored screens: (screen index, when the ray entered it).
     let mut screen_laser_since: Option<(usize, Instant)> = None;
     // Double-tap B on the LEFT controller toggles all screens (+ keyboard).
-    let mut left_b_prev = false;
-    let mut left_b_last: Option<Instant> = None;
     // Playspace drag (WayVR-style): hold the trackpad (A+B on a glove) and move
     // the hand; the world comes along. `drag_ps` is a session-only translation
     // on top of the configured offset; a double press snaps it back to zero.
@@ -968,9 +997,32 @@ fn run() -> Result<()> {
     let mut pad_prev = [false; 2];
     let mut pad_last: [Option<Instant>; 2] = [None; 2];
     let mut pad_suppressed = [false; 2]; // held after a double press: no drag until release
-    let mut glove_mode = [false; 2]; // this hand drags with A+B (its A/B clicks are then ignored)
-    // The hand's controller has no trackpad (Touch profile): auto drags with A+B.
-    let mut no_trackpad = [false; 2];
+    // Monadeck's own bindings (the playspace drag), per controller type, run
+    // against the raw inputs; reloaded when the editor saves them.
+    let mut own_docs: HashMap<&'static str, monadeck_core::bindings::BindingDoc> =
+        monadeck_core::bindings::own::CONTROLLERS.iter().map(|c| (c.ty, monadeck_core::bindings::own::load(c.ty))).collect();
+    let mut own_eval = monadeck_core::bindings::own::Evaluator::default();
+    // Each hand's controller type, from its interaction profile (gloves override).
+    let mut profile_ty: [&'static str; 2] = ["knuckles"; 2];
+    let mut own_summary_for: Option<(&'static str, &'static str)> = None;
+    // Monadeck's own bindings and the gamepad profiles reload as soon as their
+    // folders change (a save from the desktop editor, a hand edit): the kernel
+    // tells us. Without inotify (its per-user limit used up), look every 2 s.
+    let config_watch = match monadeck_core::watch::DirWatch::new(vec![monadeck_core::bindings::own::dir(), monadeck_core::gamepad_profiles::dir()]) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            log::warn!("watch: no change notifications ({e}), checking the config folders every 2 s instead");
+            None
+        }
+    };
+    let mut own_mtime = monadeck_core::bindings::own::dir_mtime();
+    let mut snap_prev = [false; 2];
+    // What Monadeck's own bindings drove last frame (edges: the dashboard, screens).
+    let mut dash_prev = false;
+    let mut screens_prev = false;
+    let mut own_act: monadeck_core::bindings::own::Active;
+    // The system buttons as last read (with the settle guard below).
+    let mut sys_raw = [false; 2];
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     let mut kb_hover_prev: [Option<usize>; 2] = [None, None]; // key under each hand (typing haptics)
     // Re-scan to refresh last-played ordering when a game starts/stops.
@@ -1011,7 +1063,15 @@ fn run() -> Result<()> {
                 InteractionProfileChanged(_) => {
                     for (hi, path) in [left_path, right_path].into_iter().enumerate() {
                         let profile = session.current_interaction_profile(path).unwrap_or(xr::Path::NULL);
-                        no_trackpad[hi] = profile == touch_profile;
+                        // The binding editor opens games on the controller in hand, and
+                        // Monadeck's own bindings follow each hand's.
+                        if profile == index_profile {
+                            st.binds.holding = Some("knuckles");
+                            profile_ty[hi] = "knuckles";
+                        } else if profile == touch_profile {
+                            st.binds.holding = Some("oculus_touch");
+                            profile_ty[hi] = "oculus_touch";
+                        }
                         let name = if profile == xr::Path::NULL { "none".into() } else { xr_instance.path_to_string(profile).unwrap_or_default() };
                         log::info!("input: hand {hi} uses {name}");
                     }
@@ -1135,12 +1195,12 @@ fn run() -> Result<()> {
         // Live "this session" minutes for the splash.
         st.session_minutes = session_start.map(|s| (s.elapsed().as_secs() / 60) as u32);
 
-        // --- Sync actions + summon/dismiss (left system click, rising edge) --
+        // --- Sync actions; the system buttons for Monadeck's own bindings ------
+        let mut settled = true;
         if focused {
             session.sync_actions(&[(&action_set).into()])?;
             let sl = system_action.state(&session, left_path)?;
             let sys_active = sl.is_active;
-            let sys_down = sl.is_active && sl.current_state;
             // Another overlay (e.g. WayVR) blocking/unblocking our input as your
             // cursor enters/leaves its window flips the action's `is_active`, which
             // can fake a system press — so ignore press edges for a moment around
@@ -1149,21 +1209,13 @@ fn run() -> Result<()> {
                 sys_active_prev = sys_active;
                 last_active_change = Some(Instant::now());
             }
-            let settled = last_active_change.map_or(true, |t| t.elapsed().as_millis() > 150);
-            if sys_down && !sys_prev && settled {
-                visible = !visible;
-                if visible {
-                    recenter = true; // reappear in front of the head
-                    summon_at = Some(Instant::now());
-                    // Auto-select the running game, if any (SteamVR-style).
-                    if let Some(app) = &running {
-                        if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, app)) {
-                            st.selected = Some(i);
-                        }
-                    }
-                }
+            settled = last_active_change.map_or(true, |t| t.elapsed().as_millis() > 150);
+            for (hi, path) in [left_path, right_path].into_iter().enumerate() {
+                let st_ = system_action.state(&session, path)?;
+                sys_raw[hi] = st_.is_active && st_.current_state;
             }
-            sys_prev = sys_down;
+        } else {
+            sys_raw = [false; 2];
         }
 
         // --- Timer, low-battery warning, toasts (run even while hidden) ------
@@ -1555,10 +1607,11 @@ fn run() -> Result<()> {
                     aim: located.unwrap_or(xr::Posef::IDENTITY),
                     path,
                     select: select_action.state(&session, path)?.current_state > 0.5,
-                    secondary: secondary_action.state(&session, path)?.current_state,
                     precise: precise_action.state(&session, path)?.current_state,
                     grip: grab_action.state(&session, path)?.current_state,
                     scroll: deadzone(s.x, s.y),
+                    // Filled from Monadeck's bindings below.
+                    mouse: desktop::MouseInput::default(),
                 });
             }
         }
@@ -1577,7 +1630,7 @@ fn run() -> Result<()> {
                     grip: h.grip,
                     stick: (stick.x, stick.y),
                     stick_click: stick_click_action.state(&session, path)?.current_state,
-                    a: h.secondary,
+                    a: secondary_action.state(&session, path)?.current_state,
                     b: h.precise,
                     pad: (tp.x, tp.y),
                     pad_force: pad_action.state(&session, path)?.current_state,
@@ -1589,32 +1642,81 @@ fn run() -> Result<()> {
         let local_in_stage = stage_space.as_ref().and_then(|st| locate_pose(&space, st, time));
         desktop.set_local_in_stage(local_in_stage);
 
-        // --- Playspace drag: hold trackpad (A+B on a glove), move the hand -----
+        // --- Playspace drag: hold its binding (trackpad; A+B on a glove), move the hand
         {
+            use monadeck_core::bindings::{own, Hand as BHand};
             let gloves = monado.gloves();
             st.gloves = gloves;
-            let allowed = match st.ps_drag_hands.as_str() {
-                "off" => [false, false],
-                "left" => [true, false],
-                "right" => [false, true],
-                _ => [true, true],
-            };
-            // While gaming the trackpad is the d-pad / Start / Back.
-            let allowed = if game.enabled && !visible { [false, false] } else { allowed };
-            let drag_button = st.ps_drag_button.clone();
+            st.binds.gloves = gloves.0 || gloves.1;
+            if st.binds.own_changed {
+                st.binds.own_changed = false;
+                own_docs = own::CONTROLLERS.iter().map(|c| (c.ty, own::load(c.ty))).collect();
+                own_eval.reset();
+                own_summary_for = None;
+                log::info!("bindings: Monadeck's own bindings reloaded");
+            }
+            let glove = [gloves.0, gloves.1];
+            let tys = [0, 1].map(|hi| if glove[hi] { own::GLOVES } else { profile_ty[hi] });
+            // What the Playspace page says drives it (for the controller the editor would open).
+            let shown_ty = if gloves.0 || gloves.1 { own::GLOVES } else { tys[0] };
+            if own_summary_for != Some((shown_ty, tys[1])) {
+                own_summary_for = Some((shown_ty, tys[1]));
+                if let (Some(doc), Some(ctrl)) = (own_docs.get(shown_ty), own::controller(shown_ty)) {
+                    st.ps_drag_summary = own::summary(doc, ctrl, own::MOVE);
+                    st.mouse_summary = own::mouse_summary(doc, ctrl);
+                }
+            }
+            let input = [0, 1].map(|hi| {
+                let r = &raw[hi];
+                own::HandInput {
+                    active: r.active,
+                    trigger: r.trigger,
+                    grip: r.grip,
+                    stick: r.stick,
+                    stick_click: r.stick_click,
+                    a: r.a,
+                    b: r.b,
+                    pad: r.pad,
+                    pad_force: r.pad_force,
+                    pad_touch: r.pad_touch,
+                    system: sys_raw[hi],
+                }
+            });
+            let docs = [&own_docs[tys[0]], &own_docs[tys[1]]];
+            own_act = own_eval.eval(docs, input, desktop.mouse_context(), Instant::now());
+            let act = &own_act;
+            // Open / close the dashboard (its binding; the left system button by default).
+            let dash = act.any(own::DASHBOARD);
+            if dash && !dash_prev && settled {
+                visible = !visible;
+                if visible {
+                    recenter = true; // reappear in front of the head
+                    summon_at = Some(Instant::now());
+                    // Auto-select the running game, if any (SteamVR-style).
+                    if let Some(app) = &running {
+                        if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, app)) {
+                            st.selected = Some(i);
+                        }
+                    }
+                }
+            }
+            dash_prev = dash;
+            // Off, or gaming (the trackpad is the d-pad / Start / Back there).
+            let enabled = st.ps_drag_hands != "off" && !(game.enabled && !visible);
             let stage_pos = |p: &xr::Posef| {
                 let q = local_in_stage.as_ref().map_or(*p, |l| pose_compose(l, p));
                 [q.position.x, q.position.y, q.position.z]
             };
             let mut pressed = [false; 2];
             for (hi, h) in hands.iter().enumerate().take(2) {
-                glove_mode[hi] = match drag_button.as_str() {
-                    "pad" => false,
-                    "ab" => true,
-                    _ => (if hi == 0 { gloves.0 } else { gloves.1 }) || no_trackpad[hi],
-                };
-                let pad = pad_action.state(&session, h.path)?.current_state > 0.5;
-                pressed[hi] = h.active && allowed[hi] && if glove_mode[hi] { h.secondary && h.precise } else { pad };
+                let bhand = if hi == 0 { BHand::Left } else { BHand::Right };
+                pressed[hi] = h.active && enabled && act.has(bhand, own::MOVE);
+                // "Snap it back", when something's bound to it.
+                let snap = h.active && enabled && act.has(bhand, own::SNAP);
+                if snap && !snap_prev[hi] {
+                    st.ps_drag_reset_request = true;
+                }
+                snap_prev[hi] = snap;
                 if pressed[hi] && !pad_prev[hi] {
                     let double = pad_last[hi].is_some_and(|t| t.elapsed().as_millis() < 450);
                     pad_last[hi] = Some(Instant::now());
@@ -1702,10 +1804,18 @@ fn run() -> Result<()> {
                 }
             }
             st.ps_drag_offset = drag_ps;
-            // A glove hand dragging with A+B must not also click / toggle.
+            // The mouse on a screen, as bound. B held in a chord (A+B
+            // dragging) mustn't also undock a gripped screen.
             for (hi, h) in hands.iter_mut().enumerate().take(2) {
-                if glove_mode[hi] && h.secondary && h.precise {
-                    h.secondary = false;
+                let bh = if hi == 0 { BHand::Left } else { BHand::Right };
+                h.mouse = desktop::MouseInput {
+                    click: act.has(bh, own::CLICK),
+                    right: act.has(bh, own::RIGHT_CLICK),
+                    middle: act.has(bh, own::MIDDLE_CLICK),
+                    still: act.has(bh, own::STILL_CLICK),
+                    wheel: act.vector(bh, own::SCROLL),
+                };
+                if act.chorded[hi].iter().any(|i| matches!(i.as_str(), "b" | "y")) {
                     h.precise = false;
                 }
             }
@@ -2110,16 +2220,26 @@ fn run() -> Result<()> {
             st.game_profile = game.profile_name().to_string();
             st.flash(format!("{} profiles loaded", st.game_profiles.len()));
         }
-        if profiles_check_at.elapsed().as_secs_f32() > 2.0 {
-            profiles_check_at = Instant::now();
-            let m = monadeck_core::gamepad_profiles::dir_mtime();
-            if m != profiles_mtime {
-                profiles_mtime = m;
-                game.reload_profiles();
-                st.game_profiles = game.profile_names();
-                st.game_profile = game.profile_name().to_string();
-                log::info!("gaming: profiles changed on disk, {} loaded", st.game_profiles.len());
+        let (own_changed, profiles_changed) = match &config_watch {
+            Some(w) => (w.changed(0), w.changed(1)),
+            None if profiles_check_at.elapsed().as_secs_f32() > 2.0 => {
+                profiles_check_at = Instant::now();
+                let (o, p) = (monadeck_core::bindings::own::dir_mtime(), monadeck_core::gamepad_profiles::dir_mtime());
+                let changed = (o != own_mtime, p != profiles_mtime);
+                (own_mtime, profiles_mtime) = (o, p);
+                changed
             }
+            None => (false, false),
+        };
+        if own_changed {
+            st.binds.own_changed = true;
+            st.binds.refresh_own();
+        }
+        if profiles_changed {
+            game.reload_profiles();
+            st.game_profiles = game.profile_names();
+            st.game_profile = game.profile_name().to_string();
+            log::info!("gaming: profiles changed on disk, {} loaded", st.game_profiles.len());
         }
         // The handheld size can change from the slider or from a resize gesture.
         if st.game_handheld_width != handheld_width_prev {
@@ -2178,31 +2298,30 @@ fn run() -> Result<()> {
                 summon_at = Some(Instant::now());
             }
         }
-        // Double-B (left): hide every shown screen / bring the same set back.
-        // Ignored while that hand is pointing at a screen (B = frozen click there).
-        let left_b = hands.first().is_some_and(|h| h.active && h.precise && !(glove_mode[0] && h.secondary));
-        if left_b && !left_b_prev && desktop.pointing_hand() != Some(0) {
-            let double = left_b_last.is_some_and(|t| t.elapsed().as_millis() < 450);
-            if double {
-                left_b_last = None;
-                match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
-                    desktop::ToggleAll::Hidden(n) => {
-                        log::info!("desktop: double-B hid {n} item(s)");
-                        audio.tab();
-                    }
-                    desktop::ToggleAll::Shown(n) => {
-                        log::info!("desktop: double-B restored {n} item(s)");
-                        audio.tab();
-                    }
-                    desktop::ToggleAll::Nothing => {
-                        toasts.push(toast::Toast::new(toast::Kind::Info, "No screen selected", "Show screens from the watch or the bottom bar").secs(2.5));
-                    }
+        // Hide every shown screen / bring the same set back: Monadeck's own
+        // binding (double left B by default). Not for a hand turned into a
+        // gamepad; on a screen, only if the mouse doesn't use its button (the
+        // evaluator sees to that).
+        let screens = [0, 1].into_iter().any(|hi| {
+            let bhand = if hi == 0 { monadeck_core::bindings::Hand::Left } else { monadeck_core::bindings::Hand::Right };
+            own_act.has(bhand, monadeck_core::bindings::own::SCREENS) && hands.get(hi).is_some_and(|h| h.active)
+        });
+        if screens && !screens_prev {
+            match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
+                desktop::ToggleAll::Hidden(n) => {
+                    log::info!("desktop: screens binding hid {n} item(s)");
+                    audio.tab();
                 }
-            } else {
-                left_b_last = Some(Instant::now());
+                desktop::ToggleAll::Shown(n) => {
+                    log::info!("desktop: screens binding restored {n} item(s)");
+                    audio.tab();
+                }
+                desktop::ToggleAll::Nothing => {
+                    toasts.push(toast::Toast::new(toast::Kind::Info, "No screen selected", "Show screens from the watch or the bottom bar").secs(2.5));
+                }
             }
         }
-        left_b_prev = left_b;
+        screens_prev = screens;
 
         // Watch buttons must work with the dashboard dismissed, so these
         // requests drain here rather than in the visible-only path below.
@@ -2445,6 +2564,10 @@ fn run() -> Result<()> {
         if recenter {
             if let Some(h) = hmd {
                 anchor = front_pose(&h, dist, 0.0, 0.0, st.summon_tilt);
+                // Tilted with a straight-enough head: exactly level.
+                if st.panel_level {
+                    anchor = level_within(&anchor, mathx::LEVEL_SNAP).unwrap_or(anchor);
+                }
                 recenter = false;
             }
         }
@@ -2479,6 +2602,13 @@ fn run() -> Result<()> {
                     grab = None;
                 } else if let Some(p) = locate_pose(aim, &space, time) {
                     anchor = pose_compose(&p, &offset);
+                    if st.panel_level {
+                        let snapped;
+                        (anchor, snapped) = grab_level.apply(anchor);
+                        if snapped {
+                            pulse(&session, &haptic_action, path, 0.2, 8);
+                        }
+                    }
                 }
             }
 
@@ -2513,6 +2643,7 @@ fn run() -> Result<()> {
                     let grip = grab_action.state(&session, path)?.current_state;
                     if grip > GRAB_START && pointing {
                         grab = Some((idx, pose_compose(&pose_invert(&p), &anchor)));
+                        grab_level.start(&anchor);
                         best = None;
                         break;
                     }
@@ -2554,6 +2685,9 @@ fn run() -> Result<()> {
         let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t))).or(mini_hit.map(|(t, _, aim)| (aim, t)));
         if let Some(g) = d_in.gesture {
             toasts.readout(g.title, g.body, g.pose);
+        }
+        if let Some(h) = d_in.level_snap.and_then(|i| hands.get(i)) {
+            pulse(&session, &haptic_action, h.path, 0.2, 8);
         }
         if d_ray.is_some() {
             best = None;
@@ -2897,6 +3031,7 @@ fn run() -> Result<()> {
             desktop.set_width(st.screen_width_m);
             desktop.gaze_pause = st.gaze_pause;
             desktop.restore_tilt = st.screen_restore_tilt;
+            desktop.level = st.screen_level;
             desktop.set_capture_limits(st.capture_max_fps, st.capture_max_height);
             desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
             desktop.scroll_speed = st.scroll_speed;
@@ -2904,7 +3039,6 @@ fn run() -> Result<()> {
             desktop.set_defaults(st.screen_curve, st.screen_opacity);
             desktop.spawn_dist = st.screen_spawn_dist;
             desktop.tint = desktop::screen_tint(st.screen_brightness, st.screen_warmth);
-            desktop.b_middle = st.mouse_b_middle;
             game.rumble_enabled = st.game_rumble;
             if st.game_hide_pad != hide_pad_prev {
                 hide_pad_prev = st.game_hide_pad;
@@ -3013,8 +3147,10 @@ fn run() -> Result<()> {
             st.collections = collections.iter().map(|c| c.name.clone()).collect();
             apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
         }
+        st.binds.poll();
         if st.refresh_request {
             st.refresh_request = false;
+            st.binds.scan();
             if refresh_rx.is_none() {
                 refresh_rx = Some(games::spawn_scan());
                 manual_refresh = true;
@@ -3228,6 +3364,7 @@ fn overlay_config_from(
         audio_enabled: st.audio_enabled,
         audio_volume: st.audio_volume,
         summon_tilt: st.summon_tilt,
+        panel_level: st.panel_level,
         panel_dist: st.panel_dist,
         panel_scale: st.panel_scale,
         panel_curve: st.panel_curve,
@@ -3245,7 +3382,7 @@ fn overlay_config_from(
         screen_spawn_dist: st.screen_spawn_dist,
         screen_brightness: st.screen_brightness,
         screen_warmth: st.screen_warmth,
-        mouse_b_middle: st.mouse_b_middle,
+        mouse_b_middle: false,
         screen_order: screen_order.to_vec(),
         restore_layout: st.restore_layout,
         restore_layout_hidden: st.restore_layout_hidden,
@@ -3264,6 +3401,7 @@ fn overlay_config_from(
         gaze_pause: st.gaze_pause,
         recenter_on_toggle: st.recenter_on_toggle,
         screen_restore_tilt: st.screen_restore_tilt,
+        screen_level: st.screen_level,
         keyboard_scale: st.keyboard_scale,
         capture_max_fps: st.capture_max_fps,
         capture_max_height: st.capture_max_height,

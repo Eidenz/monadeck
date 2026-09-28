@@ -1,5 +1,6 @@
 //! Download + install the "built-in" runtimes: our portable Monado fork build
-//! and xrizer, straight from their GitHub Releases.
+//! and our xrizer fork (it reloads a game's bindings while it runs, so the
+//! binding editor applies at once), straight from their GitHub Releases.
 //!
 //! This is what powers the "no Monado found -> Install built-in" flow. It does
 //! NOT build anything (that's the fork's CI); it fetches the prebuilt, portable
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MONADO_REPO: &str = "Eidenz/Monado";
-const XRIZER_REPO: &str = "Supreeeme/xrizer";
+const XRIZER_REPO: &str = "Eidenz/xrizer";
 const BSB_CAMS_REPO: &str = "Eidenz/go-bsb-cams";
 
 /// What an install produced, handed back so the caller can update config.

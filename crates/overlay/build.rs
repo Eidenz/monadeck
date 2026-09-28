@@ -1,31 +1,7 @@
-// The Khronos OpenXR loader ships as `libopenxr_loader.so.1` without the
-// unversioned `libopenxr_loader.so` dev symlink, so the `-lopenxr_loader` the
-// `openxr` crate's `linked` feature emits can't resolve at link time (runtime
-// is fine — it's registered with ldconfig). Drop a symlink into OUT_DIR and add
-// it to the link search path. Mirrors monado-frame's build.rs.
-use std::path::Path;
+// The OpenXR loader is built in (`openxr`'s `static` feature): nothing to find
+// on the system at build or run time.
 
 fn main() {
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let link = Path::new(&out_dir).join("libopenxr_loader.so");
-
-    let candidates = [
-        "/usr/lib64/libopenxr_loader.so.1",
-        "/lib64/libopenxr_loader.so.1",
-        "/usr/lib/x86_64-linux-gnu/libopenxr_loader.so.1",
-        "/usr/lib/libopenxr_loader.so.1",
-    ];
-
-    if !link.exists() {
-        for c in candidates {
-            if Path::new(c).exists() {
-                let _ = std::os::unix::fs::symlink(c, &link);
-                break;
-            }
-        }
-    }
-
-    println!("cargo:rustc-link-search=native={out_dir}");
     bake_env("translate.env", &[("base_url", "MD_TRANSLATE_BASE_URL"), ("model", "MD_TRANSLATE_MODEL"), ("api_key", "MD_TRANSLATE_API_KEY")]);
     bake_env("picsur.env", &[("base_url", "MD_PICSUR_BASE_URL"), ("api_key", "MD_PICSUR_API_KEY")]);
 }

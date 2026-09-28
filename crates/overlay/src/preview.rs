@@ -12,6 +12,8 @@ use anyhow::Result;
 use crate::gfx::{apply_style, theme, PPP};
 use crate::toast::{Kind, Source, Toast, Toasts};
 
+mod bindings;
+
 /// The toast panel's pixel size (see `make_panel` in main).
 const PX: (usize, usize) = (960, 280);
 /// The minimal watch's.
@@ -254,6 +256,7 @@ pub fn run(dir: &Path) -> Result<()> {
     }
     pages(&ctx, &mut textures, dir)?;
     dashboard(&ctx, &mut textures, dir)?;
+    bindings::shots(&ctx, &mut textures, dir)?;
     // Only on request: reads your Steam library's art.
     if std::env::var("MONADECK_PREVIEW_ONLY").is_ok_and(|f| f.contains("readme")) {
         readme(&ctx, &mut textures, dir)?;
@@ -774,6 +777,45 @@ fn shoot(
     build: impl FnMut(&egui::Context),
 ) -> image::RgbaImage {
     shoot_over(ctx, textures, px, frames, false, build)
+}
+
+/// `shoot` with the pointer resting at `pointer` (points) — hover states.
+fn shoot_with(
+    ctx: &egui::Context,
+    textures: &mut HashMap<egui::TextureId, Tex>,
+    px: (usize, usize),
+    frames: usize,
+    pointer: Option<egui::Pos2>,
+    mut build: impl FnMut(&egui::Context),
+) -> image::RgbaImage {
+    // Pointer history must never see time go back: these shots share a clock
+    // that only moves on (from well past the other shots' 10 s start).
+    static CLOCK: std::sync::Mutex<f64> = std::sync::Mutex::new(1000.0);
+    let start = {
+        let mut c = CLOCK.lock().unwrap();
+        let t = *c;
+        *c += frames as f64 * 0.05 + 1.0;
+        t
+    };
+    let mut last = None;
+    for f in 0..frames {
+        let mut input = screen_input(px, start + f as f64 * 0.05);
+        input.events.push(match pointer {
+            Some(p) => egui::Event::PointerMoved(p),
+            None => egui::Event::PointerGone,
+        });
+        let out = ctx.run(input, |ctx| build(ctx));
+        for (id, delta) in &out.textures_delta.set {
+            apply_delta(textures, *id, delta);
+        }
+        for id in &out.textures_delta.free {
+            textures.remove(id);
+        }
+        last = Some(out);
+    }
+    let out = last.expect("at least one frame");
+    let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+    rasterise_over(&prims, textures, out.pixels_per_point, px, false)
 }
 
 /// `shoot`, optionally without a backdrop (straight alpha, for compositing).

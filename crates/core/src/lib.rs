@@ -13,10 +13,12 @@
 //! - [`survive_calibration`] — import SteamVR calibration into libsurvive (survive driver).
 //! - [`devices`] — live device list via libmonado (`auto_connect`).
 //! - [`wivrn`] — the WiVRn backend: detect the server, drive it over D-Bus.
+//! - [`bindings`] — games' controller bindings, as xrizer reads and overrides them.
 //! - [`plugins`] — launch arbitrary apps by explicit path alongside the service.
 //! - [`config`] / [`paths`] — persisted settings and well-known file locations.
 
 pub mod active_runtime;
+pub mod bindings;
 pub mod cmd_runner;
 pub mod collections;
 pub mod config;
@@ -45,6 +47,7 @@ pub mod steamvr;
 pub mod survive_calibration;
 pub mod uevr;
 pub mod vr_games;
+pub mod watch;
 pub mod wivrn;
 
 pub use config::MonadeckConfig;
