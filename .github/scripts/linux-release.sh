@@ -45,7 +45,10 @@ build() {
 
   local version
   version=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' desktop/src-tauri/tauri.conf.json)
-  if [ "${GITHUB_REF_TYPE:-}" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+  # v1.8 for 1.8.0, v1.7.1 for 1.7.1.
+  local tag=${GITHUB_REF_NAME:-}
+  tag=${tag#v}
+  if [ "${GITHUB_REF_TYPE:-}" = tag ] && [ "$tag" != "$version" ] && [ "$tag.0" != "$version" ]; then
     echo "Tag ${GITHUB_REF_NAME} doesn't match the app version ${version} (tauri.conf.json)" >&2
     exit 1
   fi
