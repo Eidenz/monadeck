@@ -167,6 +167,17 @@ fn personal(ty: &str) -> Option<BindingDoc> {
     Some(doc)
 }
 
+/// When the bindings folder last changed (the overlay reloads on a change,
+/// e.g. a save from the desktop editor).
+pub fn dir_mtime() -> Option<std::time::SystemTime> {
+    std::fs::read_dir(dir())
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .chain(std::fs::metadata(dir()).ok().and_then(|m| m.modified().ok()))
+        .max()
+}
+
 pub fn has_personal(ty: &str) -> bool {
     path(ty).is_some_and(|p| p.is_file())
 }

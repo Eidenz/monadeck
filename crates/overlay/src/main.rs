@@ -994,6 +994,8 @@ fn run() -> Result<()> {
     // Each hand's controller type, from its interaction profile (gloves override).
     let mut profile_ty: [&'static str; 2] = ["knuckles"; 2];
     let mut own_summary_for: Option<(&'static str, &'static str)> = None;
+    // The bindings folder's last change: a save from the desktop editor reloads them too.
+    let mut own_mtime = monadeck_core::bindings::own::dir_mtime();
     let mut snap_prev = [false; 2];
     // What Monadeck's own bindings drove last frame (edges: the dashboard, screens).
     let mut dash_prev = false;
@@ -2193,6 +2195,12 @@ fn run() -> Result<()> {
         }
         if profiles_check_at.elapsed().as_secs_f32() > 2.0 {
             profiles_check_at = Instant::now();
+            let m = monadeck_core::bindings::own::dir_mtime();
+            if m != own_mtime {
+                own_mtime = m;
+                st.binds.own_changed = true;
+                st.binds.refresh_own();
+            }
             let m = monadeck_core::gamepad_profiles::dir_mtime();
             if m != profiles_mtime {
                 profiles_mtime = m;

@@ -282,6 +282,11 @@ impl BindState {
         }
     }
 
+    /// Re-read which of Monadeck's own bindings are personal (changed on disk).
+    pub fn refresh_own(&mut self) {
+        self.own_personal = own_personal();
+    }
+
     /// (Re)scan the libraries for games with bindings.
     pub fn scan(&mut self) {
         self.own_personal = own_personal();

@@ -6,7 +6,8 @@ land on whole pixels instead of being resampled.
 Each drawing is of a RIGHT controller; the editor mirrors it for the left.
 The Touch drawing has its B / A letters and the Oculus logo stripped (the
 last paths of the file): mirrored they'd read backwards, so the editor paints
-X / Y and A / B itself.
+X / Y and A / B itself. The desktop editor draws the SVGs directly; its
+letterless Touch one (`oculus_touch_right_blank.svg`) is written here too.
 
     python3 build_art.py      # needs inkscape; rewrites the PNGs next to it
 """
@@ -36,6 +37,11 @@ def strip_touch_letters(svg):
 
 
 def main():
+    with open(os.path.join(SRC, "oculus_touch_right.svg")) as f:
+        blank = strip_touch_letters(f.read())
+    with open(os.path.join(SRC, "oculus_touch_right_blank.svg"), "w") as f:
+        f.write(blank)
+    print("wrote oculus_touch_right_blank.svg")
     for src, out, flag, px in ART:
         with open(os.path.join(SRC, src)) as f:
             svg = f.read()

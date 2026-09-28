@@ -523,7 +523,8 @@ fn input_section(ui: &mut egui::Ui, e: &mut Editor, hand: Hand, id: &str, label:
             })
             .collect();
         let text = if others.is_empty() { e.manifest.action_name(&c.action) } else { format!("{}  ·  with {}", e.manifest.action_name(&c.action), others.join(" + ")) };
-        if chord_row(ui, &text).clicked() {
+        // A game's chords are only shown: xrizer doesn't read them.
+        if chord_row(ui, &text, !e.own()).clicked() && e.own() {
             e.popup = Some(Popup::Chords);
         }
         chorded = true;
@@ -539,18 +540,31 @@ fn input_section(ui: &mut egui::Ui, e: &mut Editor, hand: Hand, id: &str, label:
     fr.anchors.push((key, anchor, ui.is_rect_visible(rect.shrink(8.0))));
 }
 
-/// A chord an input is in, under its entry: tapping opens the chords.
-fn chord_row(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), Sense::click());
-    let h = kit::hover_t(ui, &resp);
+/// A chord an input is in, under its entry: tapping opens the chords. An
+/// `ignored` one (a game's: xrizer doesn't read chords) is only shown, flagged.
+fn chord_row(ui: &mut egui::Ui, text: &str, ignored: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), if ignored { Sense::hover() } else { Sense::click() });
+    let h = if ignored { 0.0 } else { kit::hover_t(ui, &resp) };
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(14), kit::mix(theme::SURFACE_CONTAINER, Color32::from_rgb(40, 52, 60), h * 0.6));
     p.text(Pos2::new(rect.left() + 16.0, rect.center().y), Align2::LEFT_CENTER, "CHORD", FontId::proportional(12.5), theme::ON_SURFACE_VAR);
-    p.text(Pos2::new(rect.left() + 76.0, rect.center().y), Align2::CENTER_CENTER, icon::LINK_SIMPLE, FontId::proportional(15.0), theme::PRIMARY);
-    let g = kit::fit_text(ui, text, 15.0, Color32::WHITE, rect.width() - 130.0);
-    ui.painter().galley(Pos2::new(rect.left() + 96.0, rect.center().y - g.size().y / 2.0), g, Color32::WHITE);
-    ui.painter().text(Pos2::new(rect.right() - 16.0, rect.center().y), Align2::CENTER_CENTER, icon::CARET_RIGHT, FontId::proportional(13.0), kit::alpha(theme::ON_SURFACE_VAR, 0.4 + 0.6 * h));
-    resp.on_hover_text("Buttons held together")
+    let fg = if ignored { theme::ON_SURFACE_VAR } else { Color32::WHITE };
+    let mut right = rect.right() - 16.0;
+    if ignored {
+        let g = p.layout_no_wrap("xrizer ignores this".to_string(), FontId::proportional(11.5), AMBER);
+        let r = Rect::from_min_size(Pos2::new(right - g.size().x - 16.0, rect.center().y - 10.0), egui::vec2(g.size().x + 16.0, 20.0));
+        p.rect_filled(r, CornerRadius::same(10), kit::alpha(AMBER, 0.16));
+        p.galley(Pos2::new(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, AMBER);
+        right = r.left() - 10.0;
+    } else {
+        p.text(Pos2::new(rect.left() + 76.0, rect.center().y), Align2::CENTER_CENTER, icon::LINK_SIMPLE, FontId::proportional(15.0), theme::PRIMARY);
+        p.text(Pos2::new(right, rect.center().y), Align2::CENTER_CENTER, icon::CARET_RIGHT, FontId::proportional(13.0), kit::alpha(theme::ON_SURFACE_VAR, 0.4 + 0.6 * h));
+        right -= 16.0;
+    }
+    let left = rect.left() + if ignored { 80.0 } else { 96.0 };
+    let g = kit::fit_text(ui, text, 15.0, fg, right - left);
+    ui.painter().galley(Pos2::new(left, rect.center().y - g.size().y / 2.0), g, fg);
+    resp.on_hover_text(if ignored { "Buttons held together: xrizer doesn't read chords, so this does nothing" } else { "Buttons held together" })
 }
 
 fn mode_title(mode: &str) -> String {
@@ -650,51 +664,14 @@ fn source_card(ui: &mut egui::Ui, e: &mut Editor, def: Option<&InputDef>, s: &So
 
 // --- the drawings -----------------------------------------------------------------------------
 
-/// Where each input sits on a RIGHT controller's drawing, as fractions of it
-/// (x from the left, y from the top) and a radius (of its width). Left-hand
-/// drawings are the mirror.
-fn spots(ty: &str) -> &'static [(&'static str, f32, f32, f32)] {
-    match ty {
-        "knuckles" | "udcap_gloves" => &[
-            ("thumbstick", 0.311, 0.178, 0.055),
-            ("trackpad", 0.253, 0.244, 0.05),
-            ("b", 0.170, 0.262, 0.035),
-            ("a", 0.262, 0.297, 0.035),
-            ("system", 0.338, 0.317, 0.025),
-            ("trigger", 0.09, 0.40, 0.055),
-            ("grip", 0.47, 0.58, 0.07),
-        ],
-        "oculus_touch" => &[
-            ("joystick", 0.34, 0.23, 0.07),
-            ("trigger", 0.19, 0.55, 0.06),
-            ("grip", 0.65, 0.57, 0.07),
-            ("a", 0.49, 0.335, 0.045),
-            ("b", 0.38, 0.37, 0.04),
-            ("x", 0.49, 0.335, 0.045),
-            ("y", 0.38, 0.37, 0.04),
-            ("system", 0.525, 0.26, 0.03),
-            ("application_menu", 0.525, 0.26, 0.03),
-            ("thumbrest", 0.51, 0.43, 0.05),
-        ],
-        "vive_controller" => &[
-            ("trackpad", 0.86, 0.38, 0.1),
-            ("trigger", 0.52, 0.42, 0.07),
-            ("grip", 0.66, 0.575, 0.06),
-            ("application_menu", 0.82, 0.235, 0.045),
-            ("system", 0.87, 0.54, 0.04),
-        ],
-        _ => &[],
-    }
-}
-
 fn art_texture(ctx: &egui::Context, cache: &mut std::collections::HashMap<&'static str, egui::TextureHandle>, ty: &'static str) -> Option<egui::TextureHandle> {
     if let Some(t) = cache.get(ty) {
         return Some(t.clone());
     }
-    let bytes: &[u8] = match ty {
-        "knuckles" | "udcap_gloves" => include_bytes!("../../assets/bindings/index.png"),
-        "oculus_touch" => include_bytes!("../../assets/bindings/touch.png"),
-        "vive_controller" => include_bytes!("../../assets/bindings/vive.png"),
+    let bytes: &[u8] = match core::art(ty)? {
+        "index" => include_bytes!("../../assets/bindings/index.png"),
+        "touch" => include_bytes!("../../assets/bindings/touch.png"),
+        "vive" => include_bytes!("../../assets/bindings/vive.png"),
         _ => return None,
     };
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
@@ -707,7 +684,7 @@ fn art_texture(ctx: &egui::Context, cache: &mut std::collections::HashMap<&'stat
 fn center_column(ui: &mut egui::Ui, e: &mut Editor, st: &mut LibState, fr: &mut Frame) {
     let rect = ui.max_rect();
     let ty = e.ctrl.ty;
-    let tex = art_texture(ui.ctx(), &mut st.binds.art, if ty == "udcap_gloves" { "knuckles" } else { ty });
+    let tex = art_texture(ui.ctx(), &mut st.binds.art, ty);
     let sources = e.doc.sources(&e.set);
     let now = ui.input(|i| i.time);
     let mut dwelling = None;
@@ -719,7 +696,7 @@ fn center_column(ui: &mut egui::Ui, e: &mut Editor, st: &mut LibState, fr: &mut 
         let art = Rect::from_center_size(bx.center(), egui::vec2(tw as f32 * s, th as f32 * s));
         let uv = if hand == Hand::Left { Rect::from_min_max(Pos2::new(1.0, 0.0), Pos2::new(0.0, 1.0)) } else { Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)) };
         ui.painter().image(tex.id(), art, uv, kit::alpha(theme::ON_SURFACE, 0.92));
-        for &(id, fx, fy, fr_r) in spots(ty) {
+        for &(id, fx, fy, fr_r) in core::spots(ty) {
             let Some(def) = e.ctrl.input(id).filter(|d| d.on(hand)) else { continue };
             let x = if hand == Hand::Left { 1.0 - fx } else { fx };
             let c = Pos2::new(art.left() + x * art.width(), art.top() + fy * art.height());

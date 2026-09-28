@@ -30,6 +30,19 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Vector1 => "vector1",
+            Self::Vector2 => "vector2",
+            Self::Vector3 => "vector3",
+            Self::Vibration => "vibration",
+            Self::Pose => "pose",
+            Self::Skeleton => "skeleton",
+            Self::Other => "other",
+        }
+    }
+
     fn parse(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "boolean" => Self::Boolean,
@@ -489,6 +502,53 @@ impl Controller {
     }
 }
 
+/// The drawing a controller type is shown with (`index`, `touch`, `vive`).
+pub fn art(ty: &str) -> Option<&'static str> {
+    match ty {
+        "knuckles" | own::GLOVES => Some("index"),
+        "oculus_touch" => Some("touch"),
+        "vive_controller" => Some("vive"),
+        _ => None,
+    }
+}
+
+/// Where each input sits on the drawing of a RIGHT controller: (input, x, y,
+/// radius), as fractions of the drawing (x and radius of its width, y of its
+/// height). Left-hand drawings are the mirror.
+pub fn spots(ty: &str) -> &'static [(&'static str, f32, f32, f32)] {
+    match art(ty) {
+        Some("index") => &[
+            ("thumbstick", 0.311, 0.178, 0.055),
+            ("trackpad", 0.253, 0.244, 0.05),
+            ("b", 0.170, 0.262, 0.035),
+            ("a", 0.262, 0.297, 0.035),
+            ("system", 0.338, 0.317, 0.025),
+            ("trigger", 0.09, 0.40, 0.055),
+            ("grip", 0.47, 0.58, 0.07),
+        ],
+        Some("touch") => &[
+            ("joystick", 0.34, 0.23, 0.07),
+            ("trigger", 0.19, 0.55, 0.06),
+            ("grip", 0.65, 0.57, 0.07),
+            ("a", 0.49, 0.335, 0.045),
+            ("b", 0.38, 0.37, 0.04),
+            ("x", 0.49, 0.335, 0.045),
+            ("y", 0.38, 0.37, 0.04),
+            ("system", 0.525, 0.26, 0.03),
+            ("application_menu", 0.525, 0.26, 0.03),
+            ("thumbrest", 0.51, 0.43, 0.05),
+        ],
+        Some("vive") => &[
+            ("trackpad", 0.86, 0.38, 0.1),
+            ("trigger", 0.52, 0.42, 0.07),
+            ("grip", 0.66, 0.575, 0.06),
+            ("application_menu", 0.82, 0.235, 0.045),
+            ("system", 0.87, 0.54, 0.04),
+        ],
+        _ => &[],
+    }
+}
+
 /// xrizer's personal-binding file name for a controller type, `None` for types
 /// it doesn't read personal bindings for.
 pub fn xrizer_file(ty: &str) -> Option<&'static str> {
@@ -591,6 +651,20 @@ impl BindingDoc {
             obj.insert("bindings".into(), json!({}));
         }
         Ok(Self { root })
+    }
+
+    /// From JSON already parsed (the desktop editor sends the document back
+    /// and forth).
+    pub fn from_value(mut root: Value) -> Result<Self, String> {
+        let obj = root.as_object_mut().ok_or("binding file: not a JSON object")?;
+        if !obj.get("bindings").is_some_and(Value::is_object) {
+            obj.insert("bindings".into(), json!({}));
+        }
+        Ok(Self { root })
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.root
     }
 
     /// A blank binding for a controller type (the game shipped none for it).
