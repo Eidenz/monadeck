@@ -28,14 +28,14 @@ Built for a Monado + xrizer workflow.
 Monadeck is two halves that share one configuration: an in-headset overlay you live in while you're in VR, and a small desktop control panel that looks after your Monado runtime.
 
 - **Launch games from a curved in-headset dashboard.** Steam and non-Steam titles with their artwork, collections and playtime, plus flat Unreal Engine games through [UEVR](https://github.com/praydog/UEVR).
-- **Rebind any SteamVR game's controls in the headset.** A SteamVR-style binding editor, in the headset and in the desktop app, that also sets Monadeck's own buttons.
+- **Rebind any SteamVR game's controls in the headset.** A SteamVR-style binding editor, in the headset and in the desktop app, that applies while the game runs and also sets Monadeck's own buttons.
 - **Bring your desktop into VR.** Your monitors as movable, curved screens with a real mouse and a VR keyboard.
 - **A wrist watch that keeps you in the loop.** Clock, batteries, notifications, media controls and quick buttons, on either wrist.
 - **Play flat games in VR with your VR controllers.** Gaming mode turns them into an Xbox pad, with per-game remaps to keys and mouse.
 - **Let games talk to the overlay.** An OSC listener lets VRChat avatars and tools like VRCOSC drive the watch, dashboard and screens, or raise a notification.
 - **Control the runtime without taking the headset off.** Move your play area, pick which app the headset shows, freeze an app's controllers or set a timer.
 - **See what's alive at a glance.** Switched-off and out-of-tracking controllers, trackers and gloves grey out, like in SteamVR.
-- **Set up Monado in one click.** The desktop app installs a prebuilt Monado fork and xrizer, runs the service, and switches runtimes without breaking SteamVR.
+- **Set up Monado in one click.** The desktop app installs prebuilt forks of Monado and xrizer, runs the service, and switches runtimes without breaking SteamVR.
 - **Or stream to a standalone headset with WiVRn.** Monadeck can run [WiVRn](https://github.com/WiVRn/WiVRn) instead, with PIN pairing and the same overlay.
 
 It deliberately doesn't build Monado from source or manage drivers. For that, [Envision](https://gitlab.com/gabmus/envision) is the right tool; Monadeck can sit next to it.
@@ -43,7 +43,7 @@ It deliberately doesn't build Monado from source or manage drivers. For that, [E
 ## Requirements
 
 - **Linux** with a Wayland desktop (the screen mirror uses the desktop portal and PipeWire; KDE is what it's tested on).
-- A **Monado**-based OpenXR runtime and **xrizer** for OpenVR games, though not up front: Monadeck can install a prebuilt build of the fork and the latest xrizer for you (Settings → General → *Install built-in*), or use your own. For a standalone headset, install **WiVRn** (26.6 or newer) and choose it as the runtime instead.
+- A **Monado**-based OpenXR runtime and **xrizer** for OpenVR games, though not up front: Monadeck can install prebuilt builds of its Monado and xrizer forks for you (Settings → General → *Install built-in*), or use your own. For a standalone headset, install **WiVRn** (26.6 or newer) and choose it as the runtime instead.
 - **Steam** (with Proton for Windows games) for your library and cover art.
 - Some features need the [Monado fork](https://github.com/Eidenz/Monado): controller freeze, in-headset screenshots, device hotplug, switched-off and out-of-tracking device states, glove batteries, and letting go of switched-off controllers. They hide themselves on stock Monado.
 

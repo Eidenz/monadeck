@@ -154,7 +154,7 @@
           ? "Downloading & installing…"
           : "Install built-in xrizer (latest)"}
       </button>
-      <span class="install-hint">Downloads the latest xrizer release and registers it as the OpenVR runtime.</span>
+      <span class="install-hint">Downloads Monadeck's xrizer build, which applies binding changes while a game runs, and registers it as the OpenVR runtime.</span>
     </div>
     {#if app.installResult?.kind === "xrizer"}
       <span class="install-ok" class:bad={!app.installResult.ok}>{app.installResult.msg}</span>
