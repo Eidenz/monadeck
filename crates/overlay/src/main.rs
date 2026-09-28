@@ -994,7 +994,16 @@ fn run() -> Result<()> {
     // Each hand's controller type, from its interaction profile (gloves override).
     let mut profile_ty: [&'static str; 2] = ["knuckles"; 2];
     let mut own_summary_for: Option<(&'static str, &'static str)> = None;
-    // The bindings folder's last change: a save from the desktop editor reloads them too.
+    // Monadeck's own bindings and the gamepad profiles reload as soon as their
+    // folders change (a save from the desktop editor, a hand edit): the kernel
+    // tells us. Without inotify (its per-user limit used up), look every 2 s.
+    let config_watch = match monadeck_core::watch::DirWatch::new(vec![monadeck_core::bindings::own::dir(), monadeck_core::gamepad_profiles::dir()]) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            log::warn!("watch: no change notifications ({e}), checking the config folders every 2 s instead");
+            None
+        }
+    };
     let mut own_mtime = monadeck_core::bindings::own::dir_mtime();
     let mut snap_prev = [false; 2];
     // What Monadeck's own bindings drove last frame (edges: the dashboard, screens).
@@ -2193,22 +2202,26 @@ fn run() -> Result<()> {
             st.game_profile = game.profile_name().to_string();
             st.flash(format!("{} profiles loaded", st.game_profiles.len()));
         }
-        if profiles_check_at.elapsed().as_secs_f32() > 2.0 {
-            profiles_check_at = Instant::now();
-            let m = monadeck_core::bindings::own::dir_mtime();
-            if m != own_mtime {
-                own_mtime = m;
-                st.binds.own_changed = true;
-                st.binds.refresh_own();
+        let (own_changed, profiles_changed) = match &config_watch {
+            Some(w) => (w.changed(0), w.changed(1)),
+            None if profiles_check_at.elapsed().as_secs_f32() > 2.0 => {
+                profiles_check_at = Instant::now();
+                let (o, p) = (monadeck_core::bindings::own::dir_mtime(), monadeck_core::gamepad_profiles::dir_mtime());
+                let changed = (o != own_mtime, p != profiles_mtime);
+                (own_mtime, profiles_mtime) = (o, p);
+                changed
             }
-            let m = monadeck_core::gamepad_profiles::dir_mtime();
-            if m != profiles_mtime {
-                profiles_mtime = m;
-                game.reload_profiles();
-                st.game_profiles = game.profile_names();
-                st.game_profile = game.profile_name().to_string();
-                log::info!("gaming: profiles changed on disk, {} loaded", st.game_profiles.len());
-            }
+            None => (false, false),
+        };
+        if own_changed {
+            st.binds.own_changed = true;
+            st.binds.refresh_own();
+        }
+        if profiles_changed {
+            game.reload_profiles();
+            st.game_profiles = game.profile_names();
+            st.game_profile = game.profile_name().to_string();
+            log::info!("gaming: profiles changed on disk, {} loaded", st.game_profiles.len());
         }
         // The handheld size can change from the slider or from a resize gesture.
         if st.game_handheld_width != handheld_width_prev {

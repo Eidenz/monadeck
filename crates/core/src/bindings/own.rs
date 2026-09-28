@@ -152,7 +152,8 @@ fn fill_missing_sets(doc: &mut BindingDoc, ty: &str) {
     }
 }
 
-fn dir() -> PathBuf {
+/// Where Monadeck's own bindings live (one file per controller).
+pub fn dir() -> PathBuf {
     monadeck_config_dir().join("bindings")
 }
 
