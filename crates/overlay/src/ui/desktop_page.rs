@@ -350,6 +350,8 @@ fn behaviour(ui: &mut egui::Ui, st: &mut LibState) {
         );
         divider(ui);
         t |= switch_row(ui, "Tilt restored screens to your headset", "Off keeps them upright", &mut st.screen_restore_tilt);
+        divider(ui);
+        t |= switch_row(ui, "Snap level", "A screen carried or brought back within a few degrees of level straightens out", &mut st.screen_level);
         if t {
             st.sound_tab = true;
         }

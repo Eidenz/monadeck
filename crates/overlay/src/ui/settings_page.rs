@@ -94,6 +94,15 @@ fn dashboard(ui: &mut egui::Ui, st: &mut LibState) {
             st.sound_tab = true;
         }
         divider(ui);
+        let sub = if st.summon_tilt {
+            "Carried, or summoned with your head straight, within a few degrees of level: it straightens out"
+        } else {
+            "Carried within a few degrees of level, it straightens out"
+        };
+        if switch_row(ui, "Snap level", sub, &mut st.panel_level) {
+            st.sound_tab = true;
+        }
+        divider(ui);
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if button(ui, icon::CROSSHAIR_SIMPLE, "Recenter panel", Tone::Neutral, 150.0).clicked() {

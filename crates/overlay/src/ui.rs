@@ -112,6 +112,7 @@ pub struct LibState {
     pub gaze_pause: bool,
     pub recenter_on_toggle: bool,
     pub screen_restore_tilt: bool,
+    pub screen_level: bool,
     pub keyboard_scale: f32,
     pub capture_max_fps: u32,
     pub capture_max_height: u32,
@@ -243,6 +244,7 @@ pub struct LibState {
     /// Whether protontricks-launch is installed — the UEVR UI is hidden if not.
     pub uevr_available: bool,
     pub summon_tilt: bool,
+    pub panel_level: bool,
     /// Panel placement comfort knobs (mirrored to/from the overlay config).
     pub panel_dist: f32,
     pub panel_scale: f32,
@@ -409,6 +411,7 @@ impl LibState {
             gaze_pause: true,
             recenter_on_toggle: true,
             screen_restore_tilt: false,
+            screen_level: true,
             keyboard_scale: 1.0,
             capture_max_fps: 90,
             capture_max_height: 0,
@@ -512,6 +515,7 @@ impl LibState {
             uevr_delay: 30,
             uevr_available: false,
             summon_tilt: false,
+            panel_level: true,
             panel_dist: 1.5,
             panel_scale: 1.0,
             panel_curve: 1.0,

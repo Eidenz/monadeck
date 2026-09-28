@@ -293,3 +293,120 @@ pub fn quat_nlerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     }
     q
 }
+
+// --- Leveling -----------------------------------------------------------------
+
+/// Snap in when a panel's roll is within this of level…
+pub const LEVEL_SNAP: f32 = 3.0 * std::f32::consts::PI / 180.0;
+/// …and hold it level until the hand turns it past this (no flicker on the edge).
+const LEVEL_HOLD: f32 = 5.0 * std::f32::consts::PI / 180.0;
+/// How much world-up must lie in the panel's plane for it to have a level at
+/// all: below this it faces (nearly) straight up or down, and every way round
+/// is as level as any other.
+const LEVEL_MIN_UP: f32 = 0.2;
+
+/// How far a panel is rolled off level: the turn about its own facing axis
+/// that brings its right edge onto the horizon (radians, within ±90°, so an
+/// upside-down panel levels too). Pitch doesn't count, so a panel tipped back
+/// over you while lying down is level when it isn't turned sideways. None
+/// while it faces (nearly) straight up or down.
+pub fn roll_off_level(q: [f32; 4]) -> Option<f32> {
+    let ux = quat_rotate(q, [1.0, 0.0, 0.0])[1];
+    let uy = quat_rotate(q, [0.0, 1.0, 0.0])[1];
+    (ux.hypot(uy) >= LEVEL_MIN_UP).then(|| (ux / uy).atan())
+}
+
+/// `p` turned exactly level about its own facing axis (same spot, still
+/// facing the same way), when it's within `tol` radians of it.
+pub fn level_within(p: &xr::Posef, tol: f32) -> Option<xr::Posef> {
+    let q = qf(&p.orientation);
+    let roll = roll_off_level(q).filter(|r| r.abs() <= tol)?;
+    Some(xr::Posef { orientation: quatf(q_mul(q, quat_from_axis_angle([0.0, 0.0, 1.0], -roll))), position: p.position })
+}
+
+/// Level snapping for a panel being carried: it snaps level once the hand
+/// brings it within [`LEVEL_SNAP`] and stays there until turned past
+/// [`LEVEL_HOLD`].
+#[derive(Default)]
+pub struct LevelSnap {
+    on: bool,
+}
+
+impl LevelSnap {
+    /// A carry begins from `p`: already level doesn't count as snapping in.
+    pub fn start(&mut self, p: &xr::Posef) {
+        self.on = level_within(p, LEVEL_SNAP).is_some();
+    }
+
+    /// The pose to show for where the hand has it; `true` the frame it snaps in.
+    pub fn apply(&mut self, p: xr::Posef) -> (xr::Posef, bool) {
+        match level_within(&p, if self.on { LEVEL_HOLD } else { LEVEL_SNAP }) {
+            Some(level) => (level, !std::mem::replace(&mut self.on, true)),
+            None => {
+                self.on = false;
+                (p, false)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deg(d: f32) -> f32 {
+        d.to_radians()
+    }
+
+    /// A panel facing the viewer, pitched back by `pitch` and rolled by `roll`.
+    fn panel(pitch: f32, roll: f32) -> xr::Posef {
+        let q = q_mul(quat_from_axis_angle([1.0, 0.0, 0.0], deg(pitch)), quat_from_axis_angle([0.0, 0.0, 1.0], deg(roll)));
+        xr::Posef { orientation: quatf(q), position: vec3f([0.3, 1.2, -1.0]) }
+    }
+
+    fn roll_of(p: &xr::Posef) -> f32 {
+        roll_off_level(qf(&p.orientation)).unwrap().to_degrees()
+    }
+
+    #[test]
+    fn roll_ignores_pitch() {
+        for pitch in [0.0, 40.0, -40.0, 75.0, -75.0] {
+            let r = roll_of(&panel(pitch, 2.0));
+            assert!((r - 2.0).abs() < 0.01, "pitch {pitch}: {r}");
+        }
+        // Upside down is level too.
+        assert!((roll_of(&panel(0.0, 178.0)) + 2.0).abs() < 0.01);
+        // Facing straight up or down: nothing to level.
+        assert!(roll_off_level(qf(&panel(90.0, 20.0).orientation)).is_none());
+        assert!(roll_off_level(qf(&panel(-88.0, 20.0).orientation)).is_none());
+    }
+
+    #[test]
+    fn levels_in_place() {
+        let p = panel(60.0, -2.5);
+        let l = level_within(&p, LEVEL_SNAP).expect("within the snap");
+        assert!(roll_of(&l).abs() < 0.01);
+        assert_eq!((l.position.x, l.position.y, l.position.z), (p.position.x, p.position.y, p.position.z));
+        // Still facing the same way.
+        let (a, b) = (quat_rotate(qf(&p.orientation), [0.0, 0.0, 1.0]), quat_rotate(qf(&l.orientation), [0.0, 0.0, 1.0]));
+        assert!((a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs() < 1e-4);
+        assert!(level_within(&panel(0.0, 4.0), LEVEL_SNAP).is_none());
+    }
+
+    #[test]
+    fn carrying_snaps_in_and_holds() {
+        let mut s = LevelSnap::default();
+        s.start(&panel(0.0, 10.0));
+        assert_eq!(s.apply(panel(0.0, 8.0)).1, false);
+        let (p, snapped) = s.apply(panel(0.0, 2.9));
+        assert!(snapped && roll_of(&p).abs() < 0.01);
+        // Held past the snap angle, let go past the hold angle.
+        let (p, snapped) = s.apply(panel(0.0, 4.5));
+        assert!(!snapped && roll_of(&p).abs() < 0.01);
+        let (p, _) = s.apply(panel(0.0, 5.5));
+        assert!((roll_of(&p) - 5.5).abs() < 0.01);
+        // Picking up a level panel isn't a snap.
+        s.start(&panel(20.0, 0.0));
+        assert_eq!(s.apply(panel(20.0, 0.5)).1, false);
+    }
+}

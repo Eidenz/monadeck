@@ -29,7 +29,7 @@ use std::time::Instant;
 use ash::vk;
 use openxr as xr;
 
-use crate::mathx::{cross, facing_head, forward, front_pose, normalize, offset_pose, pose_compose, pose_invert, qf, quat_from_axes, quat_nlerp, quat_rotate, quatf, raycast, vec3f};
+use crate::mathx::{cross, facing_head, forward, front_pose, level_within, normalize, offset_pose, pose_compose, pose_invert, qf, quat_from_axes, quat_nlerp, quat_rotate, quatf, raycast, vec3f, LevelSnap, LEVEL_SNAP};
 use monadeck_core::desktop_layouts::{DesktopLayout, KeyboardPlacement, ScreenPlacement};
 use dmabuf::{Caps, Importer};
 use hid::UInput;
@@ -200,6 +200,8 @@ pub struct InputOut {
     pub secondary_ray: Option<(xr::Posef, f32)>,
     /// Pointer on a screen's swap island: (screen index, u, v, trigger down).
     pub island_ptr: Option<(usize, f32, f32, bool)>,
+    /// A carried screen just snapped level: the hand carrying it (a tick).
+    pub level_snap: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -272,6 +274,9 @@ pub struct DesktopViewer {
     stash_kb_attached: Option<usize>,
     /// Restore screens tilted to the headset's pitch (else upright).
     pub restore_tilt: bool,
+    /// Snap a carried or restored screen exactly level within a few degrees.
+    pub level: bool,
+    grab_level: LevelSnap,
     /// While a docked group is gripped: the other members' poses relative to
     /// the gripped screen.
     grab_group: Vec<(usize, xr::Posef)>,
@@ -385,6 +390,8 @@ impl DesktopViewer {
             stash_center: None,
             stash_kb_attached: None,
             restore_tilt: false,
+            level: true,
+            grab_level: LevelSnap::default(),
             grab_group: Vec::new(),
             grab_screen: None,
             keyboard_dock_pending: None,
@@ -852,7 +859,10 @@ impl DesktopViewer {
         if let (Some(h), true) = (hmd, recentre_now) {
             if let Some((root, cx, dist)) = center {
                 // Menu logic: the group's centre lands in front of you.
-                let c = front_pose(h, dist, 0.0, 0.0, self.restore_tilt);
+                let mut c = front_pose(h, dist, 0.0, 0.0, self.restore_tilt);
+                if self.level {
+                    c = level_within(&c, LEVEL_SNAP).unwrap_or(c);
+                }
                 if root < self.screens.len() {
                     self.screens[root].pose = offset_pose(&c, -cx, 0.0, 0.0);
                     self.screens[root].placed = true;
@@ -861,6 +871,9 @@ impl DesktopViewer {
                 for (i, r) in &rel {
                     if let Some(s) = self.screens.get_mut(*i) {
                         s.pose = pose_compose(h, r);
+                        if self.level {
+                            s.pose = level_within(&s.pose, LEVEL_SNAP).unwrap_or(s.pose);
+                        }
                     }
                 }
             }
@@ -1720,6 +1733,13 @@ impl DesktopViewer {
                             offset.position.z -= sy * PUSH_SPEED;
                         }
                         s.pose = pose_compose(&h.aim, &offset);
+                        if self.level {
+                            let snapped;
+                            (s.pose, snapped) = self.grab_level.apply(s.pose);
+                            if snapped {
+                                out.level_snap = Some(hand);
+                            }
+                        }
                     }
                     s.grab = Some((hand, offset));
                     // The rest of a docked group rides along rigidly.
@@ -1899,6 +1919,7 @@ impl DesktopViewer {
             } else if let Some((si, _, _, _)) = scr_hits[hi] {
                 self.layout_untouched = false;
                 self.screens[si].start_grab(hi, &aim);
+                self.grab_level.start(&self.screens[si].pose);
                 self.grab_screen = Some(si);
                 let root = self.screens[si].pose;
                 self.grab_group = self

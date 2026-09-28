@@ -43,7 +43,7 @@ use gfx::{
     cyl_layout, cylinder_layer, fill_laser, laser_quad, make_laser, make_panel, quad_layer,
     render_panel,
 };
-use mathx::{front_pose, locate_pose, offset_pose, pose_compose, pose_invert, posef, qf, quat_rotate, raycast, raycast_cylinder};
+use mathx::{front_pose, level_within, locate_pose, offset_pose, pose_compose, pose_invert, posef, qf, quat_rotate, raycast, raycast_cylinder};
 
 static VK_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
 
@@ -816,6 +816,7 @@ fn run() -> Result<()> {
     st.audio_enabled = ov_cfg.audio_enabled;
     st.audio_volume = ov_cfg.audio_volume;
     st.summon_tilt = ov_cfg.summon_tilt;
+    st.panel_level = ov_cfg.panel_level;
     st.panel_dist = ov_cfg.panel_dist;
     st.panel_scale = ov_cfg.panel_scale;
     st.panel_curve = ov_cfg.panel_curve;
@@ -848,6 +849,8 @@ fn run() -> Result<()> {
     st.recenter_on_toggle = ov_cfg.recenter_on_toggle;
     st.screen_restore_tilt = ov_cfg.screen_restore_tilt;
     desktop.restore_tilt = ov_cfg.screen_restore_tilt;
+    st.screen_level = ov_cfg.screen_level;
+    desktop.level = ov_cfg.screen_level;
     st.capture_max_fps = ov_cfg.capture_max_fps;
     st.capture_max_height = ov_cfg.capture_max_height;
     st.skybox_enabled = ov_cfg.skybox_enabled;
@@ -956,6 +959,7 @@ fn run() -> Result<()> {
     let mut blocked_prev = false; // game-input arbitration edge state
     // (hand index, controller->panel offset) while grabbing.
     let mut grab: Option<(usize, xr::Posef)> = None;
+    let mut grab_level = mathx::LevelSnap::default();
     let start = Instant::now(); // egui clock (animations)
     let mut summon_at: Option<Instant> = None; // summon fade-in
     // The active launch popup (own layer; persists after the dashboard closes).
@@ -2545,6 +2549,10 @@ fn run() -> Result<()> {
         if recenter {
             if let Some(h) = hmd {
                 anchor = front_pose(&h, dist, 0.0, 0.0, st.summon_tilt);
+                // Tilted with a straight-enough head: exactly level.
+                if st.panel_level {
+                    anchor = level_within(&anchor, mathx::LEVEL_SNAP).unwrap_or(anchor);
+                }
                 recenter = false;
             }
         }
@@ -2579,6 +2587,13 @@ fn run() -> Result<()> {
                     grab = None;
                 } else if let Some(p) = locate_pose(aim, &space, time) {
                     anchor = pose_compose(&p, &offset);
+                    if st.panel_level {
+                        let snapped;
+                        (anchor, snapped) = grab_level.apply(anchor);
+                        if snapped {
+                            pulse(&session, &haptic_action, path, 0.2, 8);
+                        }
+                    }
                 }
             }
 
@@ -2613,6 +2628,7 @@ fn run() -> Result<()> {
                     let grip = grab_action.state(&session, path)?.current_state;
                     if grip > GRAB_START && pointing {
                         grab = Some((idx, pose_compose(&pose_invert(&p), &anchor)));
+                        grab_level.start(&anchor);
                         best = None;
                         break;
                     }
@@ -2654,6 +2670,9 @@ fn run() -> Result<()> {
         let d_ray = d_in.ray.or(p_in.ray).or(watch_hit.map(|(_, _, t, _, aim)| (aim, t))).or(mini_hit.map(|(t, _, aim)| (aim, t)));
         if let Some(g) = d_in.gesture {
             toasts.readout(g.title, g.body, g.pose);
+        }
+        if let Some(h) = d_in.level_snap.and_then(|i| hands.get(i)) {
+            pulse(&session, &haptic_action, h.path, 0.2, 8);
         }
         if d_ray.is_some() {
             best = None;
@@ -2997,6 +3016,7 @@ fn run() -> Result<()> {
             desktop.set_width(st.screen_width_m);
             desktop.gaze_pause = st.gaze_pause;
             desktop.restore_tilt = st.screen_restore_tilt;
+            desktop.level = st.screen_level;
             desktop.set_capture_limits(st.capture_max_fps, st.capture_max_height);
             desktop.keyboard.scale = st.keyboard_scale.clamp(0.5, 2.0);
             desktop.scroll_speed = st.scroll_speed;
@@ -3330,6 +3350,7 @@ fn overlay_config_from(
         audio_enabled: st.audio_enabled,
         audio_volume: st.audio_volume,
         summon_tilt: st.summon_tilt,
+        panel_level: st.panel_level,
         panel_dist: st.panel_dist,
         panel_scale: st.panel_scale,
         panel_curve: st.panel_curve,
@@ -3366,6 +3387,7 @@ fn overlay_config_from(
         gaze_pause: st.gaze_pause,
         recenter_on_toggle: st.recenter_on_toggle,
         screen_restore_tilt: st.screen_restore_tilt,
+        screen_level: st.screen_level,
         keyboard_scale: st.keyboard_scale,
         capture_max_fps: st.capture_max_fps,
         capture_max_height: st.capture_max_height,

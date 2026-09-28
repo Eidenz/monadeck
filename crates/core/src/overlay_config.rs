@@ -12,6 +12,9 @@ pub struct OverlayConfig {
     /// Summon the dashboard tilted to match the headset's pitch (vs. always
     /// upright facing you).
     pub summon_tilt: bool,
+    /// Snap the dashboard exactly level when it's carried (or tilt-summoned)
+    /// within a few degrees of it.
+    pub panel_level: bool,
     /// Distance the dashboard sits in front of you, metres.
     pub panel_dist: f32,
     /// Overall panel size multiplier (1.0 = default).
@@ -100,6 +103,9 @@ pub struct OverlayConfig {
     pub recenter_on_toggle: bool,
     /// Restored screens tilt to match the headset's pitch (else upright).
     pub screen_restore_tilt: bool,
+    /// Snap screens exactly level when they're carried (or restored) within a
+    /// few degrees of it.
+    pub screen_level: bool,
     /// VR keyboard size multiplier.
     pub keyboard_scale: f32,
     /// Cap the compositor's screencast frame rate (0 = unlimited). Frames above
@@ -169,6 +175,7 @@ impl Default for OverlayConfig {
             audio_enabled: true,
             audio_volume: 0.55,
             summon_tilt: false,
+            panel_level: true,
             panel_dist: 1.5,
             panel_scale: 1.0,
             panel_curve: 1.0,
@@ -205,6 +212,7 @@ impl Default for OverlayConfig {
             gaze_pause: true,
             recenter_on_toggle: true,
             screen_restore_tilt: false,
+            screen_level: true,
             keyboard_scale: 1.0,
             capture_max_fps: 90,
             capture_max_height: 0,
