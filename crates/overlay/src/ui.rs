@@ -353,8 +353,8 @@ pub struct LibState {
     pub screen_warmth: f32,
     /// The runtime can scale layer colours (opacity, brightness, tint).
     pub desktop_color_scale: bool,
-    /// B on a screen sends a middle click (else a cursor-frozen left click).
-    pub mouse_b_middle: bool,
+    /// What the buttons do on a screen, in words (Monadeck's mouse bindings).
+    pub mouse_summary: String,
     /// The open category of each tool page.
     pub settings_tab: SettingsTab,
     pub desktop_tab: DesktopTab,
@@ -587,7 +587,7 @@ impl LibState {
             screen_brightness: 1.0,
             screen_warmth: 0.0,
             desktop_color_scale: false,
-            mouse_b_middle: false,
+            mouse_summary: String::new(),
             settings_tab: SettingsTab::Dashboard,
             desktop_tab: DesktopTab::Screens,
             photos_tab: PhotosTab::Gallery,
@@ -2351,8 +2351,8 @@ const CONTROLS: &[(&str, &[(&str, &str)])] = &[
             ("Point", "moves the mouse"),
             ("Trigger", "left click · keep holding and move past the drag threshold to drag"),
             ("A", "right click"),
-            ("B", "left click without moving the cursor (fiddly targets) · or a middle click (Desktop › Mouse)"),
-            ("Thumbstick", "scroll (speed in Desktop › Mouse)"),
+            ("B", "free by default, so double-B works here too · make it a middle click or a click that doesn't move the cursor in Bindings › Monadeck › Mouse"),
+            ("Thumbstick", "scroll (speed in Desktop › Mouse) · every button here is rebindable in Bindings › Monadeck › Mouse"),
             ("Grip", "move the screen (a docked group moves as one)"),
             ("Grip + trigger, push / pull", "resize"),
             ("Grip + stick up / down", "push it away / pull it closer"),

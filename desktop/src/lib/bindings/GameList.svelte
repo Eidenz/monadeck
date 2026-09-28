@@ -66,7 +66,7 @@
       <span class="chip"><Icon name="arrows-out-cardinal" size={24} /></span>
       <span class="own-text">
         <span class="own-name">Monadeck</span>
-        <span class="own-sub">Its own controls: the dashboard, your screens and the playspace drag</span>
+        <span class="own-sub">Its own controls: the dashboard, your screens, the mouse on them, the playspace drag</span>
       </span>
       {#if bind.opening === "own"}
         <span class="spinner"></span>

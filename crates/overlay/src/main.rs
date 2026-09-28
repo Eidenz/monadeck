@@ -832,7 +832,6 @@ fn run() -> Result<()> {
     st.screen_spawn_dist = ov_cfg.screen_spawn_dist.clamp(0.6, 3.0);
     st.screen_brightness = ov_cfg.screen_brightness.clamp(0.2, 1.0);
     st.screen_warmth = ov_cfg.screen_warmth.clamp(0.0, 1.0);
-    st.mouse_b_middle = ov_cfg.mouse_b_middle;
     st.desktop_color_scale = color_scale;
     st.hold_pose_pref = ov_cfg.hold_pose_when_off;
     // Kept by the link and applied whenever Monado comes up.
@@ -840,7 +839,6 @@ fn run() -> Result<()> {
     desktop.set_defaults(st.screen_curve, st.screen_opacity);
     desktop.spawn_dist = st.screen_spawn_dist;
     desktop.tint = desktop::screen_tint(st.screen_brightness, st.screen_warmth);
-    desktop.b_middle = st.mouse_b_middle;
     st.restore_layout = ov_cfg.restore_layout;
     st.restore_layout_hidden = ov_cfg.restore_layout_hidden;
     st.scroll_speed = ov_cfg.scroll_speed.clamp(0.25, 4.0);
@@ -889,6 +887,15 @@ fn run() -> Result<()> {
             if hands != "off" {
                 ov_cfg.ps_drag_hands = "both".into();
             }
+            ov_cfg.save();
+        }
+        // B as a middle click on a screen (Desktop › Mouse before 1.8) is a
+        // binding now; B does nothing there by default.
+        if ov_cfg.mouse_b_middle {
+            if own::migrate_b_middle() {
+                log::info!("bindings: B's middle click on screens moved into Monadeck's bindings");
+            }
+            ov_cfg.mouse_b_middle = false;
             ov_cfg.save();
         }
     }
@@ -1600,10 +1607,11 @@ fn run() -> Result<()> {
                     aim: located.unwrap_or(xr::Posef::IDENTITY),
                     path,
                     select: select_action.state(&session, path)?.current_state > 0.5,
-                    secondary: secondary_action.state(&session, path)?.current_state,
                     precise: precise_action.state(&session, path)?.current_state,
                     grip: grab_action.state(&session, path)?.current_state,
                     scroll: deadzone(s.x, s.y),
+                    // Filled from Monadeck's bindings below.
+                    mouse: desktop::MouseInput::default(),
                 });
             }
         }
@@ -1622,7 +1630,7 @@ fn run() -> Result<()> {
                     grip: h.grip,
                     stick: (stick.x, stick.y),
                     stick_click: stick_click_action.state(&session, path)?.current_state,
-                    a: h.secondary,
+                    a: secondary_action.state(&session, path)?.current_state,
                     b: h.precise,
                     pad: (tp.x, tp.y),
                     pad_force: pad_action.state(&session, path)?.current_state,
@@ -1655,6 +1663,7 @@ fn run() -> Result<()> {
                 own_summary_for = Some((shown_ty, tys[1]));
                 if let (Some(doc), Some(ctrl)) = (own_docs.get(shown_ty), own::controller(shown_ty)) {
                     st.ps_drag_summary = own::summary(doc, ctrl, own::MOVE);
+                    st.mouse_summary = own::mouse_summary(doc, ctrl);
                 }
             }
             let input = [0, 1].map(|hi| {
@@ -1674,7 +1683,7 @@ fn run() -> Result<()> {
                 }
             });
             let docs = [&own_docs[tys[0]], &own_docs[tys[1]]];
-            own_act = own_eval.eval(docs, input, Instant::now());
+            own_act = own_eval.eval(docs, input, desktop.mouse_context(), Instant::now());
             let act = &own_act;
             // Open / close the dashboard (its binding; the left system button by default).
             let dash = act.any(own::DASHBOARD);
@@ -1795,14 +1804,19 @@ fn run() -> Result<()> {
                 }
             }
             st.ps_drag_offset = drag_ps;
-            // Buttons held in a chord (A+B dragging) must not also click / toggle.
+            // The mouse on a screen, as bound. B held in a chord (A+B
+            // dragging) mustn't also undock a gripped screen.
             for (hi, h) in hands.iter_mut().enumerate().take(2) {
-                for input in &act.chorded[hi] {
-                    match input.as_str() {
-                        "a" | "x" => h.secondary = false,
-                        "b" | "y" => h.precise = false,
-                        _ => {}
-                    }
+                let bh = if hi == 0 { BHand::Left } else { BHand::Right };
+                h.mouse = desktop::MouseInput {
+                    click: act.has(bh, own::CLICK),
+                    right: act.has(bh, own::RIGHT_CLICK),
+                    middle: act.has(bh, own::MIDDLE_CLICK),
+                    still: act.has(bh, own::STILL_CLICK),
+                    wheel: act.vector(bh, own::SCROLL),
+                };
+                if act.chorded[hi].iter().any(|i| matches!(i.as_str(), "b" | "y")) {
+                    h.precise = false;
                 }
             }
         }
@@ -2285,11 +2299,12 @@ fn run() -> Result<()> {
             }
         }
         // Hide every shown screen / bring the same set back: Monadeck's own
-        // binding (double left B by default). Not for a hand pointing at a screen
-        // (B is the frozen click there) or turned into a gamepad.
+        // binding (double left B by default). Not for a hand turned into a
+        // gamepad; on a screen, only if the mouse doesn't use its button (the
+        // evaluator sees to that).
         let screens = [0, 1].into_iter().any(|hi| {
             let bhand = if hi == 0 { monadeck_core::bindings::Hand::Left } else { monadeck_core::bindings::Hand::Right };
-            own_act.has(bhand, monadeck_core::bindings::own::SCREENS) && hands.get(hi).is_some_and(|h| h.active) && desktop.pointing_hand() != Some(hi)
+            own_act.has(bhand, monadeck_core::bindings::own::SCREENS) && hands.get(hi).is_some_and(|h| h.active)
         });
         if screens && !screens_prev {
             match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
@@ -3024,7 +3039,6 @@ fn run() -> Result<()> {
             desktop.set_defaults(st.screen_curve, st.screen_opacity);
             desktop.spawn_dist = st.screen_spawn_dist;
             desktop.tint = desktop::screen_tint(st.screen_brightness, st.screen_warmth);
-            desktop.b_middle = st.mouse_b_middle;
             game.rumble_enabled = st.game_rumble;
             if st.game_hide_pad != hide_pad_prev {
                 hide_pad_prev = st.game_hide_pad;
@@ -3368,7 +3382,7 @@ fn overlay_config_from(
         screen_spawn_dist: st.screen_spawn_dist,
         screen_brightness: st.screen_brightness,
         screen_warmth: st.screen_warmth,
-        mouse_b_middle: st.mouse_b_middle,
+        mouse_b_middle: false,
         screen_order: screen_order.to_vec(),
         restore_layout: st.restore_layout,
         restore_layout_hidden: st.restore_layout_hidden,

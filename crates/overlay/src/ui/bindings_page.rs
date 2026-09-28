@@ -151,7 +151,7 @@ fn own_card(ui: &mut egui::Ui, st: &LibState) -> egui::Response {
     let chip = Rect::from_center_size(Pos2::new(rect.left() + 46.0, rect.center().y), egui::vec2(52.0, 52.0));
     kit::icon_chip(p, chip, icon::ARROWS_OUT_CARDINAL, 1.0);
     p.text(Pos2::new(rect.left() + 88.0, rect.center().y - 12.0), Align2::LEFT_CENTER, "Monadeck", FontId::proportional(19.0), Color32::WHITE);
-    p.text(Pos2::new(rect.left() + 88.0, rect.center().y + 14.0), Align2::LEFT_CENTER, "Its own controls: the dashboard, your screens and the playspace drag", FontId::proportional(14.0), theme::ON_SURFACE_VAR);
+    p.text(Pos2::new(rect.left() + 88.0, rect.center().y + 14.0), Align2::LEFT_CENTER, "Its own controls: the dashboard, your screens, the mouse on them, the playspace drag", FontId::proportional(14.0), theme::ON_SURFACE_VAR);
     let mut x = rect.right() - 24.0;
     p.text(Pos2::new(x, rect.center().y), Align2::RIGHT_CENTER, icon::CARET_RIGHT, FontId::proportional(18.0), kit::mix(theme::ON_SURFACE_VAR, Color32::WHITE, h));
     x -= 34.0;
@@ -780,11 +780,18 @@ fn center_column(ui: &mut egui::Ui, e: &mut Editor, st: &mut LibState, fr: &mut 
         }
     }
     y = buttons.bottom() + 16.0;
-    if e.own() && e.set == monadeck_core::bindings::own::PLAYSPACE {
-        let text = format!("{}  Hold to move the playspace, double press to snap it back", icon::INFO);
+    let hint = match e.set.as_str() {
+        _ if !e.own() => None,
+        monadeck_core::bindings::own::PLAYSPACE => Some("Hold to move the playspace, double press to snap it back"),
+        monadeck_core::bindings::own::MOUSE_SET => Some("While you point at a screen, and there first: a button used here does nothing else on that hand"),
+        _ => None,
+    };
+    if let Some(hint) = hint {
+        let text = format!("{}  {hint}", icon::INFO);
         let g = ui.fonts(|f| f.layout(text, FontId::proportional(13.5), theme::ON_SURFACE_VAR, rect.width() - 20.0));
+        let h = g.size().y;
         ui.painter().galley(Pos2::new(rect.center().x - g.size().x / 2.0, y), g, theme::ON_SURFACE_VAR);
-        y += 30.0;
+        y += h + 12.0;
     }
     let missing = e.unbound_required(&e.set);
     if !missing.is_empty() {

@@ -324,6 +324,16 @@ pub(super) fn shots(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId,
             edit(&mut st, |e| e.set = own::PLAYSPACE.into());
             (st, None)
         })),
+        ("bind-own-mouse", Box::new(|ctx| {
+            let mut st = own(ctx, "knuckles");
+            edit(&mut st, |e| e.set = own::MOUSE_SET.into());
+            (st, None)
+        })),
+        ("bind-own-mouse-touch", Box::new(|ctx| {
+            let mut st = own(ctx, "oculus_touch");
+            edit(&mut st, |e| e.set = own::MOUSE_SET.into());
+            (st, None)
+        })),
         // Nothing opens the dashboard: no saving.
         ("bind-own-nomenu", Box::new(|ctx| {
             let mut st = own(ctx, "knuckles");

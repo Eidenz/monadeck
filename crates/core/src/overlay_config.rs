@@ -51,8 +51,8 @@ pub struct OverlayConfig {
     /// Every screen's brightness (0.2..=1) and warm tint (0 = off ..= 1).
     pub screen_brightness: f32,
     pub screen_warmth: f32,
-    /// B on a screen sends a middle click (else a click that never moves the
-    /// cursor).
+    /// Before 1.8: B on a screen sent a middle click. It's a binding now
+    /// (`bindings::own::MOUSE_SET`): carried over once at start, then cleared.
     pub mouse_b_middle: bool,
     /// Bottom-bar order of the mirrored screens (output names, first = leftmost).
     pub screen_order: Vec<String>,

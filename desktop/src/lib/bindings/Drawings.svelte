@@ -98,6 +98,8 @@
 
   {#if e.own && e.set === "/actions/playspace"}
     <p class="hint"><Icon name="info" size={14} /> Hold to move the playspace, double press to snap it back</p>
+  {:else if e.own && e.set === "/actions/mouse"}
+    <p class="hint"><Icon name="info" size={14} /> While you point at a screen, and there first: a button used here does nothing else on that hand</p>
   {/if}
   {#if missing.length}
     <p class="hint warn"><Icon name="warning" size={14} /> Not on any input yet: {missing.join(", ")}</p>
