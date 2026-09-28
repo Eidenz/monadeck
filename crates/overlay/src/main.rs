@@ -9,6 +9,7 @@
 
 mod a11y;
 mod audio;
+mod bindings;
 mod desktop;
 mod gamemode;
 mod gamepad;
@@ -637,8 +638,10 @@ fn run() -> Result<()> {
             xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/force")?),
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick")?),
             xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
-            // Summon/dismiss is the LEFT system (menu) click only.
+            // The system buttons: the left one opens the dashboard by default,
+            // either can in Monadeck's own bindings.
             xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
+            xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/right/input/system/click")?),
             xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
             xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
             xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/left/input/b/click")?),
@@ -808,6 +811,8 @@ fn run() -> Result<()> {
     let mut collections = monadeck_core::collections::load();
 
     let mut st = ui::LibState::new();
+    // Games with controller bindings: a Steam walk, off the render thread.
+    st.binds.scan();
     st.audio_enabled = ov_cfg.audio_enabled;
     st.audio_volume = ov_cfg.audio_volume;
     st.summon_tilt = ov_cfg.summon_tilt;
@@ -868,6 +873,22 @@ fn run() -> Result<()> {
     st.watch_buttons = ov_cfg.watch_buttons.clone();
     st.keyboard_auto = ov_cfg.keyboard_auto;
     desktop.keyboard_auto = ov_cfg.keyboard_auto;
+    // The drag's Hands / Button settings became Monadeck's own bindings (1.8):
+    // carry a non-default choice over once, then drop it.
+    {
+        use monadeck_core::bindings::own;
+        let (hands, button) = (ov_cfg.ps_drag_hands.clone(), ov_cfg.ps_drag_button.clone());
+        if button != "auto" || matches!(hands.as_str(), "left" | "right") {
+            if own::migrate_legacy(&hands, &button) {
+                log::info!("bindings: playspace drag settings (hands {hands}, button {button}) moved into Monadeck's bindings");
+            }
+            ov_cfg.ps_drag_button = "auto".into();
+            if hands != "off" {
+                ov_cfg.ps_drag_hands = "both".into();
+            }
+            ov_cfg.save();
+        }
+    }
     st.ps_drag_hands = ov_cfg.ps_drag_hands.clone();
     st.ps_drag_button = ov_cfg.ps_drag_button.clone();
     st.ps_drag_vertical = ov_cfg.ps_drag_vertical;
@@ -930,7 +951,6 @@ fn run() -> Result<()> {
     let mut focused = false;
     let mut recenter = true;
     let mut visible = false; // default off — summon with a left system click
-    let mut sys_prev = false;
     let mut sys_active_prev = false; // system action active-state edge
     let mut last_active_change: Option<Instant> = None; // when is_active last flipped
     let mut blocked_prev = false; // game-input arbitration edge state
@@ -958,8 +978,6 @@ fn run() -> Result<()> {
     // Laser fade over mirrored screens: (screen index, when the ray entered it).
     let mut screen_laser_since: Option<(usize, Instant)> = None;
     // Double-tap B on the LEFT controller toggles all screens (+ keyboard).
-    let mut left_b_prev = false;
-    let mut left_b_last: Option<Instant> = None;
     // Playspace drag (WayVR-style): hold the trackpad (A+B on a glove) and move
     // the hand; the world comes along. `drag_ps` is a session-only translation
     // on top of the configured offset; a double press snaps it back to zero.
@@ -968,9 +986,21 @@ fn run() -> Result<()> {
     let mut pad_prev = [false; 2];
     let mut pad_last: [Option<Instant>; 2] = [None; 2];
     let mut pad_suppressed = [false; 2]; // held after a double press: no drag until release
-    let mut glove_mode = [false; 2]; // this hand drags with A+B (its A/B clicks are then ignored)
-    // The hand's controller has no trackpad (Touch profile): auto drags with A+B.
-    let mut no_trackpad = [false; 2];
+    // Monadeck's own bindings (the playspace drag), per controller type, run
+    // against the raw inputs; reloaded when the editor saves them.
+    let mut own_docs: HashMap<&'static str, monadeck_core::bindings::BindingDoc> =
+        monadeck_core::bindings::own::CONTROLLERS.iter().map(|c| (c.ty, monadeck_core::bindings::own::load(c.ty))).collect();
+    let mut own_eval = monadeck_core::bindings::own::Evaluator::default();
+    // Each hand's controller type, from its interaction profile (gloves override).
+    let mut profile_ty: [&'static str; 2] = ["knuckles"; 2];
+    let mut own_summary_for: Option<(&'static str, &'static str)> = None;
+    let mut snap_prev = [false; 2];
+    // What Monadeck's own bindings drove last frame (edges: the dashboard, screens).
+    let mut dash_prev = false;
+    let mut screens_prev = false;
+    let mut own_act: monadeck_core::bindings::own::Active;
+    // The system buttons as last read (with the settle guard below).
+    let mut sys_raw = [false; 2];
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     let mut kb_hover_prev: [Option<usize>; 2] = [None, None]; // key under each hand (typing haptics)
     // Re-scan to refresh last-played ordering when a game starts/stops.
@@ -1011,7 +1041,15 @@ fn run() -> Result<()> {
                 InteractionProfileChanged(_) => {
                     for (hi, path) in [left_path, right_path].into_iter().enumerate() {
                         let profile = session.current_interaction_profile(path).unwrap_or(xr::Path::NULL);
-                        no_trackpad[hi] = profile == touch_profile;
+                        // The binding editor opens games on the controller in hand, and
+                        // Monadeck's own bindings follow each hand's.
+                        if profile == index_profile {
+                            st.binds.holding = Some("knuckles");
+                            profile_ty[hi] = "knuckles";
+                        } else if profile == touch_profile {
+                            st.binds.holding = Some("oculus_touch");
+                            profile_ty[hi] = "oculus_touch";
+                        }
                         let name = if profile == xr::Path::NULL { "none".into() } else { xr_instance.path_to_string(profile).unwrap_or_default() };
                         log::info!("input: hand {hi} uses {name}");
                     }
@@ -1135,12 +1173,12 @@ fn run() -> Result<()> {
         // Live "this session" minutes for the splash.
         st.session_minutes = session_start.map(|s| (s.elapsed().as_secs() / 60) as u32);
 
-        // --- Sync actions + summon/dismiss (left system click, rising edge) --
+        // --- Sync actions; the system buttons for Monadeck's own bindings ------
+        let mut settled = true;
         if focused {
             session.sync_actions(&[(&action_set).into()])?;
             let sl = system_action.state(&session, left_path)?;
             let sys_active = sl.is_active;
-            let sys_down = sl.is_active && sl.current_state;
             // Another overlay (e.g. WayVR) blocking/unblocking our input as your
             // cursor enters/leaves its window flips the action's `is_active`, which
             // can fake a system press — so ignore press edges for a moment around
@@ -1149,21 +1187,13 @@ fn run() -> Result<()> {
                 sys_active_prev = sys_active;
                 last_active_change = Some(Instant::now());
             }
-            let settled = last_active_change.map_or(true, |t| t.elapsed().as_millis() > 150);
-            if sys_down && !sys_prev && settled {
-                visible = !visible;
-                if visible {
-                    recenter = true; // reappear in front of the head
-                    summon_at = Some(Instant::now());
-                    // Auto-select the running game, if any (SteamVR-style).
-                    if let Some(app) = &running {
-                        if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, app)) {
-                            st.selected = Some(i);
-                        }
-                    }
-                }
+            settled = last_active_change.map_or(true, |t| t.elapsed().as_millis() > 150);
+            for (hi, path) in [left_path, right_path].into_iter().enumerate() {
+                let st_ = system_action.state(&session, path)?;
+                sys_raw[hi] = st_.is_active && st_.current_state;
             }
-            sys_prev = sys_down;
+        } else {
+            sys_raw = [false; 2];
         }
 
         // --- Timer, low-battery warning, toasts (run even while hidden) ------
@@ -1589,32 +1619,80 @@ fn run() -> Result<()> {
         let local_in_stage = stage_space.as_ref().and_then(|st| locate_pose(&space, st, time));
         desktop.set_local_in_stage(local_in_stage);
 
-        // --- Playspace drag: hold trackpad (A+B on a glove), move the hand -----
+        // --- Playspace drag: hold its binding (trackpad; A+B on a glove), move the hand
         {
+            use monadeck_core::bindings::{own, Hand as BHand};
             let gloves = monado.gloves();
             st.gloves = gloves;
-            let allowed = match st.ps_drag_hands.as_str() {
-                "off" => [false, false],
-                "left" => [true, false],
-                "right" => [false, true],
-                _ => [true, true],
-            };
-            // While gaming the trackpad is the d-pad / Start / Back.
-            let allowed = if game.enabled && !visible { [false, false] } else { allowed };
-            let drag_button = st.ps_drag_button.clone();
+            st.binds.gloves = gloves.0 || gloves.1;
+            if st.binds.own_changed {
+                st.binds.own_changed = false;
+                own_docs = own::CONTROLLERS.iter().map(|c| (c.ty, own::load(c.ty))).collect();
+                own_eval.reset();
+                own_summary_for = None;
+                log::info!("bindings: Monadeck's own bindings reloaded");
+            }
+            let glove = [gloves.0, gloves.1];
+            let tys = [0, 1].map(|hi| if glove[hi] { own::GLOVES } else { profile_ty[hi] });
+            // What the Playspace page says drives it (for the controller the editor would open).
+            let shown_ty = if gloves.0 || gloves.1 { own::GLOVES } else { tys[0] };
+            if own_summary_for != Some((shown_ty, tys[1])) {
+                own_summary_for = Some((shown_ty, tys[1]));
+                if let (Some(doc), Some(ctrl)) = (own_docs.get(shown_ty), own::controller(shown_ty)) {
+                    st.ps_drag_summary = own::summary(doc, ctrl, own::MOVE);
+                }
+            }
+            let input = [0, 1].map(|hi| {
+                let r = &raw[hi];
+                own::HandInput {
+                    active: r.active,
+                    trigger: r.trigger,
+                    grip: r.grip,
+                    stick: r.stick,
+                    stick_click: r.stick_click,
+                    a: r.a,
+                    b: r.b,
+                    pad: r.pad,
+                    pad_force: r.pad_force,
+                    pad_touch: r.pad_touch,
+                    system: sys_raw[hi],
+                }
+            });
+            let docs = [&own_docs[tys[0]], &own_docs[tys[1]]];
+            own_act = own_eval.eval(docs, input, Instant::now());
+            let act = &own_act;
+            // Open / close the dashboard (its binding; the left system button by default).
+            let dash = act.any(own::DASHBOARD);
+            if dash && !dash_prev && settled {
+                visible = !visible;
+                if visible {
+                    recenter = true; // reappear in front of the head
+                    summon_at = Some(Instant::now());
+                    // Auto-select the running game, if any (SteamVR-style).
+                    if let Some(app) = &running {
+                        if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, app)) {
+                            st.selected = Some(i);
+                        }
+                    }
+                }
+            }
+            dash_prev = dash;
+            // Off, or gaming (the trackpad is the d-pad / Start / Back there).
+            let enabled = st.ps_drag_hands != "off" && !(game.enabled && !visible);
             let stage_pos = |p: &xr::Posef| {
                 let q = local_in_stage.as_ref().map_or(*p, |l| pose_compose(l, p));
                 [q.position.x, q.position.y, q.position.z]
             };
             let mut pressed = [false; 2];
             for (hi, h) in hands.iter().enumerate().take(2) {
-                glove_mode[hi] = match drag_button.as_str() {
-                    "pad" => false,
-                    "ab" => true,
-                    _ => (if hi == 0 { gloves.0 } else { gloves.1 }) || no_trackpad[hi],
-                };
-                let pad = pad_action.state(&session, h.path)?.current_state > 0.5;
-                pressed[hi] = h.active && allowed[hi] && if glove_mode[hi] { h.secondary && h.precise } else { pad };
+                let bhand = if hi == 0 { BHand::Left } else { BHand::Right };
+                pressed[hi] = h.active && enabled && act.has(bhand, own::MOVE);
+                // "Snap it back", when something's bound to it.
+                let snap = h.active && enabled && act.has(bhand, own::SNAP);
+                if snap && !snap_prev[hi] {
+                    st.ps_drag_reset_request = true;
+                }
+                snap_prev[hi] = snap;
                 if pressed[hi] && !pad_prev[hi] {
                     let double = pad_last[hi].is_some_and(|t| t.elapsed().as_millis() < 450);
                     pad_last[hi] = Some(Instant::now());
@@ -1702,11 +1780,14 @@ fn run() -> Result<()> {
                 }
             }
             st.ps_drag_offset = drag_ps;
-            // A glove hand dragging with A+B must not also click / toggle.
+            // Buttons held in a chord (A+B dragging) must not also click / toggle.
             for (hi, h) in hands.iter_mut().enumerate().take(2) {
-                if glove_mode[hi] && h.secondary && h.precise {
-                    h.secondary = false;
-                    h.precise = false;
+                for input in &act.chorded[hi] {
+                    match input.as_str() {
+                        "a" | "x" => h.secondary = false,
+                        "b" | "y" => h.precise = false,
+                        _ => {}
+                    }
                 }
             }
         }
@@ -2178,31 +2259,29 @@ fn run() -> Result<()> {
                 summon_at = Some(Instant::now());
             }
         }
-        // Double-B (left): hide every shown screen / bring the same set back.
-        // Ignored while that hand is pointing at a screen (B = frozen click there).
-        let left_b = hands.first().is_some_and(|h| h.active && h.precise && !(glove_mode[0] && h.secondary));
-        if left_b && !left_b_prev && desktop.pointing_hand() != Some(0) {
-            let double = left_b_last.is_some_and(|t| t.elapsed().as_millis() < 450);
-            if double {
-                left_b_last = None;
-                match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
-                    desktop::ToggleAll::Hidden(n) => {
-                        log::info!("desktop: double-B hid {n} item(s)");
-                        audio.tab();
-                    }
-                    desktop::ToggleAll::Shown(n) => {
-                        log::info!("desktop: double-B restored {n} item(s)");
-                        audio.tab();
-                    }
-                    desktop::ToggleAll::Nothing => {
-                        toasts.push(toast::Toast::new(toast::Kind::Info, "No screen selected", "Show screens from the watch or the bottom bar").secs(2.5));
-                    }
+        // Hide every shown screen / bring the same set back: Monadeck's own
+        // binding (double left B by default). Not for a hand pointing at a screen
+        // (B is the frozen click there) or turned into a gamepad.
+        let screens = [0, 1].into_iter().any(|hi| {
+            let bhand = if hi == 0 { monadeck_core::bindings::Hand::Left } else { monadeck_core::bindings::Hand::Right };
+            own_act.has(bhand, monadeck_core::bindings::own::SCREENS) && hands.get(hi).is_some_and(|h| h.active) && desktop.pointing_hand() != Some(hi)
+        });
+        if screens && !screens_prev {
+            match desktop.toggle_all(hmd.as_ref(), st.recenter_on_toggle) {
+                desktop::ToggleAll::Hidden(n) => {
+                    log::info!("desktop: screens binding hid {n} item(s)");
+                    audio.tab();
                 }
-            } else {
-                left_b_last = Some(Instant::now());
+                desktop::ToggleAll::Shown(n) => {
+                    log::info!("desktop: screens binding restored {n} item(s)");
+                    audio.tab();
+                }
+                desktop::ToggleAll::Nothing => {
+                    toasts.push(toast::Toast::new(toast::Kind::Info, "No screen selected", "Show screens from the watch or the bottom bar").secs(2.5));
+                }
             }
         }
-        left_b_prev = left_b;
+        screens_prev = screens;
 
         // Watch buttons must work with the dashboard dismissed, so these
         // requests drain here rather than in the visible-only path below.
@@ -3013,8 +3092,10 @@ fn run() -> Result<()> {
             st.collections = collections.iter().map(|c| c.name.clone()).collect();
             apply_user_meta(&mut st.games, &favorites, &uevr_games, &playtime, &collections);
         }
+        st.binds.poll();
         if st.refresh_request {
             st.refresh_request = false;
+            st.binds.scan();
             if refresh_rx.is_none() {
                 refresh_rx = Some(games::spawn_scan());
                 manual_refresh = true;

@@ -257,27 +257,18 @@ fn playspace(ui: &mut egui::Ui, st: &mut LibState) {
     group(ui, "Drag");
     card(ui, |ui| {
         let mut t = false;
-        let hint = match st.gloves {
-            (true, true) => "Gloves on both hands: hold A + B",
-            (true, false) => "Left glove: A + B · right: trackpad",
-            (false, true) => "Right glove: A + B · left: trackpad",
-            _ => "Hold the trackpad and move your hand · twice snaps back",
-        };
-        row(ui, "Hold to move", hint, 400.0, |ui| {
-            let ids = ["off", "left", "right", "both"];
-            let cur = ids.iter().position(|i| st.ps_drag_hands == *i).unwrap_or(usize::MAX);
-            if let Some(i) = segmented(ui, &["Off", "Left", "Right", "Both"], cur) {
-                st.ps_drag_hands = ids[i].into();
-                t = true;
-            }
-        });
+        let mut on = st.ps_drag_hands != "off";
+        let sub = if st.ps_drag_summary.is_empty() { "Hold its button and move your hand · double press snaps back".to_string() } else { format!("Hold {} and move your hand · double press snaps back", lower_first(&st.ps_drag_summary)) };
+        if switch_row(ui, "Drag the playspace", &sub, &mut on) {
+            st.ps_drag_hands = if on { "both" } else { "off" }.into();
+            t = true;
+        }
         divider(ui);
-        row(ui, "Button", "Auto: the trackpad, or A + B on a glove or a controller without one", 330.0, |ui| {
-            let ids = ["auto", "pad", "ab"];
-            let cur = ids.iter().position(|i| st.ps_drag_button == *i).unwrap_or(usize::MAX);
-            if let Some(i) = segmented(ui, &["Auto", "Trackpad", "A + B"], cur) {
-                st.ps_drag_button = ids[i].into();
-                t = true;
+        row(ui, "Buttons", "Pick them like a game's controls: per controller, with chords like A + B", 190.0, |ui| {
+            if button(ui, icon::GAME_CONTROLLER, "Edit buttons", Tone::Neutral, 170.0).clicked() {
+                st.nav = super::Nav::Bindings;
+                st.binds.open_at(crate::bindings::Target::Monadeck, monadeck_core::bindings::own::PLAYSPACE);
+                st.sound_tab = true;
             }
         });
         divider(ui);
@@ -399,4 +390,15 @@ fn monado(ui: &mut egui::Ui, st: &mut LibState) {
         }
     });
     note(ui, icon::INFO, &format!("Freeze holds that app's hands where they are while everything else keeps tracking · {:.0} s countdown (Settings › Controllers)", st.freeze_delay_secs));
+}
+
+/// "Trackpad on either hand" → "trackpad on either hand" (single letters stay: "A + B").
+fn lower_first(s: &str) -> String {
+    let first = s.split_whitespace().next().unwrap_or("");
+    if first.chars().count() > 1 && !first.chars().all(|c| c.is_uppercase()) {
+        let mut cs = s.chars();
+        cs.next().map(|c| c.to_lowercase().chain(cs).collect()).unwrap_or_default()
+    } else {
+        s.to_string()
+    }
 }
