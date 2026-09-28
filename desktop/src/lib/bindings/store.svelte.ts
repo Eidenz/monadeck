@@ -188,15 +188,29 @@ export function isOverride(): boolean {
   return !!editor.game?.source.includes("xrizer (game override)");
 }
 
-/** Write to `<game>/xrizer/<ctrl>.json` so the game's default file (which Steam
- *  may overwrite on update) is left untouched — the proper xrizer workflow. xrizer
- *  loads its overrides as `<controller>.json` directly (e.g. `knuckles.json`), NOT
- *  the `bindings_<ctrl>.json` SteamVR-style name. */
+/** xrizer's name for a controller's personal binding: its enum's Debug name,
+ *  lowercased (`oculus_touch` → `oculustouch.json`). Mirrors core `bindings::xrizer_file`. */
+const XRIZER_FILES: Record<string, string> = {
+  knuckles: "knuckles.json",
+  oculus_touch: "oculustouch.json",
+  vive_controller: "vivecontroller.json",
+  vive_focus3_controller: "vivefocus3.json",
+};
+
+/** Write to `<game>/xrizer/<file>` so the game's default file (which Steam may
+ *  overwrite on update) is left untouched — the proper xrizer workflow. xrizer
+ *  loads its overrides by its own names (e.g. `knuckles.json`, `oculustouch.json`),
+ *  NOT the `bindings_<ctrl>.json` SteamVR-style name. */
 export async function saveAsOverride() {
   if (!editor.game || !editor.binding || !validJson()) return;
   const ctrl = editor.binding.controllerType;
+  const file = XRIZER_FILES[ctrl];
+  if (!file) {
+    editor.error = `xrizer doesn't read personal bindings for ${ctrl}`;
+    return;
+  }
   const gamePath = editor.game.gamePath;
-  const path = `${gamePath}/xrizer/${ctrl}.json`;
+  const path = `${gamePath}/xrizer/${file}`;
   editor.saving = true;
   editor.error = "";
   try {
