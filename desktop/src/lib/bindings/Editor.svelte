@@ -158,7 +158,7 @@
     {:else if isDirty}
       <span class="status warn"><Icon name="circle" size={13} /> Unsaved changes</span>
     {:else if e.personal}
-      <span class="status ok"><Icon name="check" size={15} /> {e.own ? "Saved · in use in the headset" : `Saved · ${e.name} uses it from its next start`}</span>
+      <span class="status ok"><Icon name="check" size={15} /> {e.own ? "Saved · in use in the headset" : bind.live ? `Saved · ${e.name} picks it up right away` : `Saved · ${e.name} uses it from its next start`}</span>
     {:else}
       <span class="status"><Icon name="info" size={15} /> {e.own ? "Monadeck's default controls · save a change to make them yours" : "The game's own binding · save a change to make it yours"}</span>
     {/if}

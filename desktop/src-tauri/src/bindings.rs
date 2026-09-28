@@ -235,6 +235,12 @@ pub async fn bind_games() -> CmdResult<Vec<GameDto>> {
         .collect())
 }
 
+/// Whether the xrizer games run on picks up a saved binding while they run.
+#[tauri::command]
+pub async fn bind_live_reload() -> bool {
+    tauri::async_runtime::spawn_blocking(core::xrizer_reloads_live).await.unwrap_or(false)
+}
+
 /// Monadeck's own controller types with a personal binding.
 #[tauri::command]
 pub fn bind_own_personal() -> Vec<&'static str> {
@@ -373,20 +379,29 @@ pub fn bind_edit(doc: Value, ty: String, own_bindings: bool, set: String, mirror
     Ok(EditResult { doc: d.value().clone(), index })
 }
 
+#[derive(Serialize)]
+pub struct SavedDto {
+    pub path: String,
+    /// A running game picks it up right away (xrizer reloads bindings live).
+    pub live: bool,
+}
+
 /// Save as the personal binding (a game's own file is never touched).
 #[tauri::command]
-pub async fn bind_save(target: TargetDto, ty: String, doc: Value) -> CmdResult<String> {
+pub async fn bind_save(target: TargetDto, ty: String, doc: Value) -> CmdResult<SavedDto> {
     let d = BindingDoc::from_value(doc)?;
     if target.actions_path.is_none() && !own::drives(&d, own::DASHBOARD) {
         return Err("Nothing opens the dashboard: give it a button first".into());
     }
-    let p = tauri::async_runtime::spawn_blocking(move || match target.actions_path {
-        Some(_) => core::save_personal(&target.dirs(), &ty, &d),
-        None => own::save(&ty, &d),
+    tauri::async_runtime::spawn_blocking(move || {
+        let (path, live) = match target.actions_path {
+            Some(_) => (core::save_personal(&target.dirs(), &ty, &d)?, core::xrizer_reloads_live()),
+            None => (own::save(&ty, &d)?, true),
+        };
+        Ok(SavedDto { path: path.to_string_lossy().to_string(), live })
     })
     .await
-    .map_err(|e| e.to_string())??;
-    Ok(p.to_string_lossy().to_string())
+    .map_err(|e| e.to_string())?
 }
 
 /// Back to the default binding (the personal one is kept as `.bak`).

@@ -1088,6 +1088,41 @@ pub fn reset_personal(dirs: &[PathBuf], ty: &str) -> Result<bool, String> {
 
 // --- the games that have bindings -------------------------------------------------------------
 
+/// Text only an xrizer that reloads personal bindings while a game runs has in
+/// its library (its log lines about it). Monadeck's fork does; upstream reads
+/// them when a game starts. A build without it just reads as "next start".
+const LIVE_RELOAD_MARKER: &[u8] = b"Personal bindings changed";
+
+/// Whether the xrizer games run on picks up a saved binding right away.
+/// Reads its library (a few MB) once per file version: off the UI thread.
+pub fn xrizer_reloads_live() -> bool {
+    use crate::config::{MonadeckConfig, OvrRuntime};
+    let cfg = MonadeckConfig::load();
+    if cfg.ovr_runtime != OvrRuntime::Xrizer {
+        return false;
+    }
+    cfg.xrizer_path
+        .or_else(crate::launch_options::detect_xrizer_path)
+        .is_some_and(|dir| library_has(&dir.join("bin/linux64/vrclient.so"), LIVE_RELOAD_MARKER))
+}
+
+/// Whether `lib` contains `marker`, remembered per file and modification time.
+fn library_has(lib: &Path, marker: &[u8]) -> bool {
+    static SEEN: std::sync::Mutex<Option<(PathBuf, std::time::SystemTime, bool)>> = std::sync::Mutex::new(None);
+    let Ok(modified) = std::fs::metadata(lib).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((p, t, has)) = seen.as_ref() {
+        if p == lib && *t == modified {
+            return *has;
+        }
+    }
+    let has = std::fs::read(lib).is_ok_and(|data| data.windows(marker.len()).any(|w| w == marker));
+    *seen = Some((lib.to_path_buf(), modified, has));
+    has
+}
+
 /// A game whose controls can be edited: it ships an actions.json with bindings
 /// for at least one controller xrizer reads.
 #[derive(Clone, Debug)]
@@ -1310,6 +1345,21 @@ mod tests {
         assert_eq!(type_from_xrizer_file("oculustouch.json"), "oculus_touch");
         assert_eq!(type_from_xrizer_file("bindings_knuckles.json"), "knuckles");
         assert_eq!(type_from_xrizer_file("oculus_touch.json"), "oculus_touch");
+    }
+
+    #[test]
+    fn spots_an_xrizer_that_reloads_live() {
+        let dir = std::env::temp_dir().join(format!("monadeck-xrizer-lib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = dir.join("vrclient.so");
+        std::fs::write(&lib, b"\x7fELF...upstream build...").unwrap();
+        assert!(!library_has(&lib, LIVE_RELOAD_MARKER));
+        // Replaced by the fork's (a newer file): read again.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&lib, b"\x7fELF...Personal bindings changed in {}...").unwrap();
+        assert!(library_has(&lib, LIVE_RELOAD_MARKER));
+        assert!(!library_has(&dir.join("missing.so"), LIVE_RELOAD_MARKER));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

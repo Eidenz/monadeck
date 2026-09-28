@@ -32,9 +32,11 @@ enum Req {
 }
 
 enum Res {
-    Games(Vec<BindableGame>),
+    /// And whether a running game picks up a saved binding right away.
+    Games(Vec<BindableGame>, bool),
     Opened(u64, Result<Opened, String>),
-    Saved(u64, Result<PathBuf, String>),
+    /// And whether a running game picks the binding up right away.
+    Saved(u64, Result<PathBuf, String>, bool),
     Reset(u64, Result<bool, String>),
 }
 
@@ -53,12 +55,12 @@ impl Worker {
                     Req::Scan => {
                         let mut games = core::bindable_games();
                         games.sort_by(|a, b| b.last_played.unwrap_or(0).cmp(&a.last_played.unwrap_or(0)).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
-                        Res::Games(games)
+                        Res::Games(games, core::xrizer_reloads_live())
                     }
                     Req::Open { token, files: Files::Game { actions, dirs }, ty } => Res::Opened(token, core::open(&actions, &dirs, ty)),
                     Req::Open { token, files: Files::Own, ty } => Res::Opened(token, own::open(ty)),
-                    Req::Save { token, files: Files::Game { dirs, .. }, ty, doc } => Res::Saved(token, core::save_personal(&dirs, ty, &doc)),
-                    Req::Save { token, files: Files::Own, ty, doc } => Res::Saved(token, own::save(ty, &doc)),
+                    Req::Save { token, files: Files::Game { dirs, .. }, ty, doc } => Res::Saved(token, core::save_personal(&dirs, ty, &doc), core::xrizer_reloads_live()),
+                    Req::Save { token, files: Files::Own, ty, doc } => Res::Saved(token, own::save(ty, &doc), true),
                     Req::Reset { token, files: Files::Game { dirs, .. }, ty } => Res::Reset(token, core::reset_personal(&dirs, ty)),
                     Req::Reset { token, files: Files::Own, ty } => Res::Reset(token, own::reset(ty)),
                 };
@@ -231,6 +233,8 @@ pub struct BindState {
     pub own_personal: Vec<&'static str>,
     /// Monadeck's own bindings changed on disk: the overlay reloads them.
     pub own_changed: bool,
+    /// The xrizer games run on picks up a saved binding while they run.
+    pub live: bool,
     pub editor: Option<Editor>,
     /// A binding being opened: (whose, controller type).
     pub opening: Option<(Target, &'static str)>,
@@ -269,6 +273,7 @@ impl BindState {
             gloves: false,
             own_personal: own_personal(),
             own_changed: false,
+            live: false,
             editor: None,
             opening: None,
             error: None,
@@ -316,7 +321,8 @@ impl BindState {
         let results: Vec<Res> = w.rx.try_iter().collect();
         for res in results {
             match res {
-                Res::Games(games) => {
+                Res::Games(games, live) => {
+                    self.live = live;
                     // Keep an open game's editor on it across a rescan.
                     let open = self.editor.as_ref().and_then(|e| match e.target {
                         Target::Game(i) => self.games.get(i).map(|g| g.actions_path.clone()),
@@ -358,7 +364,10 @@ impl BindState {
                         (Ok(_), None) => {}
                     }
                 }
-                Res::Saved(token, r) if token == self.token => {
+                Res::Saved(token, r, live) if token == self.token => {
+                    if matches!(self.editor.as_ref().map(|e| e.target), Some(Target::Game(_))) {
+                        self.live = live;
+                    }
                     let Some(e) = self.editor.as_mut() else { continue };
                     e.busy = false;
                     match r {
@@ -372,7 +381,11 @@ impl BindState {
                                         if !g.personal.contains(&ty) {
                                             g.personal.push(ty);
                                         }
-                                        self.notice = Some(format!("Saved · {} uses it next time it starts", g.name));
+                                        self.notice = Some(if live {
+                                            format!("Saved · {} picks it up right away", g.name)
+                                        } else {
+                                            format!("Saved · {} uses it next time it starts", g.name)
+                                        });
                                     }
                                 }
                                 Target::Monadeck => {

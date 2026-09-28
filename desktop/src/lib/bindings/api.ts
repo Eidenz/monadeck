@@ -129,6 +129,7 @@ export type EditOp =
   | { op: "dropUnreadable" };
 
 export const games = () => invoke<Game[]>("bind_games");
+export const liveReload = () => invoke<boolean>("bind_live_reload");
 export const ownPersonal = () => invoke<string[]>("bind_own_personal");
 export const controllers = (ownBindings: boolean) => invoke<Controller[]>("bind_controllers", { ownBindings });
 export const modes = () => invoke<ModeDef[]>("bind_modes");
@@ -136,7 +137,7 @@ export const open = (target: Target, ty: string) => invoke<Opened>("bind_open", 
 export const view = (doc: Doc, set: string, ownBindings: boolean) => invoke<View>("bind_view", { doc, set, ownBindings });
 export const edit = (doc: Doc, ty: string, ownBindings: boolean, set: string, mirror: boolean, op: EditOp) =>
   invoke<{ doc: Doc; index: number | null }>("bind_edit", { doc, ty, ownBindings, set, mirror, op });
-export const save = (target: Target, ty: string, doc: Doc) => invoke<string>("bind_save", { target, ty, doc });
+export const save = (target: Target, ty: string, doc: Doc) => invoke<{ path: string; live: boolean }>("bind_save", { target, ty, doc });
 export const reset = (target: Target, ty: string) => invoke<boolean>("bind_reset", { target, ty });
 export const usualController = () => invoke<string>("bind_usual_controller");
 

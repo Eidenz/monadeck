@@ -153,6 +153,7 @@ pub fn run() {
             commands::launch_plugin,
             bindings::bind_games,
             bindings::bind_own_personal,
+            bindings::bind_live_reload,
             bindings::bind_controllers,
             bindings::bind_modes,
             bindings::bind_open,

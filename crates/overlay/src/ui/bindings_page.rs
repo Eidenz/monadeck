@@ -831,6 +831,8 @@ fn footer_ui(ui: &mut egui::Ui, e: &mut Editor, st: &mut LibState, game: &str, r
         (icon::CHECK, "Saved · in use now".to_string(), theme::PRIMARY)
     } else if e.own() {
         (icon::INFO, "Monadeck's default controls · save a change to make them yours".to_string(), theme::ON_SURFACE_VAR)
+    } else if e.personal && running && st.binds.live {
+        (icon::CHECK, format!("Saved · {game} is using it"), theme::PRIMARY)
     } else if e.personal && running {
         (icon::CHECK, format!("Saved · restart {game} to use it"), theme::PRIMARY)
     } else if e.personal {

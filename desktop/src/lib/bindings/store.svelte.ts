@@ -46,6 +46,8 @@ export const bind = $state({
   onlyCustomized: false,
   query: "",
   ownPersonal: [] as string[],
+  /** The xrizer games run on picks up a saved binding while they run. */
+  live: false,
   customPaths: [] as string[],
   modes: [] as ModeDef[],
   gameControllers: [] as Controller[],
@@ -83,9 +85,10 @@ export async function scan() {
   if (bind.scanning) return;
   bind.scanning = true;
   try {
-    const [games, own] = await Promise.all([api.games(), api.ownPersonal()]);
+    const [games, own, live] = await Promise.all([api.games(), api.ownPersonal(), api.liveReload()]);
     bind.games = games;
     bind.ownPersonal = own;
+    bind.live = live;
     // Keep an open game's editor on it (its list entry was replaced).
     const e = bind.editing;
     if (e?.game) e.game = games.find((g) => g.actionsPath === e.game!.actionsPath) ?? e.game;
@@ -236,7 +239,7 @@ export async function save(then?: "list" | { controller: string }) {
   e.busy = true;
   bind.error = "";
   try {
-    await api.save(e.target, e.ty, e.doc);
+    const saved = await api.save(e.target, e.ty, e.doc);
     e.saved = JSON.stringify(e.doc);
     e.personal = true;
     if (e.own) {
@@ -244,7 +247,8 @@ export async function save(then?: "list" | { controller: string }) {
       notify("Saved · in use in the headset now");
     } else {
       if (e.game && !e.game.personal.includes(e.ty)) e.game.personal = [...e.game.personal, e.ty];
-      notify(`Saved · ${e.name} uses it next time it starts`);
+      bind.live = saved.live;
+      notify(saved.live ? `Saved · ${e.name} picks it up right away` : `Saved · ${e.name} uses it next time it starts`);
     }
     if (then === "list") close();
     else if (then) switchController(then.controller, true);
