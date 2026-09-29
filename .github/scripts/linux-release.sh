@@ -36,6 +36,23 @@ deps() {
       | tar -xJ -C /usr/local --strip-components=1
   fi
   npm install -g "pnpm@${PNPM_VERSION}"
+  curl -fsSL -o /usr/local/bin/appimagetool \
+    https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+  chmod +x /usr/local/bin/appimagetool
+}
+
+# Tauri's AppImage carries the build system's libwayland-*, and a newer Mesa
+# can't set up EGL next to them: WebKit's web process aborts, and the window
+# stays empty (invisible, being frameless). Every desktop has its own copy, so
+# take them out and pack the image again.
+drop_wayland() {
+  local img work
+  img=$(realpath "$1")
+  work=$(mktemp -d)
+  (cd "$work" && "$img" --appimage-extract >/dev/null)
+  rm -f "$work"/squashfs-root/usr/lib/libwayland-*.so*
+  ARCH=x86_64 appimagetool --no-appstream "$work/squashfs-root" "$img"
+  rm -rf "$work"
 }
 
 build() {
@@ -67,6 +84,7 @@ build() {
   rm -rf dist
   mkdir -p dist
   local bundle=desktop/src-tauri/target/release/bundle
+  drop_wayland "$bundle"/appimage/*.AppImage
   cp "$bundle"/deb/*.deb "$bundle"/rpm/*.rpm "$bundle"/appimage/*.AppImage dist/
   (cd dist && sha256sum -- * >SHA256SUMS)
   ls -l dist
