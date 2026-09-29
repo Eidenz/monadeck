@@ -54,7 +54,6 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::load())
         .setup(|app| {
@@ -147,6 +146,7 @@ pub fn run() {
             commands::run_survive_calibration,
             commands::install_builtin_monado,
             commands::install_builtin_xrizer,
+            commands::open_url,
             commands::uevr_status,
             commands::install_chihuahua,
             commands::list_installed_apps,
