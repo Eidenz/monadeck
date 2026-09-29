@@ -13,7 +13,7 @@ Built for a Monado + xrizer workflow.
 <td align="center" valign="top"><img src="screenshots/watch.jpg" width="260" alt="Wrist watch"><br><sub>Wrist watch</sub></td>
 </tr>
 <tr>
-<td align="center" valign="top"><img src="screenshots/photos.jpg" width="260" alt="Screenshots in the headset"><br><sub>Screenshots & photos</sub></td>
+<td align="center" valign="top"><img src="screenshots/bindings.jpg" width="260" alt="Controller binding editor in the headset"><br><sub>Controller bindings</sub></td>
 <td align="center" valign="top"><img src="screenshots/playspace.jpg" width="260" alt="Playspace tools"><br><sub>Playspace tools</sub></td>
 <td align="center" valign="top"><img src="screenshots/desktop.jpg" width="260" alt="Desktop control panel"><br><sub>Desktop control panel</sub></td>
 </tr>

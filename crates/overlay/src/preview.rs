@@ -266,9 +266,10 @@ pub fn run(dir: &Path) -> Result<()> {
 
 /// `MONADECK_PREVIEW_ONLY=readme`: the README's shots from real renders, with
 /// a headset and two controllers and nothing running: the watch, the Home
-/// dashboard with your Steam library's art, the playspace tools, and the
-/// layers of the screenshots shot (background, photo window, watch with a
-/// new-screenshot card) for compositing.
+/// dashboard with your Steam library's art, the playspace tools, the binding
+/// editor on VRChat's Index binding (from your library), and the layers of the
+/// screenshots shot (background, photo window, watch with a new-screenshot
+/// card) for compositing.
 fn readme(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir: &Path) -> Result<()> {
     use crate::ui::{Nav, SystemTab};
     let games = readme_games(ctx);
@@ -376,6 +377,23 @@ fn readme(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir
     let mut st = state(Nav::Home);
     st.wrist_shot = Some(crate::ui::WristShot { thumb: Some(shot_tex.clone()), qr: None, when: "2026/09/24 22:49:51".into(), idx: 0, total: 1 });
     save(&shoot_over(ctx, textures, WATCH_PX, 6, true, |ctx| crate::ui::build_watch(ctx, &mut st)), "readme-layer-watch.png")?;
+
+    // The binding editor on VRChat's own Index binding (a personal one of yours
+    // left out), the pointer on the left trigger: the line to the drawing.
+    // Last, and its rail first: the pointer's shot moves the shared clock on.
+    let mut st = state(Nav::Bindings);
+    let b_rail = shoot_over(ctx, textures, RAIL_PX, 6, true, |ctx| crate::ui::build_rail(ctx, &mut st));
+    let mut st = state(Nav::Bindings);
+    {
+        use monadeck_core::bindings as core;
+        let games = core::bindable_games();
+        let i = games.iter().position(|g| g.name.to_lowercase().contains("vrchat")).ok_or_else(|| anyhow::anyhow!("VRChat's bindings aren't in your library"))?;
+        let opened = core::open(&games[i].actions_path, &[], "knuckles").map_err(anyhow::Error::msg)?;
+        st.binds.show(games.clone(), crate::bindings::Target::Game(i), core::controller("knuckles").expect("Index controllers"), opened);
+    }
+    let b_main = shoot_with(ctx, textures, MAIN_PX, 12, Some(egui::pos2(150.0, 342.0)), |ctx| crate::ui::build_main(ctx, &mut st));
+    save(&b_main, "readme-bindings.png")?;
+    jpg(&readme_crop(&in_vr(&composite(&b_rail, &b_main, &bottom, None))), "readme-bindings-vr.jpg")?;
     Ok(())
 }
 
