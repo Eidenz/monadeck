@@ -11,6 +11,7 @@ use crate::mathx::{
     cross, forward, normalize, q_mul, qf, quat_from_axes, quat_from_axis_angle, quat_rotate, quatf,
     vec3f,
 };
+use monadeck_core::host;
 
 /// egui logical-pixel scale. Larger => crisper text at the cost of fill-rate.
 pub const PPP: f32 = 1.5;
@@ -120,7 +121,7 @@ fn cjk_candidates() -> Vec<(std::path::PathBuf, u32, bool)> {
     }
     // fontconfig's choice for Japanese. Its index packs a named instance into
     // the high bits; the face is the low 16.
-    if let Ok(o) = std::process::Command::new("fc-match").args(["-f", "%{file}|%{index}", "sans-serif:lang=ja"]).output() {
+    if let Ok(o) = host::command("fc-match").args(["-f", "%{file}|%{index}", "sans-serif:lang=ja"]).output() {
         let s = String::from_utf8_lossy(&o.stdout);
         if let Some((file, idx)) = s.split_once('|') {
             out.push((file.into(), idx.trim().parse::<u32>().unwrap_or(0) & 0xFFFF, false));

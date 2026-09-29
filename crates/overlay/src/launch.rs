@@ -10,6 +10,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use monadeck_core::host;
 
 /// A flat game whose process has lived this long counts as launched.
 const FLAT_SETTLE: Duration = Duration::from_secs(12);
@@ -253,7 +254,7 @@ pub fn selftest() -> anyhow::Result<()> {
 
     // Live watch: a stand-in for `reaper SteamLaunch AppId=<id> -- …`.
     let id = "4242424242";
-    let mut child = std::process::Command::new("sh").args(["-c", "sleep 3; true", "sh", "SteamLaunch", &format!("AppId={id}")]).spawn()?;
+    let mut child = host::command("sh").args(["-c", "sleep 3; true", "sh", "SteamLaunch", &format!("AppId={id}")]).spawn()?;
     let watch = ProcWatch::new();
     watch.watch(Some(id.into()));
     let t0 = Instant::now();

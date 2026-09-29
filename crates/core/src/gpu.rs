@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use crate::host;
 
 /// AMD VR profile is index 4 in `pp_power_profile_mode`.
 const VR_INDEX: &str = "4";
@@ -114,7 +115,7 @@ fn is_vendor(device_dir: &Path, vendor: &str) -> bool {
 /// Set the VR power profile on the detected AMD GPU via `pkexec`. Blocking.
 pub fn set_vr_profile() -> Result<()> {
     let gpu = find_amd_gpu().context("no AMD GPU with a power-profile control found")?;
-    let status = std::process::Command::new("pkexec")
+    let status = host::command("pkexec")
         .args(["sh", "-c", &format!("echo {VR_INDEX} > {}", gpu.profile_path)])
         .status()
         .context("failed to launch pkexec")?;

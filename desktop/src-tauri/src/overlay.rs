@@ -7,7 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
+use monadeck_core::host;
 
 /// Locate the overlay binary: env override → sidecar next to us → dev target → PATH.
 /// Mirrors nemurixr's resolver so dev (`pnpm tauri dev`) and bundled installs
@@ -51,7 +52,7 @@ fn overlay_bin() -> Option<PathBuf> {
 pub fn launch(env: &HashMap<String, String>) -> Result<Child, String> {
     let bin = overlay_bin()
         .ok_or_else(|| "overlay binary not found (build it: cargo build -p monadeck-overlay)".to_string())?;
-    let child = Command::new(&bin)
+    let child = host::command(&bin)
         .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

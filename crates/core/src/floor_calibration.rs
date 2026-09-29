@@ -26,9 +26,10 @@
 use crate::steam;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread::sleep;
 use std::time::Duration;
+use crate::host;
 
 /// `<lib>/steamapps/common/SteamVR/bin/linux64` — the dir holding `vrcmd` — found
 /// by scanning the Steam libraries, the same place Envision looks. `None` if
@@ -77,7 +78,7 @@ pub fn run() -> Result<(), String> {
 
     // Pose-polling server: brings vrserver + the lighthouse driver up so the reset
     // has a live HMD pose (the headset sitting on the floor) to anchor to.
-    let mut server = Command::new(&vrcmd)
+    let mut server = host::command(&vrcmd)
         .arg("--pollposes")
         .env("LD_LIBRARY_PATH", ld)
         .stdin(Stdio::null())
@@ -91,7 +92,7 @@ pub fn run() -> Result<(), String> {
     sleep(Duration::from_secs(2));
 
     // The actual calibration: writes chaperone_info.vrchap from the current pose.
-    let out = Command::new(&vrcmd)
+    let out = host::command(&vrcmd)
         .arg("--resetroomsetup")
         .env("LD_LIBRARY_PATH", ld)
         .output();

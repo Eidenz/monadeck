@@ -9,6 +9,7 @@ use std::{fs, path::Path, path::PathBuf, time::SystemTime};
 
 use anyhow::Result;
 use chrono::{Local, TimeZone};
+use monadeck_core::host;
 
 pub enum PhotoAction {
     None,
@@ -86,7 +87,7 @@ pub fn shot_time(path: &Path) -> String {
 
 pub fn copy_to_clipboard(path: &str) {
     match fs::File::open(path) {
-        Ok(file) => match std::process::Command::new("wl-copy")
+        Ok(file) => match host::command("wl-copy")
             .arg("--type")
             .arg("image/png")
             .stdin(std::process::Stdio::from(file))
@@ -101,7 +102,7 @@ pub fn copy_to_clipboard(path: &str) {
 
 pub fn copy_text_to_clipboard(text: &str) {
     use std::io::Write;
-    match std::process::Command::new("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
+    match host::command("wl-copy").stdin(std::process::Stdio::piped()).spawn() {
         Ok(mut child) => {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());

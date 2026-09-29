@@ -17,7 +17,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use crate::host;
 
 const MONADO_REPO: &str = "Eidenz/Monado";
 const XRIZER_REPO: &str = "Eidenz/xrizer";
@@ -69,7 +69,7 @@ fn require_tools(tools: &[&str]) -> Result<()> {
 }
 
 fn run(cmd: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(cmd)
+    let status = host::command(cmd)
         .args(args)
         .status()
         .with_context(|| format!("failed to launch {cmd}"))?;
@@ -82,7 +82,7 @@ fn run(cmd: &str, args: &[&str]) -> Result<()> {
 /// Fetch the newest published (non-prerelease) release of `repo`.
 fn latest_release(repo: &str) -> Result<Release> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let out = Command::new("curl")
+    let out = host::command("curl")
         .args([
             "-fsSL",
             "-H",
@@ -161,7 +161,7 @@ pub fn install_monado() -> Result<Installed> {
     if let Some(sha) = sha {
         let sha_path = tmp.join(&sha.name);
         download(&sha.browser_download_url, &sha_path)?;
-        let status = Command::new("sha256sum")
+        let status = host::command("sha256sum")
             .arg("-c")
             .arg(&sha.name)
             .current_dir(&tmp)
