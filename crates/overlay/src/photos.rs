@@ -15,6 +15,7 @@ use openxr as xr;
 use crate::gfx::{make_panel, quad_layer, render_panel, theme, PanelGfx};
 use crate::mathx::{front_pose, pose_compose, pose_invert, raycast};
 use crate::shots::{self, PhotoAction, ShotOutcome};
+use monadeck_core::host;
 
 pub const SLOTS: usize = 3;
 const MAX_PENDING: usize = 8;
@@ -478,7 +479,7 @@ impl Photos {
 
     fn open_qr(&mut self, content: &str, when: &str, hmd: Option<&xr::Posef>) {
         if content.starts_with("http://") || content.starts_with("https://") {
-            match std::process::Command::new("xdg-open").arg(content).spawn() {
+            match host::command("xdg-open").arg(content).spawn() {
                 Ok(_) => log::info!("photos: opened {content}"),
                 Err(e) => log::warn!("photos: xdg-open {content}: {e}"),
             }

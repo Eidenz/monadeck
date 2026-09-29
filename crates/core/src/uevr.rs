@@ -25,7 +25,8 @@ use crate::paths::{home, monadeck_config_dir, monadeck_data_dir};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use crate::host;
 
 // --- per-game "VR Mod enabled" store (keyed by cover id, like favorites) -------
 
@@ -122,7 +123,7 @@ pub fn launch(appid: &str, exe: &str, start_dir: &str, opts: &LaunchOpts) -> std
     ]);
     log::info!("UEVR: launching under pty: {inner}  (output -> {})", log_path.display());
 
-    let spawned = Command::new("script")
+    let spawned = host::command("script")
         .arg("-qec")
         .arg(&inner)
         .arg(&log_path)
@@ -134,7 +135,7 @@ pub fn launch(appid: &str, exe: &str, start_dir: &str, opts: &LaunchOpts) -> std
         // `script` missing — fall back to a direct spawn. chihuahua may still crash
         // without a tty, but this is better than failing to launch entirely.
         log::warn!("`script` unavailable ({e}); spawning chihuahua directly (no pty)");
-        Command::new("protontricks-launch")
+        host::command("protontricks-launch")
             .args(["--no-runtime", "--no-bwrap", "--appid", appid])
             .arg(&chihuahua)
             .arg(&wine)
@@ -233,7 +234,7 @@ fn download_chihuahua(dir: &Path) -> std::io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let zip = dir.join("chihuahua.zip");
     log::info!("downloading chihuahua injector from {CHIHUAHUA_ZIP_URL}");
-    let ok = Command::new("curl")
+    let ok = host::command("curl")
         .args(["-fsSL", "--retry", "2", "-o"])
         .arg(&zip)
         .arg(CHIHUAHUA_ZIP_URL)
@@ -243,7 +244,7 @@ fn download_chihuahua(dir: &Path) -> std::io::Result<PathBuf> {
     if !ok {
         return Err(err("failed to download chihuahua (curl)"));
     }
-    let ok = Command::new("unzip")
+    let ok = host::command("unzip")
         .args(["-o", "-q"])
         .arg(&zip)
         .arg("-d")

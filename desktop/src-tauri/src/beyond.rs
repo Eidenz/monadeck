@@ -11,7 +11,7 @@ use monadeck_core::installer::{install_bsbcams, Installed};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use monadeck_core::host;
 use tauri::State;
 
 use crate::state::AppState;
@@ -81,7 +81,7 @@ fn install_rule_blocking() -> Result<(), String> {
     let script = format!(
         "install -m 0644 \"$1\" '{RULE_PATH}' && udevadm control --reload-rules && udevadm trigger --subsystem-match=usb"
     );
-    let status = Command::new("pkexec")
+    let status = host::command("pkexec")
         .arg("/bin/sh")
         .arg("-c")
         .arg(&script)

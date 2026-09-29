@@ -30,7 +30,7 @@ mod ui;
 
 use std::collections::{HashMap, HashSet};
 use std::os::raw::c_char;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -44,6 +44,7 @@ use gfx::{
     render_panel,
 };
 use mathx::{front_pose, level_within, locate_pose, offset_pose, pose_compose, pose_invert, posef, qf, quat_rotate, raycast, raycast_cylinder};
+use monadeck_core::host;
 
 static VK_ENTRY: OnceLock<ash::Entry> = OnceLock::new();
 
@@ -1941,7 +1942,7 @@ fn run() -> Result<()> {
         if st.screenshot_request {
             st.screenshot_request = false;
             // The fork's compositor takes a screenshot on SIGUSR1.
-            match std::process::Command::new("pkill").args(["-USR1", "-x", "monado-service"]).status() {
+            match host::command("pkill").args(["-USR1", "-x", "monado-service"]).status() {
                 Ok(s) if s.success() => log::info!("screenshot requested (SIGUSR1)"),
                 Ok(_) => {
                     log::warn!("screenshot: monado-service not found");
@@ -3538,7 +3539,7 @@ fn stop_game(app: &str) {
         return;
     }
     log::info!("stop: SIGTERM processes matching '{name}'");
-    let _ = Command::new("pkill")
+    let _ = host::command("pkill")
         .arg("-TERM")
         .arg("-f")
         .arg(name)
@@ -3600,7 +3601,7 @@ fn launch_game_id(game_id: &str, name: &str) {
     let uri = format!("steam://rungameid/{game_id}");
     log::info!("launching '{name}' via {uri}");
     let spawn = |bin: &str| {
-        Command::new(bin).arg(&uri).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        host::command(bin).arg(&uri).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
     };
     if spawn("steam").is_err() {
         if let Err(e) = spawn("xdg-open") {

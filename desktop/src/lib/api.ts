@@ -68,6 +68,8 @@ export const runSurviveCalibration = () =>
 import type { Installed, UevrStatus } from "./types";
 export const installBuiltinMonado = () =>
   invoke<Installed>("install_builtin_monado");
+/** A web link in the user's browser (the system's xdg-open, not the AppImage's). */
+export const openUrl = (url: string) => invoke<void>("open_url", { url });
 export const installBuiltinXrizer = () =>
   invoke<Installed>("install_builtin_xrizer");
 

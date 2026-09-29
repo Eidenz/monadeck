@@ -6,10 +6,11 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, sleep, JoinHandle};
 use std::time::Duration;
+use crate::host;
 
 /// Keep memory bounded for a long-running session; monado is chatty.
 const MAX_LINES: usize = 8000;
@@ -68,7 +69,7 @@ impl CmdRunner {
         // which makes the service abort with `epoll_ctl(stdin) failed`. We hold
         // the write end open (never take `child.stdin`) so it keeps running;
         // closing it (on drop) signals the service to exit cleanly.
-        let mut child = Command::new(command)
+        let mut child = host::command(command)
             .args(args)
             .envs(env)
             .stdin(Stdio::piped())

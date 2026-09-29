@@ -23,13 +23,14 @@
 //! touch a boot that is going well.
 
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use crate::host;
 
 /// How long after service start the failure window stays open. The observed
 /// freeze hits ~4s after launch; a slow lighthouse/device init can stretch the
@@ -112,7 +113,7 @@ impl KwinFreezeWatch {
 
         // Follow only new kwin lines; `-o cat` drops metadata so line matching
         // is trivial.
-        let child = Command::new("journalctl")
+        let child = host::command("journalctl")
             .args(["-f", "-n", "0", "-o", "cat", "-t", "kwin_wayland"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -231,7 +232,7 @@ impl Drop for KwinFreezeWatch {
 /// absent from this list — it only appears when kwin wrongly adopts it).
 /// `None` when kscreen-doctor is missing or its output can't be parsed.
 fn desktop_output_names() -> Option<Vec<String>> {
-    let out = Command::new("kscreen-doctor")
+    let out = host::command("kscreen-doctor")
         .args(["-o", "--json"])
         .stdin(Stdio::null())
         .output()
@@ -262,7 +263,7 @@ fn recover(baseline: &[String]) -> FreezeRecovery {
         if baseline.iter().any(|b| b == &name) {
             continue;
         }
-        let ok = Command::new("kscreen-doctor")
+        let ok = host::command("kscreen-doctor")
             .arg(format!("output.{name}.disable"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -309,7 +310,7 @@ mod tests {
         // Give journalctl -f a moment to start following before we emit.
         std::thread::sleep(Duration::from_millis(800));
         for _ in 0..SPAM_LINES + 5 {
-            let _ = Command::new("logger")
+            let _ = host::command("logger")
                 .args(["-t", "kwin_wayland", "Atomic modeset commit failed! Invalid argument"])
                 .status();
         }
@@ -350,7 +351,7 @@ mod tests {
         // ~30 lines/s for 2.5 s: past the trigger, then past STUCK_AFTER.
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_millis(2500) {
-            let _ = Command::new("logger")
+            let _ = host::command("logger")
                 .args(["-t", "kwin_wayland", "Atomic modeset commit failed! Invalid argument"])
                 .status();
             std::thread::sleep(Duration::from_millis(30));

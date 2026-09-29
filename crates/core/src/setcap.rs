@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use crate::host;
 
 /// Whether the capability the service wants is currently set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub fn status(binary: &Path) -> CapStatus {
     let Some(getcap) = find_tool("getcap") else {
         return CapStatus::NoTooling;
     };
-    match Command::new(getcap).arg(binary).output() {
+    match host::command(getcap).arg(binary).output() {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_lowercase();
             if stdout.contains("cap_sys_nice=eip") {
@@ -89,7 +89,7 @@ pub fn apply(binary: &Path) -> Result<()> {
         bail!("pkexec not found; cannot elevate to run setcap");
     }
     let cmd = setcap_command(binary);
-    let status = Command::new("pkexec")
+    let status = host::command("pkexec")
         .args(&cmd)
         .status()
         .context("failed to launch pkexec")?;

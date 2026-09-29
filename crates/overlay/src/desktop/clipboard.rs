@@ -2,10 +2,11 @@
 //! clipboard needs focus (or a data-control protocol), so we lean on
 //! `wl-paste` from wl-clipboard, polled on a thread only while the keyboard is
 //! up. Absent tool → no preview, nothing else breaks.
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use monadeck_core::host;
 
 pub struct ClipboardWatcher {
     active: Arc<AtomicBool>,
@@ -15,7 +16,7 @@ pub struct ClipboardWatcher {
 
 impl ClipboardWatcher {
     pub fn new() -> Self {
-        let available = Command::new("wl-paste").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok();
+        let available = host::command("wl-paste").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok();
         let active = Arc::new(AtomicBool::new(false));
         let latest: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         if available {
@@ -24,7 +25,7 @@ impl ClipboardWatcher {
                 .name("clipboard-watch".into())
                 .spawn(move || loop {
                     if a.load(Ordering::Relaxed) {
-                        let out = Command::new("wl-paste")
+                        let out = host::command("wl-paste")
                             .args(["--no-newline", "-t", "text/plain"])
                             .stderr(Stdio::null())
                             .output();

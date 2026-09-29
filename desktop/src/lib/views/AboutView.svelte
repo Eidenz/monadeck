@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "$lib/api";
   import { app } from "$lib/state.svelte";
 
   // Mirrors the README's Credits section: keep the two in step.

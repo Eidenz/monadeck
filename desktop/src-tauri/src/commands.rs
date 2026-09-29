@@ -846,6 +846,25 @@ pub async fn install_builtin_monado(state: State<'_, AppState>) -> CmdResult<Ins
     .map_err(|e| e.to_string())?
 }
 
+/// Open a web link in the user's browser, through the system's xdg-open (so the
+/// browser doesn't inherit the AppImage's environment: see core::host).
+#[tauri::command]
+pub fn open_url(url: String) -> CmdResult<()> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(format!("Not a web link: {url}"));
+    }
+    let mut child = monadeck_core::host::command("xdg-open")
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Couldn't open {url}: {e}"))?;
+    // Reap it when it's done handing the link over.
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 /// Download + install the latest xrizer release and register it as the OpenVR
 /// runtime in config (path + ovr_runtime). Blocking (network + extract).
 #[tauri::command]

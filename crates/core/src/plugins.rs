@@ -9,8 +9,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::Duration;
+use crate::host;
 
 /// When a plugin should run relative to the monado service lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -87,7 +88,7 @@ impl Plugin {
             );
         }
         let argv = self.argv()?;
-        let child = Command::new(&argv[0])
+        let child = host::command(&argv[0])
             .args(&argv[1..])
             .envs(env)
             // Detach stdio so a chatty plugin doesn't block on a full pipe; its

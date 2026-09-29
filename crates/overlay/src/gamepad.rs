@@ -18,6 +18,7 @@ pub use monadeck_core::gamepad_profiles::{Axis, Btn};
 use input_linux::{
     AbsoluteAxis, AbsoluteInfo, AbsoluteInfoSetup, EventKind, ForceFeedbackKind, InputId, Key, RelativeAxis, UInputHandle,
 };
+use monadeck_core::host;
 
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
@@ -467,7 +468,7 @@ pub fn selftest() -> Result<()> {
     std::thread::sleep(Duration::from_millis(300));
     let node = pad.node().ok_or_else(|| anyhow!("could not find the pad's /dev/input/event* node"))?;
     println!("pad: {node}");
-    if let Ok(out) = std::process::Command::new("udevadm").args(["info", "--query=property", "--name", &node]).output() {
+    if let Ok(out) = host::command("udevadm").args(["info", "--query=property", "--name", &node]).output() {
         let text = String::from_utf8_lossy(&out.stdout);
         for key in ["ID_INPUT_JOYSTICK", "ID_VENDOR_ID", "ID_MODEL_ID", "NAME", "ID_BUS"] {
             if let Some(l) = text.lines().find(|l| l.starts_with(&format!("{key}="))) {
