@@ -3247,14 +3247,25 @@ fn render_keyboard<'a>(
 ) -> Result<Option<xr::CompositionLayerQuad<'a, xr::Vulkan>>> {
     if !desktop.keyboard.visible || !desktop.keyboard.placed {
         desktop.keyboard.clicked = false;
+        // Shown again later: drawn afresh.
+        desktop.keyboard.drawn = None;
         return Ok(None);
     }
     panel.pose = desktop.keyboard.pose;
     panel.size_m = desktop::keyboard::size_m_scaled(desktop.keyboard.scale);
-    let kb = &mut desktop.keyboard;
-    render_panel(panel, device, render_pass, cmd, cmd_pool, queue, fence, true, pointer, (0.0, 0.0), elapsed, |ctx| {
-        desktop::keyboard::build(ctx, kb)
-    })?;
+    // Drawn only when the picture can change: the laser on it (or just off
+    // it), a key state or label changing, egui animating. Otherwise the last
+    // image stays up, and the frame doesn't wait on the GPU for it.
+    let look = desktop.keyboard.look();
+    let still = pointer.is_none() && panel.pointer_away() && !desktop.keyboard.repaint;
+    if !still || desktop.keyboard.drawn != Some(look) {
+        let kb = &mut desktop.keyboard;
+        let again = render_panel(panel, device, render_pass, cmd, cmd_pool, queue, fence, true, pointer, (0.0, 0.0), elapsed, |ctx| {
+            desktop::keyboard::build(ctx, kb)
+        })?;
+        desktop.keyboard.repaint = again;
+        desktop.keyboard.drawn = Some(look);
+    }
     desktop.flush_keyboard();
     if !desktop.keyboard.visible {
         return Ok(None);

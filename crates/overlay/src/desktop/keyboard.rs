@@ -151,6 +151,10 @@ pub struct KeyboardState {
     pub screen_toggle_request: Option<usize>,
     /// Key held under the pointer: (key index, pressed at, repeats sent).
     hold: Option<(usize, Instant, u32)>,
+    /// [`Self::look`] when the panel was last drawn (None: draw it afresh).
+    pub drawn: Option<u64>,
+    /// egui asked for another frame after the last one (an animation).
+    pub repaint: bool,
 }
 
 impl KeyboardState {
@@ -180,7 +184,21 @@ impl KeyboardState {
             screens: Vec::new(),
             screen_toggle_request: None,
             hold: None,
+            drawn: None,
+            repaint: false,
         }
+    }
+
+    /// Everything the panel shows besides what the laser does to it: while
+    /// this stays the same and the laser is elsewhere, the last drawn image
+    /// still holds.
+    pub fn look(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.labels.current, &self.labels.layout_names, &self.clipboard).hash(&mut h);
+        (self.latched, self.caps, self.shift_locked, self.secondary_hover).hash(&mut h);
+        (&self.screens, self.attached.is_some()).hash(&mut h);
+        h.finish()
     }
 
     /// Pose docked under a screen of `screen_size` at `screen_pose`.
@@ -601,5 +619,36 @@ mod tests {
         frame(&ctx, &mut st, 0.04, vec![egui::Event::PointerMoved(off)]);
         frame(&ctx, &mut st, 0.06, vec![egui::Event::PointerMoved(off), trigger(off, false)]);
         assert_eq!(st.pending.len(), 1);
+    }
+
+    #[test]
+    fn an_idle_keyboard_asks_for_no_more_frames() {
+        // It's only redrawn on changes, so egui mustn't want frames forever.
+        let ctx = egui::Context::default();
+        let mut st = KeyboardState::new();
+        let a = centre_of(&st, 30);
+        frame(&ctx, &mut st, 0.0, vec![egui::Event::PointerMoved(a)]);
+        frame(&ctx, &mut st, 0.1, vec![egui::Event::PointerGone]);
+        let mut wants = true;
+        for i in 0..40 {
+            let out = frame(&ctx, &mut st, 0.2 + i as f64 * 0.05, Vec::new());
+            wants = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay.is_zero();
+            if !wants {
+                break;
+            }
+        }
+        assert!(!wants, "egui keeps asking for frames with the laser away");
+    }
+
+    #[test]
+    fn the_look_follows_what_the_panel_shows() {
+        let mut st = KeyboardState::new();
+        let before = st.look();
+        st.latched = MOD_SHIFT;
+        assert_ne!(st.look(), before);
+        st.latched = 0;
+        assert_eq!(st.look(), before);
+        st.clipboard = Some("copied".into());
+        assert_ne!(st.look(), before);
     }
 }

@@ -189,6 +189,13 @@ pub struct PanelGfx {
     prev_down: bool,
 }
 
+impl PanelGfx {
+    /// egui has been told the laser left (nothing on the panel follows it).
+    pub fn pointer_away(&self) -> bool {
+        self.prev_pos.is_none() && !self.prev_down
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn make_panel(
     session: &xr::Session<xr::Vulkan>,
@@ -290,7 +297,8 @@ fn make_framebuffers(
 }
 
 /// Run egui for this panel and rasterise it to the next swapchain image.
-/// `pointer` is the laser hit in (u, v, down) panel-space, if any.
+/// `pointer` is the laser hit in (u, v, down) panel-space, if any. Returns
+/// whether egui wants the next frame too (an animation still running).
 #[allow(clippy::too_many_arguments)]
 pub fn render_panel(
     p: &mut PanelGfx,
@@ -305,7 +313,7 @@ pub fn render_panel(
     scroll: (f32, f32),
     time: f64,
     mut build: impl FnMut(&egui::Context),
-) -> Result<()> {
+) -> Result<bool> {
     let pos = pointer.map(|(u, v, _)| egui::pos2(u * p.px.0 as f32 / PPP, v * p.px.1 as f32 / PPP));
     let down = pointer.is_some_and(|(_, _, d)| d);
 
@@ -398,7 +406,7 @@ pub fn render_panel(
         .free_textures(&out.textures_delta.free)
         .map_err(|e| anyhow::anyhow!("free_textures: {e}"))?;
     p.swapchain.release_image()?;
-    Ok(())
+    Ok(out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay.is_zero()))
 }
 
 pub fn quad_layer<'a>(
