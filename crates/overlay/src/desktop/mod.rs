@@ -260,6 +260,11 @@ pub struct DesktopViewer {
     held_press: Option<(f64, f64)>,
     dragging: bool,
     frozen: bool,
+    /// Modifiers latched on the VR keyboard, held down for the held mouse
+    /// button (Shift-click, Ctrl-click, a Meta-drag)…
+    held_mods: u8,
+    /// …and while the wheel turns (Ctrl-scroll).
+    wheel_mods: u8,
     hover_prev: Option<(f64, f64)>,
     select_prev: [bool; 2],
     mouse_prev: [MouseInput; 2],
@@ -385,6 +390,8 @@ impl DesktopViewer {
             held_press: None,
             dragging: false,
             frozen: false,
+            held_mods: 0,
+            wheel_mods: 0,
             hover_prev: None,
             select_prev: [false; 2],
             mouse_prev: [MouseInput::default(); 2],
@@ -1465,15 +1472,9 @@ impl DesktopViewer {
             for a in pending {
                 match a {
                     KeyAction::Tap { code, mods } => {
-                        let held: Vec<u16> = [
-                            keyboard::MOD_SHIFT,
-                            keyboard::MOD_CTRL,
-                            keyboard::MOD_ALT,
-                            keyboard::MOD_SUPER,
-                            keyboard::MOD_ALTGR,
-                        ]
-                        .into_iter()
-                        .filter(|m| mods & m != 0)
+                        let held: Vec<u16> = keyboard::MODS
+                            .into_iter()
+                            .filter(|m| mods & m != 0)
                         .map(keyboard::mod_code)
                         .collect();
                         for &m in &held {
@@ -1715,6 +1716,7 @@ impl DesktopViewer {
     pub fn update_input(&mut self, hands: &[HandInput], max_t: Option<f32>, hmd: Option<&xr::Posef>) -> InputOut {
         let mut out = InputOut::default();
         self.pointing = None;
+        let mut scrolled = false;
         let curved_ok = self.caps.curved;
         let now = Instant::now();
         let n_items = self.screens.len();
@@ -2046,6 +2048,11 @@ impl DesktopViewer {
                             if let Some(code) = code {
                                 hid.mouse_move(x, y);
                                 self.hover_prev = Some((x, y));
+                                // Modifiers latched on the VR keyboard hold for the
+                                // click, which uses them up like a key does.
+                                let mods = self.keyboard.latched;
+                                hold_mods(hid, self.held_mods | self.wheel_mods, mods | self.wheel_mods);
+                                self.held_mods = mods;
                                 hid.button(code, true);
                                 self.held = Some((hi, code));
                                 self.held_press = Some((x, y));
@@ -2053,14 +2060,25 @@ impl DesktopViewer {
                                 self.frozen = frozen;
                             }
                         }
-                        // The wheel (the stick, by default).
+                        // The wheel (the stick, by default), with the latched
+                        // modifiers held while it turns (Ctrl-scroll zooms).
                         let (sx, sy) = h.mouse.wheel;
                         if sx != 0.0 || sy != 0.0 {
+                            let mods = self.keyboard.latched;
+                            hold_mods(hid, self.held_mods | self.wheel_mods, self.held_mods | mods);
+                            self.wheel_mods = mods;
+                            scrolled = true;
                             let sp = SCROLL_BASE * self.scroll_speed;
                             hid.wheel(sx * sp, sy * sp);
                         }
                     }
             }
+        }
+        if !scrolled && self.wheel_mods != 0 {
+            if let Some(hid) = &mut self.hid {
+                hold_mods(hid, self.held_mods | self.wheel_mods, self.held_mods);
+            }
+            self.wheel_mods = 0;
         }
         // Release a held button when that hand lets go, wherever it points now.
         if let Some((hi, code)) = self.held {
@@ -2074,6 +2092,11 @@ impl DesktopViewer {
             if !still {
                 if let Some(hid) = &mut self.hid {
                     hid.button(code, false);
+                    hold_mods(hid, self.held_mods | self.wheel_mods, self.wheel_mods);
+                }
+                if self.held_mods != 0 {
+                    self.keyboard.use_latches();
+                    self.held_mods = 0;
                 }
                 self.held = None;
                 self.held_press = None;
@@ -2159,6 +2182,21 @@ fn arr_to_pose(a: &[f32; 7]) -> xr::Posef {
 fn dist2(a: &xr::Vector3f, b: &xr::Vector3f) -> f32 {
     let d = [a.x - b.x, a.y - b.y, a.z - b.z];
     d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+}
+
+/// Go from holding the modifiers `from` to holding `to` on the virtual
+/// keyboard, pressing and letting go only what changes.
+fn hold_mods(hid: &mut UInput, from: u8, to: u8) {
+    for m in keyboard::MODS {
+        if to & m != 0 && from & m == 0 {
+            hid.key(keyboard::mod_code(m), true);
+        }
+    }
+    for m in keyboard::MODS.into_iter().rev() {
+        if from & m != 0 && to & m == 0 {
+            hid.key(keyboard::mod_code(m), false);
+        }
+    }
 }
 
 fn output_detail(o: &outputs::OutputInfo) -> String {

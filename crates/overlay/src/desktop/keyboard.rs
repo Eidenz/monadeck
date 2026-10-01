@@ -30,6 +30,8 @@ pub const MOD_CTRL: u8 = 2;
 pub const MOD_ALT: u8 = 4;
 pub const MOD_SUPER: u8 = 8;
 pub const MOD_ALTGR: u8 = 16;
+/// Every modifier, in the order they go down (and back up in reverse).
+pub const MODS: [u8; 5] = [MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_SUPER, MOD_ALTGR];
 
 pub fn mod_code(m: u8) -> u16 {
     match m {
@@ -535,17 +537,18 @@ impl KeyboardState {
                     _ => KEY_V,
                 };
                 self.pending.push(KeyAction::Tap { code: c, mods: MOD_CTRL });
-                self.finish_tap();
+                self.use_latches();
             }
             KeyKind::Mapped | KeyKind::Fixed(_) => {
                 self.pending.push(KeyAction::Tap { code, mods: self.latched });
-                self.finish_tap();
+                self.use_latches();
             }
         }
     }
 
-    fn finish_tap(&mut self) {
-        // One-shot latches clear; a locked Shift stays.
+    /// A key or a mouse click used the latched modifiers: one-shot latches
+    /// clear, a locked Shift stays.
+    pub fn use_latches(&mut self) {
         self.latched = if self.shift_locked { MOD_SHIFT } else { 0 };
         self.latch_at = None;
     }
