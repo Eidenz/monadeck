@@ -385,6 +385,10 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
         let mut pressed_idx: Option<usize> = None;
         let mut held_now: Option<usize> = None;
         let now = Instant::now();
+        // Keys type as the trigger goes down, like the other hand's: a click
+        // would wait for the release, and a laser that drifts a few millimetres
+        // meanwhile (a trigger pull wobbles the controller) cancels it.
+        let pressed_now = ui.input(|i| i.pointer.primary_pressed());
         for (i, k) in st.keys.iter().enumerate() {
             let rect = egui::Rect::from_min_size(
                 origin + egui::vec2(k.x * U + 2.0, k.y * U + 2.0),
@@ -445,7 +449,7 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             } else {
                 painter.text(rect.center(), egui::Align2::CENTER_CENTER, main, egui::FontId::proportional(size), fg);
             }
-            if resp.clicked() {
+            if down && pressed_now {
                 pressed_idx = Some(i);
             }
         }
@@ -556,4 +560,46 @@ fn small_button(ui: &mut egui::Ui, glyph: &str, tip: &str) -> egui::Response {
             .fill(theme::SURFACE_CONTAINER_HIGH),
     )
     .on_hover_text(tip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One egui frame of the keyboard panel, sized as in VR.
+    fn frame(ctx: &egui::Context, st: &mut KeyboardState, time: f64, events: Vec<egui::Event>) -> egui::FullOutput {
+        let (w, h) = panel_points();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| build(ctx, st))
+    }
+
+    fn trigger(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() }
+    }
+
+    fn centre_of(st: &KeyboardState, code: u16) -> egui::Pos2 {
+        let k = st.keys.iter().find(|k| k.code == code && k.kind == KeyKind::Mapped).expect("key on the layout");
+        egui::pos2(MARGIN + (k.x + k.w / 2.0) * U, MARGIN + TOP_BAR + (k.y + k.h / 2.0) * U)
+    }
+
+    #[test]
+    fn types_as_the_trigger_goes_down() {
+        let ctx = egui::Context::default();
+        let mut st = KeyboardState::new();
+        let a = centre_of(&st, 30);
+        frame(&ctx, &mut st, 0.00, vec![egui::Event::PointerMoved(a)]);
+        frame(&ctx, &mut st, 0.02, vec![egui::Event::PointerMoved(a), trigger(a, true)]);
+        assert!(matches!(st.pending[..], [KeyAction::Tap { code: 30, .. }]), "A is typed on the press");
+        // The laser wobbles off by more than a click allows before the release:
+        // still the one A.
+        let off = a + egui::vec2(12.0, 0.0);
+        frame(&ctx, &mut st, 0.04, vec![egui::Event::PointerMoved(off)]);
+        frame(&ctx, &mut st, 0.06, vec![egui::Event::PointerMoved(off), trigger(off, false)]);
+        assert_eq!(st.pending.len(), 1);
+    }
 }
