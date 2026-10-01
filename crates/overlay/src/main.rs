@@ -711,10 +711,14 @@ fn run() -> Result<()> {
     let desktop_importer = desktop_caps
         .dmabuf
         .then(|| desktop::dmabuf::Importer::new(&vk_instance, &device, queue_family_index, format));
+    let mut saved_shares = desktop::SavedShares {
+        tokens: ov_cfg.saved_screencast_tokens(),
+        screens: ov_cfg.screencast_screens.clone(),
+    };
     let mut desktop = desktop::DesktopViewer::new(
         desktop_caps,
         desktop_importer,
-        ov_cfg.saved_screencast_tokens(),
+        saved_shares.clone(),
         ov_cfg.screen_order.clone(),
     );
     // The VR keyboard's own panel (egui) — drawn on demand, docks under screens.
@@ -752,7 +756,6 @@ fn run() -> Result<()> {
     let mut watch_zones = parse_zones(&ov_cfg.watch_timezones);
     desktop.keyboard.scale = ov_cfg.keyboard_scale.clamp(0.5, 2.0);
     log::info!("desktop: curved={curved} opacity={color_scale}");
-    let mut screencast_tokens = ov_cfg.saved_screencast_tokens();
     let mut sky = if equirect {
         Some(sky::Sky::load(sky::resolve_path(ov_cfg.skybox_path.clone())))
     } else {
@@ -762,11 +765,8 @@ fn run() -> Result<()> {
     // Named screen arrangements; the last used one is re-applied when the
     // screens come up (if enabled) so nothing has to be re-placed by hand.
     let mut layouts = monadeck_core::desktop_layouts::load();
-    // With saved approvals the portal answers silently — ask right away so the
+    // Saved approvals come back silently from the first frame (`poll`), so the
     // bar fills in without a click (and layouts can restore).
-    if !screencast_tokens.is_empty() {
-        desktop.setup_screens();
-    }
     desktop.scroll_speed = ov_cfg.scroll_speed.clamp(0.25, 4.0);
     desktop.drag_threshold_px = ov_cfg.drag_threshold_px.clamp(0.0, 60.0) as f64;
     if ov_cfg.restore_layout {
@@ -1822,9 +1822,9 @@ fn run() -> Result<()> {
             }
         }
         desktop.poll(&session, &device, &allocator, cmd, queue, fence, hmd.as_ref());
-        if let Some(toks) = desktop.take_token_change() {
-            screencast_tokens = toks;
-            overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+        if let Some(shares) = desktop.take_token_change() {
+            saved_shares = shares;
+            overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         st.keyboard_shown = desktop.keyboard_visible();
         st.desktop_bar = desktop.bar_items();
@@ -1881,7 +1881,7 @@ fn run() -> Result<()> {
         };
         if pc != photo_cfg {
             photo_cfg = pc;
-            overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
 
         // --- 360° background: upload once, show only while no game runs ------
@@ -1967,7 +1967,7 @@ fn run() -> Result<()> {
                 let label = ui::watch_button_info(cur).1;
                 st.flash(format!("Button {} › {label}", slot + 1));
             }
-            overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         if st.watch_photos_request {
             st.watch_photos_request = false;
@@ -2018,7 +2018,7 @@ fn run() -> Result<()> {
                 watch_zones = parse_zones(&ov_cfg.watch_timezones);
                 st.watch_zone_ids = ov_cfg.watch_timezones.clone();
                 st.sound_tab = true;
-                overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+                overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
             }
         }
         if st.watch_reset_request {
@@ -2026,7 +2026,7 @@ fn run() -> Result<()> {
             let (wh, glove) = watch_hand(&st);
             *watch_offsets.get_mut(wh, glove) = if wh == 1 { mathx::pose_mirror_x(&watch_default) } else { watch_default };
             st.flash(format!("Watch back at its default spot for {}", WatchOffsets::label(wh, glove)));
-            overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         st.watch_freeze_client = running.as_ref().and_then(|app| {
             st.monado_clients.iter().find(|c| name_matches(&c.name, app)).map(|c| (c.id, c.frozen))
@@ -2090,7 +2090,7 @@ fn run() -> Result<()> {
                     if let Some(l) = wrist_aim_pose {
                         *watch_offsets.get_mut(wh, watch_glove) = pose_compose(&pose_invert(&l), &last);
                         watch_pose = Some(last);
-                        overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+                        overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
                         log::info!("watch: position/size saved for {}", WatchOffsets::label(wh, watch_glove));
                     }
                 }
@@ -2198,7 +2198,7 @@ fn run() -> Result<()> {
                 desktop.set_dock_mode(m, hmd.as_ref());
             }
             st.flash(format!("Screens · {}", m.label()));
-            overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         if st.game_pointer_request {
             st.game_pointer_request = false;
@@ -2212,7 +2212,7 @@ fn run() -> Result<()> {
             game.select_profile(i);
             st.game_profile = game.profile_name().to_string();
             st.flash(format!("Profile · {}", st.game_profile));
-            overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         if st.game_profiles_reload {
             st.game_profiles_reload = false;
@@ -3018,7 +3018,7 @@ fn run() -> Result<()> {
         // save; the watch's spot and size follow gestures and are saved when
         // they're let go, so they don't count here.
         let settings_now = {
-            let mut c = overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale);
+            let mut c = overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale);
             (c.watch_offset, c.watch_offset_gloves, c.watch_offset_right, c.watch_offset_right_gloves) = (None, None, None, None);
             c.watch_scale = 1.0;
             c
@@ -3051,7 +3051,7 @@ fn run() -> Result<()> {
                 }
             }
             settings_prev = Some(settings_now);
-            overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+            overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
         }
         // Per-game playspace edits (from the Playspace tab) -> persist. The
         // effective offset is pushed to libmonado at the top of the loop (which
@@ -3181,7 +3181,7 @@ fn run() -> Result<()> {
         }
         if let Some((i, d)) = st.desktop_move_request.take() {
             if desktop.move_order(i, d) {
-                overlay_config_from(&st, &screencast_tokens, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
+                overlay_config_from(&st, &saved_shares, &desktop.order(), &ov_cfg.watch_timezones, &watch_offsets, &ov_cfg.skybox_path, watch_scale).save();
             }
         }
         if let Some((i, o)) = st.desktop_opacity_request.take() {
@@ -3365,7 +3365,7 @@ fn watch_hand(st: &ui::LibState) -> (usize, bool) {
 
 fn overlay_config_from(
     st: &ui::LibState,
-    screencast_tokens: &[String],
+    shares: &desktop::SavedShares,
     screen_order: &[String],
     watch_timezones: &[String],
     watch: &WatchOffsets,
@@ -3386,8 +3386,9 @@ fn overlay_config_from(
         playspace_yaw: st.playspace_yaw,
         uevr_delay: st.uevr_delay,
         freeze_delay_secs: st.freeze_delay_secs,
-        screencast_token: screencast_tokens.first().cloned(),
-        screencast_tokens: screencast_tokens.to_vec(),
+        screencast_token: shares.tokens.first().cloned(),
+        screencast_tokens: shares.tokens.clone(),
+        screencast_screens: shares.screens.clone(),
         screen_width_m: st.screen_width_m,
         screen_curve: st.screen_curve,
         screen_opacity: st.screen_opacity,

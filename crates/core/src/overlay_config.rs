@@ -1,6 +1,7 @@
 //! Persisted in-headset overlay preferences (separate from the desktop config).
 use crate::paths::monadeck_config_dir;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -40,6 +41,10 @@ pub struct OverlayConfig {
     /// whose dialog shares a single monitor (Hyprland, Sway…) get a session
     /// per screen. See [`OverlayConfig::saved_screencast_tokens`].
     pub screencast_tokens: Vec<String>,
+    /// The monitors (connector names) each of those sessions shares: one whose
+    /// monitor isn't connected waits for it, instead of the portal opening its
+    /// share dialog on the desktop.
+    pub screencast_screens: BTreeMap<String, Vec<String>>,
     /// Physical width of mirrored screens, metres.
     pub screen_width_m: f32,
     /// Curve new screens start with (0 = flat, 1 = the widest wrap).
@@ -187,6 +192,7 @@ impl Default for OverlayConfig {
             freeze_delay_secs: 3.0,
             screencast_token: None,
             screencast_tokens: Vec::new(),
+            screencast_screens: BTreeMap::new(),
             screen_width_m: 1.35,
             screen_curve: 0.0,
             screen_opacity: 1.0,
