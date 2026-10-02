@@ -27,6 +27,27 @@ pub mod theme {
     pub const ON_SURFACE_VAR: Color32 = Color32::from_rgb(160, 172, 186);
 }
 
+/// The look of a monitor's button while the monitor is away (bottom bar,
+/// watch, island, keyboard): dimmed, crossed with a slash.
+pub mod off {
+    use egui::{Color32, Painter, Rect, Stroke};
+
+    /// How much of a button's colours stay.
+    pub const DIM: f32 = 0.4;
+    const SLASH: Color32 = Color32::from_rgb(232, 120, 110);
+
+    /// A colour as a disconnected monitor's button shows it.
+    pub fn dim(c: Color32) -> Color32 {
+        c.gamma_multiply(DIM)
+    }
+
+    /// The slash across button `r`.
+    pub fn slash(p: &Painter, r: Rect) {
+        let inset = egui::vec2(r.width() * 0.22, r.height() * 0.18);
+        p.line_segment([r.left_bottom() + egui::vec2(inset.x, -inset.y), r.right_top() + egui::vec2(-inset.x, inset.y)], Stroke::new(2.0, SLASH));
+    }
+}
+
 /// Monadeck's own glyphs, the ones Phosphor lacks, drawn on its grid:
 /// `assets/fonts/monadeck-icons.otf` (built by `build_icons.py` beside it).
 pub mod glyph {

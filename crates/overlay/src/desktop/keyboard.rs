@@ -11,7 +11,7 @@ use egui_phosphor::regular as icon;
 use openxr as xr;
 
 use super::keymap::{self, KeyLabels};
-use crate::gfx::{theme, PPP};
+use crate::gfx::{off, theme, PPP};
 use crate::mathx::{pose_compose, quat_from_axis_angle, quatf, vec3f};
 
 // evdev codes (linux/input-event-codes.h)
@@ -149,7 +149,7 @@ pub struct KeyboardState {
     /// Key under the second hand's ray (highlighted like a hover).
     pub secondary_hover: Option<usize>,
     /// Approved screens (name, shown) for the top-bar pills; toggle request.
-    pub screens: Vec<(String, bool)>,
+    pub screens: Vec<super::BarItem>,
     pub screen_toggle_request: Option<usize>,
     /// Key held down by the pointer: (key index, pressed at (egui time),
     /// repeats sent, the modifiers it was pressed with).
@@ -367,12 +367,21 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             if !st.screens.is_empty() {
                 ui.add_space(8.0);
                 let mut toggle = None;
-                for (i, (name, shown)) in st.screens.iter().enumerate() {
-                    let fg = if *shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                for (i, s) in st.screens.iter().enumerate() {
+                    let mut fg = if s.shown { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                    let mut fill = if s.shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH };
+                    if s.lost {
+                        (fg, fill) = (off::dim(fg), off::dim(fill));
+                    }
                     let b = egui::Button::new(egui::RichText::new(format!("{} {}", icon::MONITOR, i + 1)).size(12.0).color(fg))
-                        .fill(if *shown { theme::PRIMARY } else { theme::SURFACE_CONTAINER_HIGH })
+                        .fill(fill)
                         .min_size(egui::vec2(44.0, 24.0));
-                    if ui.add(b).on_hover_text(name).clicked() {
+                    let resp = ui.add(b);
+                    if s.lost {
+                        off::slash(ui.painter(), resp.rect);
+                    }
+                    let tip = if s.lost { format!("{} · disconnected", s.name) } else { s.name.clone() };
+                    if resp.on_hover_text(tip).clicked() {
                         toggle = Some(i);
                     }
                 }

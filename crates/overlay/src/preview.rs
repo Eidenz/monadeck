@@ -234,7 +234,9 @@ pub fn run(dir: &Path) -> Result<()> {
         }
         let mut st = crate::ui::LibState::new();
         st.clock = "10:45 AM".into();
-        st.desktop_bar = vec![("DP-1".into(), true), ("DP-2".into(), false), ("HDMI-A-1".into(), false)];
+        st.desktop_bar = [("DP-1", true), ("DP-2", false), ("HDMI-A-1", false)]
+            .map(|(name, shown)| crate::desktop::BarItem { name: name.into(), shown, lost: false })
+            .to_vec();
         st.batteries = batteries;
         let out = ctx.run(screen_input(BOTTOM_PX, 1.0), |ctx| crate::ui::build_bottom(ctx, &mut st));
         for (id, delta) in &out.textures_delta.set {
@@ -288,7 +290,8 @@ fn readme(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir
         for r in &mut st.desktop_rows {
             r.shown = false;
         }
-        st.desktop_bar = st.desktop_rows.iter().map(|r| (r.name.clone(), false)).collect();
+        st.desktop_bar =
+            st.desktop_rows.iter().map(|r| crate::desktop::BarItem { name: r.name.clone(), shown: false, lost: false }).collect();
         st.desktop_shown = 0;
         st.watch_buttons = ["keyboard", "recenter", "letgo", "screenshot"].map(String::from).to_vec();
         st.watch_date = "Thursday, September 24".into();
@@ -919,7 +922,8 @@ fn sample_state() -> crate::ui::LibState {
         row("DP-1", "Dell U2720Q · 1920×1080", true),
         row("HDMI-A-1", "LG TV · 1920×1080", false),
     ];
-    st.desktop_bar = st.desktop_rows.iter().map(|r| (r.name.clone(), r.shown)).collect();
+    st.desktop_bar =
+        st.desktop_rows.iter().map(|r| crate::desktop::BarItem { name: r.name.clone(), shown: r.shown, lost: false }).collect();
     st.layouts = vec![("Standing".into(), 2), ("Lying down".into(), 1)];
     st.layout_follow = vec![false, true];
     st.layout_active = Some("Standing".into());

@@ -337,7 +337,7 @@ pub struct LibState {
     pub desktop_cancel_request: bool,
     pub desktop_move_request: Option<(usize, i32)>, // reorder approved screen (row, ±1)
     /// Bottom bar: approved screens (name, shown) in user order + keyboard state.
-    pub desktop_bar: Vec<(String, bool)>,
+    pub desktop_bar: Vec<crate::desktop::BarItem>,
     pub desktop_bar_toggle: Option<usize>,
     pub keyboard_shown: bool,
     pub keyboard_toggle_request: bool,
@@ -1161,8 +1161,10 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
                 ui.painter().rect_filled(r, 0.0, egui::Color32::from_white_alpha(28));
                 ui.add_space(6.0);
                 let mut toggle = None;
-                for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
-                    if watch_btn(ui, egui::vec2(56.0, 42.0), &format!("{} {}", icon::MONITOR, i + 1), 15.0, *shown, name) {
+                for (i, s) in st.desktop_bar.iter().enumerate() {
+                    let tip = if s.lost { format!("{} · disconnected", s.name) } else { s.name.clone() };
+                    let label = format!("{} {}", icon::MONITOR, i + 1);
+                    if watch_btn_off(ui, egui::vec2(56.0, 42.0), &label, 15.0, s.shown, s.lost, &tip) {
                         toggle = Some(i);
                     }
                 }
@@ -1416,17 +1418,28 @@ fn watch_quick_button(ui: &mut egui::Ui, st: &mut LibState, id: &str, quick: &dy
 /// A watch button (painted, eases on hover): `lit` fills it with the accent.
 /// Disabled ones fade. Returns true when tapped.
 fn watch_btn(ui: &mut egui::Ui, size: egui::Vec2, text: &str, font: f32, lit: bool, tip: &str) -> bool {
+    watch_btn_off(ui, size, text, font, lit, false, tip)
+}
+
+/// [`watch_btn`] for a monitor, `off` while it's away (dimmed, slashed).
+fn watch_btn_off(ui: &mut egui::Ui, size: egui::Vec2, text: &str, font: f32, lit: bool, off: bool, tip: &str) -> bool {
     let enabled = ui.is_enabled();
     let (r, resp) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     let h = if enabled { kit::hover_t(ui, &resp) } else { 0.0 };
     let on = ui.ctx().animate_bool_with_time(resp.id.with("on"), lit, 0.16);
-    let fill = kit::mix(kit::mix(theme::SURFACE_CONTAINER_HIGH, egui::Color32::from_rgb(58, 68, 80), h), theme::PRIMARY, on);
-    let fg = kit::mix(kit::mix(theme::ON_SURFACE, egui::Color32::WHITE, h), egui::Color32::BLACK, on);
+    let mut fill = kit::mix(kit::mix(theme::SURFACE_CONTAINER_HIGH, egui::Color32::from_rgb(58, 68, 80), h), theme::PRIMARY, on);
+    let mut fg = kit::mix(kit::mix(theme::ON_SURFACE, egui::Color32::WHITE, h), egui::Color32::BLACK, on);
+    if off {
+        (fill, fg) = (crate::gfx::off::dim(fill), crate::gfx::off::dim(fg));
+    }
     let p = ui.painter();
     let radius = egui::CornerRadius::same((size.y * 0.3).min(16.0) as u8);
     p.rect_filled(r, radius, if enabled { fill } else { kit::alpha(fill, 0.4) });
     let g = kit::fit_text(ui, text, font, if enabled { fg } else { kit::alpha(fg, 0.4) }, size.x - 12.0);
     ui.painter().galley(r.center() - g.size() / 2.0, g, fg);
+    if off {
+        crate::gfx::off::slash(ui.painter(), r);
+    }
     resp.on_hover_text(tip).clicked()
 }
 
@@ -1493,26 +1506,39 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                 let mut x = tray.left() + pad;
                 let mut toggle = None;
                 // `lead`: extra room before this pill (sets the keyboard apart).
-                let mut pill = |ui: &mut egui::Ui, w: f32, lead: f32, key: usize, text: String, on: bool, tip: &str| -> bool {
+                // `off`: a monitor that's away (dimmed, slashed).
+                let mut pill = |ui: &mut egui::Ui, w: f32, lead: f32, key: usize, text: String, on: bool, off: bool, tip: &str| -> bool {
                     x += lead;
                     let r = egui::Rect::from_min_size(egui::pos2(x, tray.top() + pad), egui::vec2(w, 44.0));
                     x += w + gap;
                     let resp = ui.interact(r, ui.id().with(("bar-pill", key)), egui::Sense::click());
                     let h = kit::hover_t(ui, &resp);
                     let lit = ui.ctx().animate_bool_with_time(resp.id.with("on"), on, 0.16);
+                    let mut fill = kit::mix(kit::alpha(egui::Color32::WHITE, 0.06 * h), theme::PRIMARY, lit);
+                    let mut fg = kit::mix(kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, h), egui::Color32::BLACK, lit);
+                    if off {
+                        (fill, fg) = (crate::gfx::off::dim(fill), crate::gfx::off::dim(fg));
+                    }
                     let p = ui.painter();
-                    p.rect_filled(r, egui::CornerRadius::same(22), kit::mix(kit::alpha(egui::Color32::WHITE, 0.06 * h), theme::PRIMARY, lit));
-                    p.text(r.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(16.0), kit::mix(kit::mix(theme::ON_SURFACE_VAR, egui::Color32::WHITE, h), egui::Color32::BLACK, lit));
+                    p.rect_filled(r, egui::CornerRadius::same(22), fill);
+                    p.text(r.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(16.0), fg);
+                    if off {
+                        crate::gfx::off::slash(p, r);
+                    }
                     resp.on_hover_text(tip).clicked()
                 };
-                for (i, (name, shown)) in st.desktop_bar.iter().enumerate() {
+                for (i, s) in st.desktop_bar.iter().enumerate() {
                     // Numbered, not named: the number is the position, which never moves.
-                    let tip = format!("{} · {}", name, if *shown { "hide" } else { "show" });
-                    if pill(ui, pill_w, 0.0, i, format!("{}  {}", icon::MONITOR, i + 1), *shown, &tip) {
+                    let tip = match (s.lost, s.shown) {
+                        (true, _) => format!("{} · disconnected", s.name),
+                        (false, true) => format!("{} · hide", s.name),
+                        (false, false) => format!("{} · show", s.name),
+                    };
+                    if pill(ui, pill_w, 0.0, i, format!("{}  {}", icon::MONITOR, i + 1), s.shown, s.lost, &tip) {
                         toggle = Some(i);
                     }
                 }
-                if pill(ui, kb_w, 10.0, 999, icon::KEYBOARD.to_string(), st.keyboard_shown, "VR keyboard") {
+                if pill(ui, kb_w, 10.0, 999, icon::KEYBOARD.to_string(), st.keyboard_shown, false, "VR keyboard") {
                     st.keyboard_toggle_request = true;
                     st.sound_tab = true;
                 }

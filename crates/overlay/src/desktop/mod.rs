@@ -245,6 +245,15 @@ struct Session {
     cast: portal::Cast,
 }
 
+/// A screen as its buttons show it (bottom bar, watch, island, keyboard).
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub struct BarItem {
+    pub name: String,
+    pub shown: bool,
+    /// Its monitor is away: the button says it can't be used now.
+    pub lost: bool,
+}
+
 /// The approved sessions to bring back next time: restore tokens, in order,
 /// and the monitors (connector names) each one shares.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1139,9 +1148,9 @@ impl DesktopViewer {
         (offset_pose(&s.pose, 0.0, h / 2.0 + island::TOP_GAP_M + isz.1 / 2.0, island::FWD_M), isz)
     }
 
-    /// (screen index, name) in bar order — the island's buttons.
-    pub fn island_items(&self) -> Vec<(usize, String)> {
-        self.ordered_screens().into_iter().map(|i| (i, self.screens[i].name.clone())).collect()
+    /// (screen index, button) in bar order — the island's buttons.
+    pub fn island_items(&self) -> Vec<(usize, BarItem)> {
+        self.ordered_screens().into_iter().map(|i| (i, self.bar_item(i))).collect()
     }
 
     pub fn island_alpha(&self, si: usize) -> f32 {
@@ -1282,9 +1291,14 @@ impl DesktopViewer {
 
     // --- UI-facing state -----------------------------------------------------
 
-    /// Approved screens for the bottom bar: (name, shown), in order.
-    pub fn bar_items(&self) -> Vec<(String, bool)> {
-        self.ordered_screens().iter().map(|&i| (self.screens[i].name.clone(), self.screens[i].shown)).collect()
+    /// Approved screens as their buttons show them, in bar order.
+    pub fn bar_items(&self) -> Vec<BarItem> {
+        self.ordered_screens().iter().map(|&i| self.bar_item(i)).collect()
+    }
+
+    fn bar_item(&self, i: usize) -> BarItem {
+        let s = &self.screens[i];
+        BarItem { name: s.name.clone(), shown: s.shown, lost: s.lost }
     }
 
     /// Show/hide the screen at bar position `i`.
