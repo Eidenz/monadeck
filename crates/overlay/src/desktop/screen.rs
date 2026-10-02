@@ -29,6 +29,21 @@ pub struct ScreenPanel {
     pub name: String,
     pub detail: String,
     pub node_id: u32,
+    /// The portal session (`DesktopViewer::casts`) the stream belongs to.
+    pub cast: u64,
+    /// When it got `node_id`: a node removed before then was another one.
+    pub bound: Instant,
+    /// Its monitor went away (unplugged, KVM switched): the last frame stays
+    /// up, dimmed, and takes no clicks until the monitor is back.
+    pub lost: bool,
+    /// When it was lost.
+    pub lost_at: Option<Instant>,
+    /// Lost as its monitor left the desktop (even for a moment): its coming
+    /// back is the monitor's, not a share someone stopped.
+    pub monitor_left: bool,
+    /// The monitor's make and model (the output's description), to know it
+    /// again if it comes back on another connector.
+    pub model: String,
     /// Logical desktop rectangle (x, y, w, h) this screen covers.
     pub rect: (f64, f64, f64, f64),
     pub shown: bool,
@@ -70,11 +85,17 @@ pub struct ScreenPanel {
 }
 
 impl ScreenPanel {
-    pub fn new(name: String, detail: String, node_id: u32, rect: (f64, f64, f64, f64)) -> Self {
+    pub fn new(name: String, detail: String, node_id: u32, cast: u64, rect: (f64, f64, f64, f64)) -> Self {
         Self {
             name,
             detail,
             node_id,
+            cast,
+            bound: Instant::now(),
+            lost: false,
+            lost_at: None,
+            monitor_left: false,
+            model: String::new(),
             rect,
             shown: false,
             placed: false,
@@ -153,14 +174,42 @@ impl ScreenPanel {
         self.island_until = Some(Instant::now() + super::island::LINGER);
         match &self.capture {
             Some(c) => c.set_active(true),
-            None => {
-                self.capture = Some(Capture::start(
-                    format!("monadeck:{}", self.name),
-                    self.node_id,
-                    caps.formats.clone(),
-                    caps.max_fps,
-                ));
-            }
+            // Nothing to capture until the monitor is back (see `rebind`).
+            None if self.lost => {}
+            None => self.start_capture(caps),
+        }
+    }
+
+    fn start_capture(&mut self, caps: &Caps) {
+        self.capture = Some(Capture::start(
+            format!("monadeck:{}", self.name),
+            self.node_id,
+            caps.formats.clone(),
+            caps.max_fps,
+        ));
+    }
+
+    /// The monitor went away: stop capturing (its node is gone).
+    pub fn lose(&mut self) {
+        self.lost = true;
+        self.lost_at = Some(Instant::now());
+        self.capture = None;
+    }
+
+    /// The same monitor from a new session: capture its stream where the
+    /// screen already is.
+    pub fn rebind(&mut self, node_id: u32, cast: u64, caps: &Caps) {
+        self.node_id = node_id;
+        self.cast = cast;
+        self.bound = Instant::now();
+        self.lost = false;
+        self.lost_at = None;
+        self.monitor_left = false;
+        self.capture = None;
+        self.gaze_paused = false;
+        self.unseen_since = None;
+        if self.shown {
+            self.start_capture(caps);
         }
     }
 

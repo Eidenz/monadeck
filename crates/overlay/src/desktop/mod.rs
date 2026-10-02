@@ -22,9 +22,9 @@ pub mod pw;
 pub mod screen;
 pub mod selftest;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ash::vk;
 use openxr as xr;
@@ -57,6 +57,17 @@ const RESIZE_PER_M: f32 = 3.0;
 const PUSH_SPEED: f32 = 0.006;
 /// Curvature change per frame at full stick while gripping with trigger.
 const CURVE_SPEED: f32 = 0.012;
+/// A screen whose monitor went away is drawn this bright.
+const LOST_DIM: f32 = 0.3;
+/// The layout stays unchanged this long before a monitor that came back gets
+/// its session asked for again: the portal learns about it a little after us,
+/// and wouldn't find it yet (its share dialog then opens instead).
+const REJOIN_SETTLE: Duration = Duration::from_secs(2);
+/// A stream ending this close to its monitor leaving the desktop went with it.
+const LEFT_WINDOW: Duration = Duration::from_secs(10);
+/// A session asked back that hasn't answered by then is waiting on its share
+/// dialog, on the desktop.
+const REJOIN_DIALOG: Duration = Duration::from_secs(3);
 
 /// Per-hand controller state for one frame (only while the overlay is focused).
 pub struct HandInput {
@@ -228,19 +239,56 @@ enum Target {
     Island(usize),
 }
 
+/// An approved portal session, and the id its screens know it by.
+struct Session {
+    id: u64,
+    cast: portal::Cast,
+}
+
+/// The approved sessions to bring back next time: restore tokens, in order,
+/// and the monitors (connector names) each one shares.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SavedShares {
+    pub tokens: Vec<String>,
+    pub screens: BTreeMap<String, Vec<String>>,
+}
+
 pub struct DesktopViewer {
     pub caps: Caps,
     importer: Option<Importer>,
     outputs: Vec<outputs::OutputInfo>,
+    /// Follows the monitor layout (None off Wayland: `outputs` stays as it was).
+    output_watch: Option<outputs::OutputWatch>,
+    /// When the layout last changed.
+    outputs_changed: Option<Instant>,
+    /// When each monitor (by connector) last left the desktop.
+    left: BTreeMap<String, Instant>,
     hid: Option<UInput>,
     pub hid_error: Option<String>,
     /// Approved portal sessions, each keeping its screens' streams alive. A
     /// portal whose dialog shares one monitor gets one session per screen.
-    casts: Vec<portal::Cast>,
+    casts: Vec<Session>,
+    next_cast: u64,
+    /// Screencast nodes going away with their monitors (from the first request).
+    nodes: Option<pw::NodeWatch>,
     /// The share request in flight (one dialog at a time).
     request: Option<portal::Request>,
+    /// The session the request in flight brings back, its monitor being back.
+    rejoin: Option<u64>,
+    /// Sessions that didn't come back: not asked again until the layout changes.
+    rejoin_held: Vec<u64>,
+    /// When the session in `rejoin` was asked for (until it's said it waits
+    /// on the share dialog).
+    rejoin_at: Option<Instant>,
+    /// Why a lost screen isn't coming back yet, as last logged.
+    rejoin_note: Option<String>,
     /// Saved sessions still to restore, one request each, in order.
     restore: VecDeque<String>,
+    /// Saved sessions waiting for a monitor that isn't connected: restoring
+    /// them now would open the share dialog on the desktop.
+    waiting: Vec<String>,
+    /// The monitors each restore token shares.
+    shares: BTreeMap<String, Vec<String>>,
     /// Why the last request failed, until the next one.
     portal_error: Option<String>,
     tokens_changed: bool,
@@ -260,6 +308,11 @@ pub struct DesktopViewer {
     held_press: Option<(f64, f64)>,
     dragging: bool,
     frozen: bool,
+    /// Modifiers latched on the VR keyboard, held down for the held mouse
+    /// button (Shift-click, Ctrl-click, a Meta-drag)…
+    held_mods: u8,
+    /// …and while the wheel turns (Ctrl-scroll).
+    wheel_mods: u8,
     hover_prev: Option<(f64, f64)>,
     select_prev: [bool; 2],
     mouse_prev: [MouseInput; 2],
@@ -342,18 +395,18 @@ pub struct DesktopViewer {
 }
 
 impl DesktopViewer {
-    pub fn new(caps: Caps, importer: Option<Importer>, tokens: Vec<String>, order: Vec<String>) -> Self {
-        let outputs = outputs::list();
-        for o in &outputs {
-            log::info!(
-                "desktop: output {} ({}) at {:?} logical {:?} px {:?}",
-                o.name,
-                o.description,
-                o.logical_pos,
-                o.logical_size,
-                o.pixel_size
-            );
-        }
+    pub fn new(caps: Caps, importer: Option<Importer>, saved: SavedShares, order: Vec<String>) -> Self {
+        let (output_watch, outputs) = match outputs::OutputWatch::connect() {
+            Ok(w) => {
+                let o = w.outputs();
+                (Some(w), o)
+            }
+            Err(e) => {
+                log::warn!("desktop: wayland output enumeration unavailable: {e}");
+                (None, Vec::new())
+            }
+        };
+        log_outputs(&outputs);
         let (hid, hid_error) = match UInput::open() {
             Ok(mut h) => {
                 let (origin, extent) = desktop_bounds(&outputs);
@@ -369,11 +422,22 @@ impl DesktopViewer {
             caps,
             importer,
             outputs,
+            output_watch,
+            outputs_changed: None,
+            left: BTreeMap::new(),
             hid,
             hid_error,
             casts: Vec::new(),
+            next_cast: 0,
+            nodes: None,
             request: None,
-            restore: tokens.into(),
+            rejoin: None,
+            rejoin_held: Vec::new(),
+            rejoin_at: None,
+            rejoin_note: None,
+            restore: saved.tokens.into(),
+            waiting: Vec::new(),
+            shares: saved.screens,
             portal_error: None,
             tokens_changed: false,
             screens: Vec::new(),
@@ -385,6 +449,8 @@ impl DesktopViewer {
             held_press: None,
             dragging: false,
             frozen: false,
+            held_mods: 0,
+            wheel_mods: 0,
             hover_prev: None,
             select_prev: [false; 2],
             mouse_prev: [MouseInput::default(); 2],
@@ -1259,7 +1325,7 @@ impl DesktopViewer {
                 ScreenRow {
                     name: s.name.clone(),
                     detail: s.detail.clone(),
-                    hint: None,
+                    hint: s.lost.then(|| "disconnected · back when the monitor is".into()),
                     shown: s.shown,
                     approved: true,
                     opacity: s.opacity,
@@ -1289,13 +1355,23 @@ impl DesktopViewer {
         if self.request.is_some() {
             return "Waiting for the screen-share dialog on your desktop…".into();
         }
+        let missing = self.waiting_for();
         if !self.casts.is_empty() {
             let mode = if self.caps.dmabuf { "GPU (DMA-BUF)" } else { "CPU (SHM)" };
             let mut s = format!("{} screen(s) shared · capture: {mode} · toggle them from the bottom bar", self.screens.len());
+            if !missing.is_empty() {
+                s.push_str(&format!(" · {} will join once connected", missing.join(", ")));
+            }
             if let Some(e) = &self.portal_error {
                 s.push_str(&format!(" · last request: {e}"));
             }
             return s;
+        }
+        if !missing.is_empty() {
+            return format!("Your screens come back once {} is connected", missing.join(", "));
+        }
+        if !self.restore.is_empty() {
+            return "Bringing your screens back…".into();
         }
         if let Some(e) = &self.portal_error {
             return format!("Screen share failed: {e}");
@@ -1328,11 +1404,25 @@ impl DesktopViewer {
         if self.request.is_some() {
             return;
         }
-        if let Some(token) = self.restore.pop_front() {
-            self.request = Some(portal::start(Some(token)));
-        } else if self.casts.is_empty() {
+        self.restore_next();
+        if self.request.is_none() && self.casts.is_empty() {
             self.portal_error = None;
-            self.request = Some(portal::start(None));
+            self.ask(None);
+        }
+    }
+
+    /// Restore the next saved session whose monitors are all connected; the
+    /// others wait for theirs.
+    fn restore_next(&mut self) {
+        while self.request.is_none() {
+            let Some(token) = self.restore.pop_front() else { return };
+            let missing = self.missing(&token);
+            if missing.is_empty() {
+                self.ask(Some(token));
+            } else {
+                log::info!("desktop: a saved session waits for {} to be connected", missing.join(", "));
+                self.waiting.push(token);
+            }
         }
     }
 
@@ -1341,8 +1431,16 @@ impl DesktopViewer {
     pub fn add_screens(&mut self) {
         if self.request.is_none() {
             self.portal_error = None;
-            self.request = Some(portal::start(None));
+            self.ask(None);
         }
+    }
+
+    fn ask(&mut self, token: Option<String>) {
+        // Watching from before the streams exist: none can go unnoticed.
+        if self.nodes.is_none() {
+            self.nodes = Some(pw::NodeWatch::start());
+        }
+        self.request = Some(portal::start(token));
     }
 
     /// Call off the request in flight: a dialog that closed without answering
@@ -1350,8 +1448,10 @@ impl DesktopViewer {
     pub fn cancel_request(&mut self) {
         if let Some(r) = self.request.take() {
             log::info!("desktop: share request cancelled");
-            // A saved session that didn't come back silently is dropped.
-            if r.token.is_some() {
+            if let Some(id) = self.rejoin.take() {
+                self.rejoin_held.push(id);
+            } else if r.token.is_some() {
+                // A saved session that didn't come back silently is dropped.
                 self.tokens_changed = true;
             }
         }
@@ -1361,9 +1461,10 @@ impl DesktopViewer {
     pub fn reselect(&mut self) {
         self.teardown_screens();
         self.restore.clear();
+        self.waiting.clear();
         self.tokens_changed = true;
         self.portal_error = None;
-        self.request = Some(portal::start(None));
+        self.ask(None);
     }
 
     fn teardown_screens(&mut self) {
@@ -1377,27 +1478,62 @@ impl DesktopViewer {
         self.pending_gpu_teardown = true;
         self.casts.clear();
         self.request = None;
+        self.rejoin = None;
+        self.rejoin_held.clear();
     }
 
     /// The restore tokens to save: the shared sessions', then those still to
-    /// restore (the one in flight included, in case the overlay stops first).
+    /// restore (the one in flight included, in case the overlay stops first)
+    /// and those waiting for their monitors.
     fn tokens(&self) -> Vec<String> {
-        self.casts
+        let mut out: Vec<String> = Vec::new();
+        let all = self
+            .casts
             .iter()
-            .filter_map(|c| c.restore_token.clone())
+            .filter_map(|c| c.cast.restore_token.clone())
             .chain(self.request.as_ref().and_then(|r| r.token.clone()))
             .chain(self.restore.iter().cloned())
-            .collect()
+            .chain(self.waiting.iter().cloned());
+        for t in all {
+            // A session being brought back is asked for with its own token.
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
     }
 
-    /// `Some(tokens)` once when the persisted restore tokens should change.
-    pub fn take_token_change(&mut self) -> Option<Vec<String>> {
-        if self.tokens_changed {
-            self.tokens_changed = false;
-            Some(self.tokens())
-        } else {
-            None
+    /// `Some(shares)` once when the persisted sessions should change.
+    pub fn take_token_change(&mut self) -> Option<SavedShares> {
+        if !self.tokens_changed {
+            return None;
         }
+        self.tokens_changed = false;
+        let tokens = self.tokens();
+        let screens = tokens.iter().filter_map(|t| Some((t.clone(), self.shares.get(t)?.clone()))).collect();
+        Some(SavedShares { tokens, screens })
+    }
+
+    /// The monitors a saved session shares that aren't connected. Nothing
+    /// when it isn't known what it shares, or which monitors there are.
+    fn missing(&self, token: &str) -> Vec<String> {
+        match self.shares.get(token) {
+            Some(names) if !self.outputs.is_empty() => {
+                names.iter().filter(|n| !self.outputs.iter().any(|o| &o.name == *n)).cloned().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Monitors the waiting sessions wait for.
+    fn waiting_for(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for n in self.waiting.iter().flat_map(|t| self.missing(t)) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+        out
     }
 
     // --- Keyboard --------------------------------------------------------------
@@ -1465,15 +1601,9 @@ impl DesktopViewer {
             for a in pending {
                 match a {
                     KeyAction::Tap { code, mods } => {
-                        let held: Vec<u16> = [
-                            keyboard::MOD_SHIFT,
-                            keyboard::MOD_CTRL,
-                            keyboard::MOD_ALT,
-                            keyboard::MOD_SUPER,
-                            keyboard::MOD_ALTGR,
-                        ]
-                        .into_iter()
-                        .filter(|m| mods & m != 0)
+                        let held: Vec<u16> = keyboard::MODS
+                            .into_iter()
+                            .filter(|m| mods & m != 0)
                         .map(keyboard::mod_code)
                         .collect();
                         for &m in &held {
@@ -1549,25 +1679,7 @@ impl DesktopViewer {
             self.screens.clear();
             self.last_screen = None;
         }
-        if let Some(answer) = self.request.as_ref().and_then(|r| r.try_recv()) {
-            self.request = None;
-            match answer {
-                Ok(cast) => {
-                    self.portal_error = None;
-                    self.add_cast_screens(&cast);
-                    self.casts.push(cast);
-                }
-                Err(e) => {
-                    log::error!("desktop: {e}");
-                    self.portal_error = Some(e);
-                }
-            }
-            self.tokens_changed = true;
-        }
-        // Saved sessions come back one after another (one dialog at a time).
-        if self.request.is_none() && !self.restore.is_empty() {
-            self.setup_screens();
-        }
+        self.poll_shares();
         // A queued layout applies once the screens exist and STAGE is known.
         if self.pending_layout.is_some() && !self.screens.is_empty() && self.local_in_stage.is_some() {
             if let Some(l) = self.pending_layout.take() {
@@ -1643,51 +1755,149 @@ impl DesktopViewer {
         }
     }
 
-    /// Screens for a newly shared session, after those already up. A monitor
-    /// that's already shared (picked again in a later dialog) is skipped.
-    fn add_cast_screens(&mut self, cast: &portal::Cast) {
+    /// The shared screens' side of `poll`: follow the monitor layout and the
+    /// streams, take in portal answers, restore saved sessions and bring back
+    /// those whose monitor is back.
+    fn poll_shares(&mut self) {
+        self.follow_outputs();
+        self.follow_nodes();
+        if self.request.is_some() && self.rejoin_at.is_some_and(|t| t.elapsed() >= REJOIN_DIALOG) {
+            self.rejoin_at = None;
+            log::warn!("desktop: bringing the screens back waits on the share dialog, on the desktop");
+        }
+        if let Some(answer) = self.request.as_ref().and_then(|r| r.try_recv()) {
+            self.request = None;
+            self.rejoin_at = None;
+            let rejoin = self.rejoin.take();
+            match answer {
+                Ok(cast) => {
+                    self.portal_error = None;
+                    let id = self.next_cast;
+                    self.next_cast += 1;
+                    let moved = self.add_cast_screens(id, &cast, rejoin);
+                    self.casts.push(Session { id, cast });
+                    self.drop_unused_casts(&moved);
+                }
+                Err(e) if rejoin.is_some() => {
+                    // Asked on its own: nothing to show for it but the log.
+                    log::warn!("desktop: couldn't bring a session back: {e}");
+                    self.rejoin_held.extend(rejoin);
+                }
+                Err(e) => {
+                    log::error!("desktop: {e}");
+                    self.portal_error = Some(e);
+                }
+            }
+            self.tokens_changed = true;
+        }
+        // Saved sessions come back one after another (one dialog at a time),
+        // then sessions whose monitor went away and is back.
+        let settled = self.outputs_changed.map_or(true, |t| t.elapsed() >= REJOIN_SETTLE);
+        if self.request.is_none() && !self.restore.is_empty() && settled {
+            self.restore_next();
+        }
+        if self.request.is_none() && self.restore.is_empty() && settled {
+            self.rejoin_lost();
+        }
+    }
+
+    /// Where a stream goes: the monitor it shows, if it could be told.
+    fn stream_output(&self, st: &portal::StreamInfo, streams: usize) -> Option<&outputs::OutputInfo> {
+        // Link the stream to an output by connector name, else by geometry.
+        self.outputs
+            .iter()
+            .find(|o| st.mapping_id.as_deref() == Some(o.name.as_str()))
+            .or_else(|| self.outputs.iter().find(|o| st.position == Some(o.logical_pos) && st.size == Some(o.logical_size)))
+            .or_else(|| if self.outputs.len() == 1 && streams == 1 { self.outputs.first() } else { None })
+    }
+
+    /// Screens for a newly shared session `id`, after those already up. A
+    /// monitor that's already shared (picked again in a later dialog) is
+    /// skipped, unless its screen lost its stream or belongs to the session
+    /// this one `replaces`: that screen takes the new stream where it is.
+    /// Returns the sessions screens moved away from (and the replaced one).
+    fn add_cast_screens(&mut self, id: u64, cast: &portal::Cast, replaces: Option<u64>) -> Vec<u64> {
+        let mut names = Vec::new();
+        let mut moved: Vec<u64> = replaces.into_iter().collect();
+        let mut renamed: Vec<(String, String)> = Vec::new();
         for st in &cast.streams {
-            // Link the stream to an output by connector name, else by geometry.
-            let out = self
-                .outputs
-                .iter()
-                .find(|o| st.mapping_id.as_deref() == Some(o.name.as_str()))
-                .or_else(|| {
-                    self.outputs.iter().find(|o| st.position == Some(o.logical_pos) && st.size == Some(o.logical_size))
-                })
-                .or_else(|| {
-                    if self.outputs.len() == 1 && cast.streams.len() == 1 {
-                        self.outputs.first()
-                    } else {
-                        None
+            // A session brought back whose portal doesn't name its streams
+            // (wlroots): its one stream is the monitor its one screen showed.
+            // Its place can't tell, monitors may share one (a KVM cloning).
+            let rejoined = match replaces {
+                Some(old) if st.mapping_id.is_none() && cast.streams.len() == 1 => {
+                    let mut mine = self.screens.iter().filter(|s| s.cast == old);
+                    match (mine.next(), mine.next()) {
+                        (Some(s), None) => Some(s.name.clone()),
+                        _ => None,
                     }
-                });
+                }
+                _ => None,
+            };
+            let out = match &rejoined {
+                Some(n) => self.outputs.iter().find(|o| &o.name == n),
+                None => self.stream_output(st, cast.streams.len()),
+            };
+            if let Some(o) = out {
+                names.push(o.name.clone());
+            }
+            let model = out.map(|o| o.description.clone()).unwrap_or_default();
             let (name, detail, rect) = match out {
-                Some(o) => (
-                    o.name.clone(),
-                    output_detail(o),
-                    (o.logical_pos.0 as f64, o.logical_pos.1 as f64, o.logical_size.0 as f64, o.logical_size.1 as f64),
-                ),
+                Some(o) => (o.name.clone(), output_detail(o), output_rect(o)),
                 None => {
                     let pos = st.position.unwrap_or((0, 0));
                     let size = st.size.unwrap_or((1920, 1080));
                     (
-                        st.mapping_id.clone().unwrap_or_else(|| self.unused_screen_name()),
+                        rejoined.clone().or_else(|| st.mapping_id.clone()).unwrap_or_else(|| self.unused_screen_name()),
                         format!("{}×{}", size.0, size.1),
                         (pos.0 as f64, pos.1 as f64, size.0 as f64, size.1 as f64),
                     )
                 }
             };
-            if self.screens.iter().any(|s| s.name == name) {
-                log::info!("desktop: {name} is already shared; ignoring stream node {}", st.node_id);
+            // The screen for it: by connector, or a lost one whose monitor is
+            // back on another connector (DisplayPort hubs, some KVMs).
+            let existing = self.screens.iter().position(|s| s.name == name).or_else(|| {
+                let mut lost = self.screens.iter().enumerate().filter(|(_, s)| s.lost && !model.is_empty() && s.model == model);
+                lost.find(|(_, s)| !self.outputs.iter().any(|o| o.name == s.name)).map(|(i, _)| i)
+            });
+            if let Some(s) = existing.map(|i| &mut self.screens[i]) {
+                if s.lost || replaces == Some(s.cast) {
+                    log::info!("desktop: {name} is back on stream node {}", st.node_id);
+                    if s.name != name {
+                        log::info!("desktop: {} is now {name}", s.name);
+                        renamed.push((std::mem::replace(&mut s.name, name.clone()), name.clone()));
+                    }
+                    if !moved.contains(&s.cast) {
+                        moved.push(s.cast);
+                    }
+                    s.rebind(st.node_id, id, &self.caps);
+                    s.detail = detail;
+                    s.model = model;
+                    s.rect = rect;
+                } else {
+                    log::info!("desktop: {name} is already shared; ignoring stream node {}", st.node_id);
+                }
                 continue;
             }
             log::info!("desktop: stream node {} -> {name} {detail} rect {rect:?}", st.node_id);
-            let mut panel = ScreenPanel::new(name, detail, st.node_id, rect);
+            let mut panel = ScreenPanel::new(name, detail, st.node_id, id, rect);
+            panel.model = model;
             panel.width_m = self.width_m;
             panel.curve = self.default_curve;
             panel.opacity = self.default_opacity;
             self.screens.push(panel);
+        }
+        // A renamed screen keeps its place in the bottom bar.
+        for (old, new) in renamed {
+            if let Some(p) = self.order.iter().position(|n| *n == old) {
+                if !self.order.contains(&new) {
+                    self.order[p] = new;
+                }
+            }
+        }
+        // What the session shares, so it waits for them the next time.
+        if let Some(token) = &cast.restore_token {
+            self.shares.insert(token.clone(), names);
         }
         // Screens the order list doesn't know yet go to the end, in stream order.
         for s in &self.screens {
@@ -1703,6 +1913,135 @@ impl DesktopViewer {
                 h.set_desktop(origin, extent);
             }
         }
+        moved
+    }
+
+    /// Close those of the sessions `ids` that no screen streams from any more
+    /// (their screens moved to a newer session, or are gone).
+    fn drop_unused_casts(&mut self, ids: &[u64]) {
+        let screens = &self.screens;
+        let before = self.casts.len();
+        self.casts.retain(|c| !ids.contains(&c.id) || screens.iter().any(|s| s.cast == c.id && !s.lost));
+        if self.casts.len() != before {
+            log::info!("desktop: closed {} session(s) no screen uses any more", before - self.casts.len());
+        }
+    }
+
+    /// Take in monitor layout changes: the pointer mapping, each screen's
+    /// place on the desktop, saved sessions whose monitors are all back.
+    fn follow_outputs(&mut self) {
+        let Some(w) = &mut self.output_watch else { return };
+        let change = match w.poll() {
+            Ok(Some(c)) => c,
+            Ok(None) => return,
+            Err(e) => {
+                log::warn!("desktop: lost track of the monitor layout ({e}); keeping the last one");
+                self.output_watch = None;
+                return;
+            }
+        };
+        let now = Instant::now();
+        for name in &change.gone {
+            log::info!("desktop: {name} left the desktop");
+            self.left.insert(name.clone(), now);
+            // Its stream may have ended first.
+            for s in self.screens.iter_mut().filter(|s| s.lost && &s.name == name) {
+                s.monitor_left |= s.lost_at.is_some_and(|t| now.duration_since(t) < LEFT_WINDOW);
+            }
+        }
+        if change.outputs == self.outputs && change.gone.is_empty() {
+            return;
+        }
+        if change.outputs != self.outputs {
+            log::info!("desktop: monitor layout changed");
+            log_outputs(&change.outputs);
+        }
+        self.outputs = change.outputs;
+        self.outputs_changed = Some(now);
+        self.rejoin_held.clear();
+        if !self.outputs.is_empty() {
+            if let Some(h) = &mut self.hid {
+                let (origin, extent) = desktop_bounds(&self.outputs);
+                h.set_desktop(origin, extent);
+            }
+        }
+        for s in &mut self.screens {
+            if let Some(o) = self.outputs.iter().find(|o| o.name == s.name) {
+                s.rect = output_rect(o);
+                s.detail = output_detail(o);
+                s.model = o.description.clone();
+            }
+        }
+        let waiting = std::mem::take(&mut self.waiting);
+        for token in waiting {
+            if self.missing(&token).is_empty() {
+                self.restore.push_back(token);
+            } else {
+                self.waiting.push(token);
+            }
+        }
+    }
+
+    /// Screens whose stream went away with its monitor.
+    fn follow_nodes(&mut self) {
+        let gone = match &self.nodes {
+            Some(n) => n.gone(),
+            None => return,
+        };
+        for (id, at) in gone {
+            // A screen bound to that id since then has another node.
+            for s in self.screens.iter_mut().filter(|s| s.node_id == id && !s.lost && s.bound <= at) {
+                log::info!("desktop: {} went away (stream node {id} removed)", s.name);
+                if let Some(e) = s.capture.as_ref().and_then(|c| c.error()) {
+                    log::warn!("desktop: {}'s stream failed first: {e}", s.name);
+                    s.last_error = Some(format!("its stream failed ({e})"));
+                }
+                s.lose();
+                // Gone from the desktop, or it left and came straight back.
+                let left = self.left.get(&s.name).is_some_and(|t| at.duration_since(*t) < LEFT_WINDOW);
+                s.monitor_left = left || !self.outputs.iter().any(|o| o.name == s.name);
+            }
+        }
+    }
+
+    /// Ask again, with its restore token, for a session whose monitor went
+    /// away, once every monitor it shares is connected. Its screens then pick
+    /// up the new streams where they are. Why one can't yet is logged as it
+    /// changes.
+    fn rejoin_lost(&mut self) {
+        let mut note = None;
+        let mut back = None;
+        for c in &self.casts {
+            let mine: Vec<&ScreenPanel> = self.screens.iter().filter(|s| s.cast == c.id).collect();
+            if !mine.iter().any(|s| s.lost) {
+                continue;
+            }
+            let why = match rejoin_ready(&mine, &self.screens, &self.outputs) {
+                Err(why) => why,
+                Ok(()) if c.cast.restore_token.is_none() => {
+                    "the desktop's share portal gave no way to bring it back: Re-pick screens".into()
+                }
+                Ok(()) if self.rejoin_held.contains(&c.id) => {
+                    "the last try didn't bring it back; trying again when the monitors change".into()
+                }
+                Ok(()) => {
+                    back = Some((c.id, c.cast.restore_token.clone(), lost_names(&mine)));
+                    break;
+                }
+            };
+            note.get_or_insert_with(|| format!("{}: {why}", lost_names(&mine)));
+        }
+        if note != self.rejoin_note {
+            if let Some(n) = &note {
+                log::info!("desktop: not back yet, {n}");
+            }
+            self.rejoin_note = note;
+        }
+        let Some((id, token, names)) = back else { return };
+        log::info!("desktop: {names} connected again; asking for its session back");
+        self.rejoin = Some(id);
+        self.rejoin_at = Some(Instant::now());
+        self.ask(token);
     }
 
     /// "Screen N" for a stream with no output to name it after.
@@ -1715,6 +2054,7 @@ impl DesktopViewer {
     pub fn update_input(&mut self, hands: &[HandInput], max_t: Option<f32>, hmd: Option<&xr::Posef>) -> InputOut {
         let mut out = InputOut::default();
         self.pointing = None;
+        let mut scrolled = false;
         let curved_ok = self.caps.curved;
         let now = Instant::now();
         let n_items = self.screens.len();
@@ -1924,7 +2264,8 @@ impl DesktopViewer {
         let mouse_hand = (0..2usize)
             .filter(|&i| Some(i) != kb_hand && scr_hits[i].is_some())
             .min_by(|&a, &b| scr_hits[a].unwrap().3.total_cmp(&scr_hits[b].unwrap().3));
-        self.on_screen = [0, 1].map(|i| Some(i) != kb_hand && scr_hits[i].is_some());
+        // A screen whose monitor is gone can still be moved, but takes no clicks.
+        self.on_screen = [0, 1].map(|i| Some(i) != kb_hand && scr_hits[i].is_some_and(|h| !self.screens[h.0].lost));
 
         // Grip while pointing grabs the thing (a grabbed keyboard undocks).
         let mut grabbed = false;
@@ -2009,7 +2350,8 @@ impl DesktopViewer {
                 let h = &hands[hi];
                     self.last_screen = Some(si);
                     let (x, y) = self.screens[si].desktop_pos(u, v);
-                    if let Some(hid) = &mut self.hid {
+                    let lost = self.screens[si].lost;
+                    if let Some(hid) = self.hid.as_mut().filter(|_| !lost) {
                         // Hover → move (skip sub-pixel jitter). While a button is
                         // held: frozen (B) never moves; trigger waits for a real drag.
                         let moved =
@@ -2046,6 +2388,11 @@ impl DesktopViewer {
                             if let Some(code) = code {
                                 hid.mouse_move(x, y);
                                 self.hover_prev = Some((x, y));
+                                // Modifiers latched on the VR keyboard hold for the
+                                // click, which uses them up like a key does.
+                                let mods = self.keyboard.latched;
+                                hold_mods(hid, self.held_mods | self.wheel_mods, mods | self.wheel_mods);
+                                self.held_mods = mods;
                                 hid.button(code, true);
                                 self.held = Some((hi, code));
                                 self.held_press = Some((x, y));
@@ -2053,14 +2400,25 @@ impl DesktopViewer {
                                 self.frozen = frozen;
                             }
                         }
-                        // The wheel (the stick, by default).
+                        // The wheel (the stick, by default), with the latched
+                        // modifiers held while it turns (Ctrl-scroll zooms).
                         let (sx, sy) = h.mouse.wheel;
                         if sx != 0.0 || sy != 0.0 {
+                            let mods = self.keyboard.latched;
+                            hold_mods(hid, self.held_mods | self.wheel_mods, self.held_mods | mods);
+                            self.wheel_mods = mods;
+                            scrolled = true;
                             let sp = SCROLL_BASE * self.scroll_speed;
                             hid.wheel(sx * sp, sy * sp);
                         }
                     }
             }
+        }
+        if !scrolled && self.wheel_mods != 0 {
+            if let Some(hid) = &mut self.hid {
+                hold_mods(hid, self.held_mods | self.wheel_mods, self.held_mods);
+            }
+            self.wheel_mods = 0;
         }
         // Release a held button when that hand lets go, wherever it points now.
         if let Some((hi, code)) = self.held {
@@ -2074,6 +2432,11 @@ impl DesktopViewer {
             if !still {
                 if let Some(hid) = &mut self.hid {
                     hid.button(code, false);
+                    hold_mods(hid, self.held_mods | self.wheel_mods, self.wheel_mods);
+                }
+                if self.held_mods != 0 {
+                    self.keyboard.use_latches();
+                    self.held_mods = 0;
                 }
                 self.held = None;
                 self.held_press = None;
@@ -2117,7 +2480,7 @@ impl DesktopViewer {
         let mut quads = Vec::new();
         let mut cyls = Vec::new();
         for s in self.screens.iter_mut() {
-            s.tint = self.tint;
+            s.tint = if s.lost { self.tint.map(|c| c * LOST_DIM) } else { self.tint };
             if s.cyl(curved).is_some() {
                 if let Some(c) = s.cylinder(space, curved, cs) {
                     cyls.push(c);
@@ -2161,6 +2524,72 @@ fn dist2(a: &xr::Vector3f, b: &xr::Vector3f) -> f32 {
     d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
 }
 
+/// Go from holding the modifiers `from` to holding `to` on the virtual
+/// keyboard, pressing and letting go only what changes.
+fn hold_mods(hid: &mut UInput, from: u8, to: u8) {
+    for m in keyboard::MODS {
+        if to & m != 0 && from & m == 0 {
+            hid.key(keyboard::mod_code(m), true);
+        }
+    }
+    for m in keyboard::MODS.into_iter().rev() {
+        if from & m != 0 && to & m == 0 {
+            hid.key(keyboard::mod_code(m), false);
+        }
+    }
+}
+
+/// Whether a session with the screens `mine` can be asked back: a monitor of
+/// it left the desktop as its streams ended (where a share stopped from the
+/// desktop leaves them all in place; some desktops end the whole session when
+/// one monitor goes), and every monitor it shares is connected again.
+/// `Err(why)` when not.
+fn rejoin_ready(mine: &[&ScreenPanel], screens: &[ScreenPanel], outputs: &[outputs::OutputInfo]) -> Result<(), String> {
+    if !mine.iter().any(|s| s.lost && s.monitor_left) {
+        if let Some(e) = mine.iter().filter(|s| s.lost).find_map(|s| s.last_error.as_deref()) {
+            return Err(e.into());
+        }
+        return Err("stopped without a monitor leaving (a share stopped from the desktop?): Re-pick screens".into());
+    }
+    let missing: Vec<&str> =
+        mine.iter().filter(|s| monitor_of(s, outputs, screens).is_none()).map(|s| s.name.as_str()).collect();
+    if !missing.is_empty() {
+        return Err(format!("waiting for {} to be connected", missing.join(", ")));
+    }
+    Ok(())
+}
+
+/// The monitor screen `s` shows: its connector, or, for a lost screen, the
+/// same make and model on a connector no screen has (a monitor can come back
+/// on a new one: DisplayPort hubs, some KVMs).
+fn monitor_of<'a>(s: &ScreenPanel, outputs: &'a [outputs::OutputInfo], screens: &[ScreenPanel]) -> Option<&'a outputs::OutputInfo> {
+    outputs.iter().find(|o| o.name == s.name).or_else(|| {
+        let free = |o: &&outputs::OutputInfo| !screens.iter().any(|x| x.name == o.name);
+        outputs.iter().filter(free).find(|o| s.lost && !s.model.is_empty() && o.description == s.model)
+    })
+}
+
+fn lost_names(mine: &[&ScreenPanel]) -> String {
+    mine.iter().filter(|s| s.lost).map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+fn output_rect(o: &outputs::OutputInfo) -> (f64, f64, f64, f64) {
+    (o.logical_pos.0 as f64, o.logical_pos.1 as f64, o.logical_size.0 as f64, o.logical_size.1 as f64)
+}
+
+fn log_outputs(outputs: &[outputs::OutputInfo]) {
+    for o in outputs {
+        log::info!(
+            "desktop: output {} ({}) at {:?} logical {:?} px {:?}",
+            o.name,
+            o.description,
+            o.logical_pos,
+            o.logical_size,
+            o.pixel_size
+        );
+    }
+}
+
 fn output_detail(o: &outputs::OutputInfo) -> String {
     let mut d = format!("{}×{}", o.logical_size.0, o.logical_size.1);
     if !o.description.is_empty() {
@@ -2189,4 +2618,56 @@ fn bounds_of(rects: &[(f64, f64, f64, f64)]) -> ((f64, f64), (f64, f64)) {
         y1 = y1.max(r.1 + r.3);
     }
     ((x0, y0), (x1 - x0, y1 - y0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output(name: &str, model: &str) -> outputs::OutputInfo {
+        outputs::OutputInfo { name: name.into(), description: model.into(), ..Default::default() }
+    }
+
+    fn screen(name: &str, model: &str, lost: bool, monitor_left: bool) -> ScreenPanel {
+        let mut s = ScreenPanel::new(name.into(), String::new(), 1, 0, (0.0, 0.0, 1920.0, 1080.0));
+        s.model = model.into();
+        s.lost = lost;
+        s.monitor_left = monitor_left;
+        s
+    }
+
+    fn ready(screens: &[ScreenPanel], outputs: &[outputs::OutputInfo]) -> bool {
+        let mine: Vec<&ScreenPanel> = screens.iter().collect();
+        rejoin_ready(&mine, screens, outputs).is_ok()
+    }
+
+    #[test]
+    fn a_session_comes_back_with_its_monitor() {
+        let both = [output("DP-1", "Dell"), output("HDMI-A-1", "MSI")];
+        // KDE: only the monitor that left lost its stream.
+        let screens = [screen("DP-1", "Dell", false, false), screen("HDMI-A-1", "MSI", true, true)];
+        assert!(ready(&screens, &both));
+        assert!(!ready(&screens, &both[..1]), "not while it's still away");
+        // GNOME ends the whole session: the monitor that stayed lost its stream too.
+        let screens = [screen("DP-1", "Dell", true, false), screen("HDMI-A-1", "MSI", true, true)];
+        assert!(ready(&screens, &both));
+    }
+
+    #[test]
+    fn a_share_stopped_from_the_desktop_stays_stopped() {
+        let both = [output("DP-1", "Dell"), output("HDMI-A-1", "MSI")];
+        let screens = [screen("DP-1", "Dell", true, false), screen("HDMI-A-1", "MSI", true, false)];
+        assert!(!ready(&screens, &both));
+    }
+
+    #[test]
+    fn a_monitor_can_come_back_on_another_connector() {
+        let screens = [screen("DP-4", "Dell U2720Q", true, true)];
+        assert!(ready(&screens, &[output("DP-6", "Dell U2720Q")]));
+        assert!(!ready(&screens, &[output("DP-6", "LG 27GL850")]), "another monitor isn't it");
+        // A connector a screen already has is that screen's.
+        let screens = [screen("DP-4", "Dell U2720Q", true, true), screen("DP-6", "Dell U2720Q", false, false)];
+        let mine: Vec<&ScreenPanel> = screens[..1].iter().collect();
+        assert!(rejoin_ready(&mine, &screens, &[output("DP-6", "Dell U2720Q")]).is_err());
+    }
 }

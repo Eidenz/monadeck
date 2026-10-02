@@ -30,6 +30,8 @@ pub const MOD_CTRL: u8 = 2;
 pub const MOD_ALT: u8 = 4;
 pub const MOD_SUPER: u8 = 8;
 pub const MOD_ALTGR: u8 = 16;
+/// Every modifier, in the order they go down (and back up in reverse).
+pub const MODS: [u8; 5] = [MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_SUPER, MOD_ALTGR];
 
 pub fn mod_code(m: u8) -> u16 {
     match m {
@@ -149,8 +151,13 @@ pub struct KeyboardState {
     /// Approved screens (name, shown) for the top-bar pills; toggle request.
     pub screens: Vec<(String, bool)>,
     pub screen_toggle_request: Option<usize>,
-    /// Key held under the pointer: (key index, pressed at, repeats sent).
-    hold: Option<(usize, Instant, u32)>,
+    /// Key held down by the pointer: (key index, pressed at (egui time),
+    /// repeats sent, the modifiers it was pressed with).
+    hold: Option<(usize, f64, u32, u8)>,
+    /// [`Self::look`] when the panel was last drawn (None: draw it afresh).
+    pub drawn: Option<u64>,
+    /// egui asked for another frame after the last one (an animation).
+    pub repaint: bool,
 }
 
 impl KeyboardState {
@@ -180,7 +187,21 @@ impl KeyboardState {
             screens: Vec::new(),
             screen_toggle_request: None,
             hold: None,
+            drawn: None,
+            repaint: false,
         }
+    }
+
+    /// Everything the panel shows besides what the laser does to it: while
+    /// this stays the same and the laser is elsewhere, the last drawn image
+    /// still holds.
+    pub fn look(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (self.labels.current, &self.labels.layout_names, &self.clipboard).hash(&mut h);
+        (self.latched, self.caps, self.shift_locked, self.secondary_hover).hash(&mut h);
+        (&self.screens, self.attached.is_some()).hash(&mut h);
+        h.finish()
     }
 
     /// Pose docked under a screen of `screen_size` at `screen_pose`.
@@ -383,8 +404,11 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
         // --- Keys ---------------------------------------------------------------
         let origin = egui::pos2(ui.max_rect().min.x, ui.max_rect().min.y + TOP_BAR);
         let mut pressed_idx: Option<usize> = None;
-        let mut held_now: Option<usize> = None;
-        let now = Instant::now();
+        // Keys type as the trigger goes down, like the other hand's: a click
+        // would wait for the release, and a laser that drifts a few millimetres
+        // meanwhile (a trigger pull wobbles the controller) cancels it.
+        let (pressed_now, trigger_down, time) =
+            ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.time));
         for (i, k) in st.keys.iter().enumerate() {
             let rect = egui::Rect::from_min_size(
                 origin + egui::vec2(k.x * U + 2.0, k.y * U + 2.0),
@@ -392,10 +416,8 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             );
             let id = ui.id().with(("key", i));
             let resp = ui.interact(rect, id, egui::Sense::click());
-            let down = resp.is_pointer_button_down_on();
-            if down && matches!(k.kind, KeyKind::Mapped | KeyKind::Fixed(_)) {
-                held_now = Some(i);
-            }
+            let pressed_on = resp.is_pointer_button_down_on();
+            let down = pressed_on || st.hold.is_some_and(|(h, ..)| h == i);
             let latched_here = matches!(k.kind, KeyKind::Modifier(m) if st.latched & m != 0)
                 || (k.kind == KeyKind::Caps && st.caps);
             let (fill, fg) = if down || latched_here {
@@ -445,25 +467,30 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             } else {
                 painter.text(rect.center(), egui::Align2::CENTER_CENTER, main, egui::FontId::proportional(size), fg);
             }
-            if resp.clicked() {
+            if pressed_on && pressed_now {
                 pressed_idx = Some(i);
             }
         }
-        // Key repeat: a held printable/nav key re-fires after a delay.
-        match (held_now, st.hold) {
-            (Some(i), Some((hi, t0, n))) if hi == i => {
-                let due = REPEAT_DELAY + n as f32 * REPEAT_INTERVAL;
-                if t0.elapsed().as_secs_f32() >= due {
-                    let k = &st.keys[i];
-                    st.pending.push(KeyAction::Tap { code: k.code, mods: st.latched });
-                    st.hold = Some((i, t0, n + 1));
-                    st.clicked = true;
-                }
+        // Key repeat: a held printable/nav key re-fires after a delay for as
+        // long as the trigger stays down (egui's own hold ends after 0.8 s or a
+        // few points of laser drift, being meant for clicks), with the
+        // modifiers it was pressed with (a latch clears after the first one).
+        if !trigger_down {
+            st.hold = None;
+        }
+        if let Some((i, t0, mut n, mods)) = st.hold {
+            // Catches up when frames come slowly.
+            while time - t0 >= (REPEAT_DELAY + n as f32 * REPEAT_INTERVAL) as f64 {
+                st.pending.push(KeyAction::Tap { code: st.keys[i].code, mods });
+                st.clicked = true;
+                n += 1;
             }
-            (Some(i), _) => st.hold = Some((i, now, 0)),
-            (None, _) => st.hold = None,
+            st.hold = Some((i, t0, n, mods));
         }
         if let Some(i) = pressed_idx {
+            if matches!(st.keys[i].kind, KeyKind::Mapped | KeyKind::Fixed(_)) {
+                st.hold = Some((i, time, 0, st.latched));
+            }
             st.press(i);
         }
     });
@@ -510,17 +537,18 @@ impl KeyboardState {
                     _ => KEY_V,
                 };
                 self.pending.push(KeyAction::Tap { code: c, mods: MOD_CTRL });
-                self.finish_tap();
+                self.use_latches();
             }
             KeyKind::Mapped | KeyKind::Fixed(_) => {
                 self.pending.push(KeyAction::Tap { code, mods: self.latched });
-                self.finish_tap();
+                self.use_latches();
             }
         }
     }
 
-    fn finish_tap(&mut self) {
-        // One-shot latches clear; a locked Shift stays.
+    /// A key or a mouse click used the latched modifiers: one-shot latches
+    /// clear, a locked Shift stays.
+    pub fn use_latches(&mut self) {
         self.latched = if self.shift_locked { MOD_SHIFT } else { 0 };
         self.latch_at = None;
     }
@@ -556,4 +584,128 @@ fn small_button(ui: &mut egui::Ui, glyph: &str, tip: &str) -> egui::Response {
             .fill(theme::SURFACE_CONTAINER_HIGH),
     )
     .on_hover_text(tip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One egui frame of the keyboard panel, sized as in VR.
+    fn frame(ctx: &egui::Context, st: &mut KeyboardState, time: f64, events: Vec<egui::Event>) -> egui::FullOutput {
+        let (w, h) = panel_points();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        ctx.run(raw, |ctx| build(ctx, st))
+    }
+
+    fn trigger(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() }
+    }
+
+    fn centre_of(st: &KeyboardState, code: u16) -> egui::Pos2 {
+        centre(st.keys.iter().find(|k| k.code == code && k.kind == KeyKind::Mapped).expect("key on the layout"))
+    }
+
+    fn centre(k: &KeyDef) -> egui::Pos2 {
+        egui::pos2(MARGIN + (k.x + k.w / 2.0) * U, MARGIN + TOP_BAR + (k.y + k.h / 2.0) * U)
+    }
+
+    /// Hold the trigger down on `at` for `secs`, the laser wobbling a few
+    /// points like a hand does; returns the time reached.
+    fn hold(ctx: &egui::Context, st: &mut KeyboardState, mut t: f64, at: egui::Pos2, secs: f64) -> f64 {
+        frame(ctx, st, t, vec![egui::Event::PointerMoved(at), trigger(at, true)]);
+        let end = t + secs;
+        let mut i = 0;
+        while t < end {
+            t += 0.02;
+            i += 1;
+            let wobble = at + egui::vec2(if i % 2 == 0 { 9.0 } else { -9.0 }, 0.0);
+            frame(ctx, st, t, vec![egui::Event::PointerMoved(wobble)]);
+        }
+        t
+    }
+
+    #[test]
+    fn types_as_the_trigger_goes_down() {
+        let ctx = egui::Context::default();
+        let mut st = KeyboardState::new();
+        let a = centre_of(&st, 30);
+        frame(&ctx, &mut st, 0.00, vec![egui::Event::PointerMoved(a)]);
+        frame(&ctx, &mut st, 0.02, vec![egui::Event::PointerMoved(a), trigger(a, true)]);
+        assert!(matches!(st.pending[..], [KeyAction::Tap { code: 30, .. }]), "A is typed on the press");
+        // The laser wobbles off by more than a click allows before the release:
+        // still the one A.
+        let off = a + egui::vec2(12.0, 0.0);
+        frame(&ctx, &mut st, 0.04, vec![egui::Event::PointerMoved(off)]);
+        frame(&ctx, &mut st, 0.06, vec![egui::Event::PointerMoved(off), trigger(off, false)]);
+        assert_eq!(st.pending.len(), 1);
+    }
+
+    #[test]
+    fn a_held_key_repeats_until_the_trigger_lets_go() {
+        let ctx = egui::Context::default();
+        let mut st = KeyboardState::new();
+        let a = centre_of(&st, 30);
+        frame(&ctx, &mut st, 0.0, vec![egui::Event::PointerMoved(a)]);
+        let t = hold(&ctx, &mut st, 0.02, a, 2.0);
+        // The press, then a repeat every 50 ms from 0.45 s: 33 in 2 s.
+        let typed = st.pending.len();
+        assert!(typed >= 30, "kept repeating past egui's 0.8 s: {typed}");
+        assert!(st.pending.iter().all(|k| matches!(k, KeyAction::Tap { code: 30, .. })));
+        frame(&ctx, &mut st, t + 0.02, vec![egui::Event::PointerMoved(a), trigger(a, false)]);
+        frame(&ctx, &mut st, t + 0.6, vec![egui::Event::PointerMoved(a)]);
+        assert_eq!(st.pending.len(), typed, "stops on release");
+    }
+
+    #[test]
+    fn a_held_key_repeats_with_its_modifiers() {
+        let ctx = egui::Context::default();
+        let mut st = KeyboardState::new();
+        let shift = centre(st.keys.iter().find(|k| k.kind == KeyKind::Modifier(MOD_SHIFT)).expect("a Shift key"));
+        frame(&ctx, &mut st, 0.0, vec![egui::Event::PointerMoved(shift)]);
+        frame(&ctx, &mut st, 0.02, vec![egui::Event::PointerMoved(shift), trigger(shift, true)]);
+        frame(&ctx, &mut st, 0.04, vec![egui::Event::PointerMoved(shift), trigger(shift, false)]);
+        assert_eq!(st.latched, MOD_SHIFT);
+        let a = centre_of(&st, 30);
+        frame(&ctx, &mut st, 0.06, vec![egui::Event::PointerMoved(a)]);
+        hold(&ctx, &mut st, 0.08, a, 1.0);
+        assert!(st.pending.len() > 5);
+        assert!(st.pending.iter().all(|k| matches!(k, KeyAction::Tap { code: 30, mods: MOD_SHIFT })), "Shift+A all along");
+        assert_eq!(st.latched, 0, "the latch was used");
+    }
+
+    #[test]
+    fn an_idle_keyboard_asks_for_no_more_frames() {
+        // It's only redrawn on changes, so egui mustn't want frames forever.
+        let ctx = egui::Context::default();
+        let mut st = KeyboardState::new();
+        let a = centre_of(&st, 30);
+        frame(&ctx, &mut st, 0.0, vec![egui::Event::PointerMoved(a)]);
+        frame(&ctx, &mut st, 0.1, vec![egui::Event::PointerGone]);
+        let mut wants = true;
+        for i in 0..40 {
+            let out = frame(&ctx, &mut st, 0.2 + i as f64 * 0.05, Vec::new());
+            wants = out.viewport_output[&egui::ViewportId::ROOT].repaint_delay.is_zero();
+            if !wants {
+                break;
+            }
+        }
+        assert!(!wants, "egui keeps asking for frames with the laser away");
+    }
+
+    #[test]
+    fn the_look_follows_what_the_panel_shows() {
+        let mut st = KeyboardState::new();
+        let before = st.look();
+        st.latched = MOD_SHIFT;
+        assert_ne!(st.look(), before);
+        st.latched = 0;
+        assert_eq!(st.look(), before);
+        st.clipboard = Some("copied".into());
+        assert_ne!(st.look(), before);
+    }
 }

@@ -5,10 +5,15 @@
 //!
 //! The negotiation/pod code follows wlx-capture's PipeWire backend (same
 //! `pipewire` crate release), trimmed to what the viewer needs.
+//!
+//! A monitor that goes away (unplugged, a KVM switching over) takes its node
+//! with it: [`NodeWatch`] reports that, and the capture stays put instead of
+//! letting the session manager hand it another video source.
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::mpsc;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use drm_fourcc::DrmFourcc;
 use pipewire as pw;
@@ -77,6 +82,8 @@ pub struct Capture {
     tx_ctrl: pw::channel::Sender<Ctrl>,
     rx_frame: mpsc::Receiver<Frame>,
     handle: Option<JoinHandle<()>>,
+    /// Why the stream failed, if it did (e.g. no image format in common).
+    error: Arc<Mutex<Option<String>>>,
 }
 
 static PW_INIT: Once = Once::new();
@@ -88,15 +95,22 @@ impl Capture {
         PW_INIT.call_once(pw::init);
         let (tx_frame, rx_frame) = mpsc::sync_channel(2);
         let (tx_ctrl, rx_ctrl) = pw::channel::channel();
+        let error = Arc::new(Mutex::new(None));
+        let failed = error.clone();
         let handle = std::thread::Builder::new()
             .name(format!("pw-capture-{node_id}"))
             .spawn(move || {
-                if let Err(e) = main_loop(name.clone(), node_id, formats, max_fps, tx_frame, rx_ctrl) {
+                if let Err(e) = main_loop(name.clone(), node_id, formats, max_fps, tx_frame, rx_ctrl, failed) {
                     log::error!("{name}: pipewire capture loop failed: {e}");
                 }
             })
             .expect("spawn pipewire thread");
-        Self { tx_ctrl, rx_frame, handle: Some(handle) }
+        Self { tx_ctrl, rx_frame, handle: Some(handle), error }
+    }
+
+    /// Why the stream failed, if it did.
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|e| e.clone())
     }
 
     /// Newest frame since the last call (older queued frames are dropped).
@@ -125,6 +139,7 @@ fn main_loop(
     max_fps: u32,
     sender: mpsc::SyncSender<Frame>,
     receiver: pw::channel::Receiver<Ctrl>,
+    failed: Arc<Mutex<Option<String>>>,
 ) -> Result<(), pw::Error> {
     let main_loop = MainLoopRc::new(None)?;
     let context = ContextRc::new(&main_loop, None)?;
@@ -137,6 +152,9 @@ fn main_loop(
             *pw::keys::MEDIA_TYPE => "Video",
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Screen",
+            // When the monitor goes, WirePlumber would link the stream to the
+            // default video source instead (a webcam, the headset's eye camera).
+            *pw::keys::NODE_DONT_RECONNECT => "true",
         },
     )?;
 
@@ -149,7 +167,14 @@ fn main_loop(
         })
         .state_changed({
             let name = name.clone();
-            move |_, _, old, new| log::info!("{name}: stream {old:?} -> {new:?}")
+            move |_, _, old, new| {
+                log::info!("{name}: stream {old:?} -> {new:?}");
+                if let pw::stream::StreamState::Error(e) = &new {
+                    if let Ok(mut f) = failed.lock() {
+                        *f = Some(e.clone());
+                    }
+                }
+            }
         })
         .param_changed({
             let name = name.clone();
@@ -324,6 +349,66 @@ fn main_loop(
 
     main_loop.run();
     log::info!("{name}: pipewire loop exited");
+    Ok(())
+}
+
+/// Watches PipeWire for nodes going away: a screencast node is removed when
+/// its monitor is. One connection for every screen, shown or not.
+pub struct NodeWatch {
+    tx_ctrl: pw::channel::Sender<()>,
+    rx_gone: mpsc::Receiver<(u32, Instant)>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl NodeWatch {
+    pub fn start() -> Self {
+        PW_INIT.call_once(pw::init);
+        let (tx_gone, rx_gone) = mpsc::channel();
+        let (tx_ctrl, rx_ctrl) = pw::channel::channel();
+        let handle = std::thread::Builder::new()
+            .name("pw-nodes".into())
+            .spawn(move || {
+                if let Err(e) = watch_loop(tx_gone, rx_ctrl) {
+                    log::error!("desktop: pipewire node watch failed: {e}");
+                }
+            })
+            .expect("spawn pipewire node watch");
+        Self { tx_ctrl, rx_gone, handle: Some(handle) }
+    }
+
+    /// Nodes removed since the last call, with when they went (node ids are
+    /// reused, so a screen bound to that id later isn't the one that went).
+    pub fn gone(&self) -> Vec<(u32, Instant)> {
+        self.rx_gone.try_iter().collect()
+    }
+}
+
+impl Drop for NodeWatch {
+    fn drop(&mut self) {
+        let _ = self.tx_ctrl.send(());
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+fn watch_loop(gone: mpsc::Sender<(u32, Instant)>, stop: pw::channel::Receiver<()>) -> Result<(), pw::Error> {
+    let main_loop = MainLoopRc::new(None)?;
+    let context = ContextRc::new(&main_loop, None)?;
+    let core = context.connect_rc(None)?;
+    let registry = core.get_registry_rc()?;
+    // Only removals matter; everything else the registry says is ignored.
+    let _listener = registry
+        .add_listener_local()
+        .global_remove(move |id| {
+            let _ = gone.send((id, Instant::now()));
+        })
+        .register();
+    let _rx = stop.attach(main_loop.loop_(), {
+        let main_loop = main_loop.clone();
+        move |()| main_loop.quit()
+    });
+    main_loop.run();
     Ok(())
 }
 
