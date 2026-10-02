@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use egui_phosphor::regular as icon;
 
-use crate::gfx::theme;
+use crate::gfx::{off, theme};
 
 /// How long the island stays after a screen appears / the laser leaves it.
 pub const LINGER: Duration = Duration::from_millis(2000);
@@ -55,9 +55,9 @@ pub fn alpha(until: Option<Instant>, now: Instant) -> f32 {
     (left / FADE_SECS).clamp(0.0, 1.0)
 }
 
-/// Draw the pill. `items` = (screen index, label) in bar order; returns the
+/// Draw the pill. `items` = (screen index, button) in bar order; returns the
 /// screen index of a tapped button that isn't the current one.
-pub fn build(ctx: &egui::Context, items: &[(usize, String)], current: usize, alpha: f32) -> Option<usize> {
+pub fn build(ctx: &egui::Context, items: &[(usize, super::BarItem)], current: usize, alpha: f32) -> Option<usize> {
     let mut picked = None;
     egui::Area::new(egui::Id::new("island")).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(ctx, |ui| {
         ui.set_opacity(alpha);
@@ -69,16 +69,28 @@ pub fn build(ctx: &egui::Context, items: &[(usize, String)], current: usize, alp
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
                 ui.horizontal(|ui| {
-                    for (n, (si, name)) in items.iter().enumerate() {
+                    for (n, (si, item)) in items.iter().enumerate() {
                         let on = *si == current;
-                        let fg = if on { egui::Color32::BLACK } else { theme::ON_SURFACE };
-                        let fill = if on { theme::PRIMARY } else { egui::Color32::from_rgb(34, 40, 48) };
+                        let mut fg = if on { egui::Color32::BLACK } else { theme::ON_SURFACE };
+                        let mut fill = if on { theme::PRIMARY } else { egui::Color32::from_rgb(34, 40, 48) };
+                        if item.lost {
+                            (fg, fill) = (off::dim(fg), off::dim(fill));
+                        }
                         let b = egui::Button::new(egui::RichText::new(format!("{} {}", icon::MONITOR, n + 1)).size(13.0).color(fg))
                             .fill(fill)
                             .corner_radius(11)
                             .min_size(egui::vec2(BTN_W, BTN_H));
-                        let tip = if on { format!("{name} · shown here") } else { format!("Swap in {name}") };
-                        if ui.add(b).on_hover_text(tip).clicked() && !on {
+                        let name = &item.name;
+                        let tip = match (item.lost, on) {
+                            (true, _) => format!("{name} · disconnected"),
+                            (false, true) => format!("{name} · shown here"),
+                            (false, false) => format!("Swap in {name}"),
+                        };
+                        let resp = ui.add(b);
+                        if item.lost {
+                            off::slash(ui.painter(), resp.rect);
+                        }
+                        if resp.on_hover_text(tip).clicked() && !on {
                             picked = Some(*si);
                         }
                     }
