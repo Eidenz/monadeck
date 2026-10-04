@@ -235,8 +235,8 @@
       {/each}
     </div>
     <span class="help">
-      steamvr (default) loads SteamVR's tracking driver: it works for every Lighthouse headset,
-      the Bigscreen Beyond included. SteamVR has to be installed in Steam, but never runs.
+      steamvr (default) loads SteamVR's tracking driver: it works for every Lighthouse headset.
+      SteamVR has to be installed in Steam, but never runs.
       vive and survive are the open-source drivers for Vive/Index.
       {#if driver === "steamvr" && app.steamvr === false}
         <b class="warn-text">SteamVR isn't installed: install it from Steam.</b>
@@ -360,10 +360,8 @@
       </button>
     </div>
     <span class="help">
-      Put the device in pairing mode first (Index controller: hold B and System until the light
-      blinks blue; Vive tracker: hold its power button until it blinks blue; Vive wand: hold Menu
-      and System). Then press Pair on a free receiver: whatever it was paired with before is
-      replaced. Works with VR running.
+      Put the device in pairing mode, then press Pair on a free receiver: whatever it was paired
+      with before is replaced. Works with VR running.
     </span>
     {#if receivers.length === 0}
       <span class="muted">{loadingReceivers ? "Looking for receivers…" : "No receivers plugged in."}</span>

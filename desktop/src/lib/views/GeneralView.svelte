@@ -61,7 +61,7 @@
         ? "Stop the service to switch."
         : isWivrn
           ? "Streams to a Quest/Pico-style headset over Wi-Fi via WiVRn's server. Device strip, apps and the overlay work the same."
-          : "Runs your Monado fork for a wired (Lighthouse/Beyond) headset."}
+          : "Runs your Monado fork for a wired headset."}
     </span>
   </div>
 

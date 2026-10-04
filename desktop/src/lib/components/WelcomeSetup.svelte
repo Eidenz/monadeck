@@ -82,7 +82,7 @@
         onclick={() => setBackend("monado")}
       >
         <span class="ct">Monado</span>
-        <span class="cd">Wired headset: Lighthouse, Bigscreen Beyond, Index…</span>
+        <span class="cd">Wired headset: Lighthouse and others</span>
       </button>
       <button
         class="choice"
@@ -204,7 +204,7 @@
             <div class="d">
               {steamvrDone
                 ? "Installed. It never runs: Monado only loads its Lighthouse tracking driver."
-                : "Lighthouse headsets (Bigscreen Beyond, Index, Vive) track through SteamVR's driver. Install SteamVR from Steam; it never needs to run."}
+                : "Lighthouse headsets track through SteamVR's driver. Install SteamVR from Steam; it never needs to run."}
             </div>
           </div>
           <div class="act">
