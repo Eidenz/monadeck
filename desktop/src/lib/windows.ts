@@ -6,6 +6,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 
 export type SettingsSection =
   | "general"
+  | "lighthouse"
   | "compositor"
   | "environment"
   | "plugins"

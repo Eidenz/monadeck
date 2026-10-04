@@ -13,6 +13,7 @@
 //! … — but taking down vrserver brings the rest down with it, so that single
 //! target is enough and keeps us from over-matching unrelated processes.
 
+use crate::steam;
 use std::fs;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -134,4 +135,13 @@ mod tests {
         // Whatever is on the box, enumerating /proc must not panic.
         let _ = steamvr_running();
     }
+}
+
+/// SteamVR's lighthouse driver is installed in some Steam library: what
+/// monado's `steamvr_lh` loads (it never runs SteamVR itself).
+pub fn lighthouse_driver_installed() -> bool {
+    steam::library_folders().iter().any(|lib| {
+        lib.join("steamapps/common/SteamVR/drivers/lighthouse/bin/linux64/driver_lighthouse.so")
+            .is_file()
+    })
 }

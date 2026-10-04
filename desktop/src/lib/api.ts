@@ -60,6 +60,22 @@ export const floorCalStatus = () => invoke<FloorCalStatus>("floor_cal_status");
 export const runFloorCalibration = () =>
   invoke<void>("run_floor_calibration");
 
+import type { FoundStation, Receiver, RoomResult, StationPower, StationState, StationVersion } from "./types";
+export const runRoomSetup = () => invoke<RoomResult>("run_room_setup");
+export const headHeight = () => invoke<number | null>("head_height");
+export const pairingReceivers = () => invoke<Receiver[]>("pairing_receivers");
+/** Returns how many seconds the receiver listens for a device. */
+export const pairingStart = (serial: string) => invoke<number>("pairing_start", { serial });
+export const bsScan = (secs: number) => invoke<FoundStation[]>("bs_scan", { secs });
+export const bsState = (address: string) => invoke<StationState>("bs_state", { address });
+export const bsSetPower = (address: string, version: StationVersion, power: StationPower, bsid: string | null) =>
+  invoke<void>("bs_set_power", { address, version, power, bsid });
+export const bsSetChannel = (address: string, channel: number) =>
+  invoke<void>("bs_set_channel", { address, channel });
+export const bsIdentify = (address: string) => invoke<void>("bs_identify", { address });
+export const installUdevRules = () => invoke<void>("install_udev_rules");
+export const steamvrInstalled = () => invoke<boolean>("steamvr_installed");
+
 export const surviveCalStatus = () =>
   invoke<SurviveCalStatus>("survive_cal_status");
 export const runSurviveCalibration = () =>

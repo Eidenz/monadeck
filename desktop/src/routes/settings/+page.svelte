@@ -11,6 +11,7 @@
   import AboutView from "$lib/views/AboutView.svelte";
   import BeyondView from "$lib/views/BeyondView.svelte";
   import WivrnView from "$lib/views/WivrnView.svelte";
+  import LighthouseView from "$lib/views/LighthouseView.svelte";
   import { app, loadInitial, refreshStatus } from "$lib/state.svelte";
   import { beyondPresent } from "$lib/api";
   import type { SettingsSection } from "$lib/windows";
@@ -24,7 +25,7 @@
     { id: "about", label: "About" },
   ];
   // Beyond owners get an extra "Beyond eye tracking" tab (inserted after Plugins);
-  // the WiVRn backend gets its own tab right after General.
+  // right after General, the backend's own tab: Lighthouse (Monado) or WiVRn.
   let hasBeyond = $state(false);
   const nav = $derived.by(() => {
     let items = baseNav;
@@ -37,6 +38,8 @@
     }
     if (app.config?.backend === "wivrn") {
       items = [items[0], { id: "wivrn" as SettingsSection, label: "WiVRn" }, ...items.slice(1)];
+    } else if (app.config) {
+      items = [items[0], { id: "lighthouse" as SettingsSection, label: "Lighthouse" }, ...items.slice(1)];
     }
     return items;
   });
@@ -108,6 +111,8 @@
         <BeyondView />
       {:else if active === "wivrn"}
         <WivrnView />
+      {:else if active === "lighthouse"}
+        <LighthouseView />
       {:else if active === "about"}
         <AboutView />
       {/if}

@@ -4,6 +4,7 @@
 //! workflow Monadeck targets: point at a monado build prefix, optionally set
 //! some env vars, register xrizer, and launch a few plugins by path.
 
+use crate::basestations::{self, Power};
 use crate::paths::monadeck_config_dir;
 use crate::plugins::Plugin;
 use anyhow::{Context, Result};
@@ -63,6 +64,11 @@ fn default_lh_driver() -> String {
 
 fn default_bsb_cams_port() -> u16 {
     8080
+}
+
+fn default_base_stations_off() -> Power {
+    // What SteamVR does: everything off but Bluetooth.
+    Power::Sleep
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +176,18 @@ pub struct MonadeckConfig {
     /// Port go-bsb-cams serves the eye-camera MJPEG stream on (Babble/VRCFT read it).
     #[serde(default = "default_bsb_cams_port")]
     pub bsb_cams_port: u16,
+
+    /// Lighthouse base stations Monadeck switches over Bluetooth (added from a scan).
+    #[serde(default)]
+    pub base_stations: Vec<basestations::Saved>,
+
+    /// Switch them on when VR starts and off when it stops.
+    #[serde(default)]
+    pub base_stations_auto: bool,
+
+    /// What "off" means for 2.0 stations: sleep (default) or standby.
+    #[serde(default = "default_base_stations_off")]
+    pub base_stations_off: Power,
 }
 
 impl Default for MonadeckConfig {
@@ -198,6 +216,9 @@ impl Default for MonadeckConfig {
             plugins: Vec::new(),
             bsb_cams_path: None,
             bsb_cams_port: default_bsb_cams_port(),
+            base_stations: Vec::new(),
+            base_stations_auto: false,
+            base_stations_off: default_base_stations_off(),
         }
     }
 }

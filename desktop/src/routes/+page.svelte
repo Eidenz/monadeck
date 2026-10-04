@@ -42,12 +42,12 @@
   const showNoRuntime = $derived(app.caps === "no_binary" && !noRuntimeDismissed);
   const isWivrn = $derived(app.service.backend === "wivrn");
   const wivrn = $derived(app.service.wivrn);
-  // steamvr_lh driver selected, vrcmd present, but no chaperone set → nudge to
-  // calibrate the floor (only when we can actually offer the fix).
+  // steamvr_lh driver selected but no room setup for the tracking universe →
+  // nudge to set the floor (only when we can offer the fix: natively, or vrcmd).
   const showFloorCal = $derived(
     !isWivrn &&
       app.config?.lighthouse_driver === "steamvr" &&
-      !!app.floorCal?.available &&
+      !!(app.floorCal?.native || app.floorCal?.available) &&
       app.floorCal?.calibrated === false &&
       !floorCalDismissed,
   );

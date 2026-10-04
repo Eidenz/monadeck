@@ -37,6 +37,47 @@ export interface MonadeckConfig {
   overlay_enabled: boolean;
   environment: Record<string, string>;
   plugins: Plugin[];
+  base_stations: SavedStation[];
+  base_stations_auto: boolean; // on when VR starts, off when it stops
+  base_stations_off: StationPower; // what "off" means: sleep or standby
+}
+
+// --- Lighthouse: base stations, receivers, room setup ------------------------
+
+export type StationVersion = "v1" | "v2";
+export type StationPower = "on" | "sleep" | "standby";
+
+export interface SavedStation {
+  address: string;
+  name: string;
+  version: StationVersion;
+  bsid: string | null; // 1.0 only: the ID printed on its back
+}
+
+export interface FoundStation {
+  address: string;
+  name: string;
+  version: StationVersion;
+  rssi: number | null; // set when it answered the latest scan
+}
+
+export interface StationState {
+  power: "on" | "sleep" | "standby" | "waking" | null;
+  channel: number | null;
+}
+
+export interface Receiver {
+  serial: string;
+  name: string;
+  node: string;
+  active: boolean | null; // a device is connected through it (known with VR running)
+}
+
+export interface RoomResult {
+  universe: string;
+  previous_height: number | null; // m above the previous floor
+  moved: number | null; // m the centre moved
+  applied: boolean; // the running Monado picked it up
 }
 
 export interface AmdGpu {
@@ -171,6 +212,7 @@ export interface PreflightCheck {
   severity: PreflightSeverity;
   detail: string;
   fix: string | null; // install hint, present only when !ok
+  action: "install_udev_rules" | null; // a fix Monadeck applies itself
 }
 
 export interface PreflightReport {
@@ -180,8 +222,10 @@ export interface PreflightReport {
 }
 
 export interface FloorCalStatus {
-  available: boolean; // SteamVR's vrcmd tool was found (calibration is possible)
-  calibrated: boolean; // a chaperone_info.vrchap exists (room setup has been run)
+  available: boolean; // SteamVR's vrcmd was found (the fallback calibration can run)
+  calibrated: boolean; // a room setup exists for the universe the driver knows
+  native: boolean; // the runtime reports the headset's pose: room setup without SteamVR
+  has_universe: boolean; // the lighthouse driver has found base stations
 }
 
 export interface SurviveCalStatus {

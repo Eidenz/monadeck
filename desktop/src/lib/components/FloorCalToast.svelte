@@ -1,26 +1,35 @@
 <script lang="ts">
   // Detached card above the deck (SteamVR-style), shown when the steamvr_lh
-  // driver is selected but no chaperone/play-space has been set — so the floor
-  // and forward direction would be off. Mirrors CapToast/PreflightBanner. Only
-  // rendered (by +page.svelte) when vrcmd is available, so the action can work.
+  // driver is selected but no room setup matches the tracking universe — so the
+  // floor and forward direction would be off. Mirrors CapToast/PreflightBanner.
+  // Only rendered (by +page.svelte) when a calibration can run: without SteamVR
+  // (the runtime reports the headset's pose; needs VR running), or through
+  // SteamVR's vrcmd (needs the service stopped).
   import { app, runFloorCalibration } from "$lib/state.svelte";
 
   let { dismissed = $bindable(false) }: { dismissed?: boolean } = $props();
 
-  // vrcmd needs exclusive access to the headset, so we can't calibrate while
-  // monado is holding it.
-  const blocked = $derived(app.service.running);
+  const native = $derived(!!app.floorCal?.native);
+  const blocked = $derived(native ? !app.service.connected : app.service.running);
 </script>
 
 <div class="toast" role="alert">
   <div class="title">Floor not calibrated</div>
   <div class="desc">
-    The SteamVR Lighthouse driver has no play space set, so your floor height and
-    forward direction will be off. Put your headset on the floor in the middle of
-    your play area (controllers off), facing your "forward", then calibrate.
+    {#if native}
+      Your play space isn't set, so your floor height and forward direction will
+      be off. With VR running, stand the headset upright on the floor in the middle
+      of your play area, facing your "forward", then set it.
+    {:else}
+      The SteamVR Lighthouse driver has no play space set, so your floor height and
+      forward direction will be off. Put your headset on the floor in the middle of
+      your play area (controllers off), facing your "forward", then calibrate.
+    {/if}
   </div>
   {#if blocked}
-    <div class="hint">Stop the service first, calibration needs the headset.</div>
+    <div class="hint">
+      {native ? "Start VR first, setting it reads where the headset is." : "Stop the service first, calibration needs the headset."}
+    </div>
   {:else if app.floorCalResult && !app.floorCalResult.ok}
     <div class="hint err">{app.floorCalResult.msg}</div>
   {/if}
@@ -31,7 +40,7 @@
       onclick={runFloorCalibration}
       disabled={app.calibratingFloor || blocked}
     >
-      {app.calibratingFloor ? "Calibrating…" : "Calibrate floor"}
+      {app.calibratingFloor ? "Calibrating…" : native ? "Set floor" : "Calibrate floor"}
     </button>
   </div>
 </div>
