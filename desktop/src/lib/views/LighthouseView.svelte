@@ -52,6 +52,22 @@
     }
   }
 
+  // Keep "In use" / "Free" live (and pick up receivers plugged in meanwhile)
+  // while the page is open. Quiet: no button flicker, errors keep the last list.
+  // Not while the window is hidden (closing Settings only hides it).
+  let probing = false;
+  async function refreshReceiversQuietly() {
+    if (probing || loadingReceivers || pairing || document.hidden) return;
+    probing = true;
+    try {
+      receivers = await api.pairingReceivers();
+    } catch {
+      // keep what we have
+    } finally {
+      probing = false;
+    }
+  }
+
   // Devices that are on right now, keyed by serial (name as a fallback).
   async function liveDevices(): Promise<Map<string, string>> {
     const out = new Map<string, string>();
@@ -243,7 +259,11 @@
         height = null;
       }
     }, 1000);
-    return () => clearInterval(t);
+    const live = setInterval(refreshReceiversQuietly, 3000);
+    return () => {
+      clearInterval(t);
+      clearInterval(live);
+    };
   });
 </script>
 
