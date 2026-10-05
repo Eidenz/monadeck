@@ -15,12 +15,19 @@
 //! shows nothing; the value is in handing Monadeck to someone whose machine
 //! lacks these.
 
+use crate::host;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// The udev rules file shipped by the `xr-hardware` package (a Monado-project
 /// artifact), covering a broad set of HMDs/controllers.
 const XR_HARDWARE_RULE: &str = "70-xrhardware.rules";
+
+/// Our copy of those rules (xr-hardware 1.1.2, BSL-1.0, header kept), installed
+/// under its own name so a later distro package isn't shadowed by it. Below 73
+/// for `uaccess` to apply.
+const BUNDLED_RULE: &str = include_str!("../assets/70-xrhardware.rules");
+const BUNDLED_RULE_PATH: &str = "/etc/udev/rules.d/70-monadeck-xrhardware.rules";
 
 /// Directories udev reads rules from, in the order a distro populates them.
 const UDEV_RULE_DIRS: &[&str] = &[
@@ -52,6 +59,8 @@ pub struct PreflightCheck {
     pub detail: String,
     /// A suggested install command, present only when the check failed.
     pub fix: Option<String>,
+    /// A fix Monadeck can apply itself (`"install_udev_rules"`), when failed.
+    pub action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,8 +182,9 @@ pub fn run() -> PreflightReport {
     let distro = Distro::detect();
     let mut checks = Vec::new();
 
-    // 1. xr-hardware udev rules — HMD/controller access without root.
-    let udev_ok = find_udev_rule(XR_HARDWARE_RULE).is_some();
+    // 1. xr-hardware udev rules — HMD/controller access without root (the
+    //    distro's package, or the copy we install).
+    let udev_ok = find_udev_rule(XR_HARDWARE_RULE).is_some() || Path::new(BUNDLED_RULE_PATH).is_file();
     let xr_pkg = pkg_for(
         distro,
         &[
@@ -194,6 +204,7 @@ pub fn run() -> PreflightReport {
                  monado may not see the headset. (On Arch it's in the AUR.)"
             .into(),
         fix: (!udev_ok).then(|| fix_hint(distro, &xr_pkg)),
+        action: (!udev_ok).then(|| "install_udev_rules".to_string()),
     });
 
     // 2. pkexec — privilege elevation for setcap + the AMD VR power profile.
@@ -219,6 +230,7 @@ pub fn run() -> PreflightReport {
                  Without it those one-click fixes can't prompt for a password."
             .into(),
         fix: (!pkexec_ok).then(|| fix_hint(distro, &pk_pkg)),
+        action: None,
     });
 
     let all_ok = checks.iter().all(|c| c.ok);
@@ -226,6 +238,39 @@ pub fn run() -> PreflightReport {
         checks,
         all_ok,
         distro: distro.map(|d| d.label().to_string()),
+    }
+}
+
+/// Install our copy of the xr-hardware rules via pkexec, then reload udev and
+/// re-apply it to what's plugged in. Blocking (waits on the polkit dialog).
+pub fn install_udev_rules() -> Result<(), String> {
+    // Stage in a user-writable file, then let the privileged shell copy it into
+    // place (no quoting the rules through pkexec). Same as the Beyond camera rule.
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    let tmp = format!("{dir}/monadeck-xrhardware.rules");
+    std::fs::write(&tmp, BUNDLED_RULE).map_err(|e| format!("Couldn't stage the rules: {e}"))?;
+
+    let script = format!(
+        "install -m 0644 \"$1\" '{BUNDLED_RULE_PATH}' && udevadm control --reload-rules && \
+         udevadm trigger --subsystem-match=usb --subsystem-match=hidraw"
+    );
+    let status = host::command("pkexec")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .arg("monadeck") // $0
+        .arg(&tmp) // $1
+        .status();
+    let _ = std::fs::remove_file(&tmp);
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        // pkexec: 126 = not authorized / dismissed, 127 = auth could not be obtained.
+        Ok(s) if matches!(s.code(), Some(126) | Some(127)) => {
+            Err("Authorization was dismissed or denied".to_string())
+        }
+        Ok(_) => Err("Failed to install the udev rules".to_string()),
+        Err(e) => Err(format!("Couldn't run pkexec (is polkit installed?): {e}")),
     }
 }
 
@@ -250,6 +295,15 @@ mod tests {
         for c in &r.checks {
             assert_eq!(c.ok, c.fix.is_none());
         }
+        // Only the udev rules can be fixed in-app.
+        let pk = r.checks.iter().find(|c| c.id == "pkexec").unwrap();
+        assert!(pk.action.is_none());
+    }
+
+    #[test]
+    fn bundled_rules_cover_the_receivers() {
+        assert!(BUNDLED_RULE.contains("SPDX-License-Identifier: BSL-1.0"));
+        assert!(BUNDLED_RULE.contains(r#"ATTRS{idVendor}=="28de", ATTRS{idProduct}=="2101", TAG+="uaccess""#));
     }
 
     #[test]

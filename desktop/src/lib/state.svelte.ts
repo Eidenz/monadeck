@@ -40,6 +40,12 @@ export const app = $state({
   floorCal: null as FloorCalStatus | null,
   calibratingFloor: false,
   floorCalResult: null as null | { ok: boolean; msg: string },
+  // SteamVR's lighthouse driver is installed (Monado's steamvr_lh loads it).
+  // Null until checked.
+  steamvr: null as boolean | null,
+  // The one-click udev rules install (Environment › System readiness).
+  installingUdev: false,
+  udevResult: null as null | { ok: boolean; msg: string },
   // Libsurvive calibration (for the `survive` driver). Null until first checked.
   surviveCal: null as SurviveCalStatus | null,
   calibratingSurvive: false,
@@ -122,6 +128,7 @@ export async function loadInitial() {
   await refreshStatus();
   await refreshPreflight();
   await refreshFloorCal();
+  await refreshSteamvr();
   await refreshSurviveCal();
   await refreshImportOpenxr();
   await refreshUevr();
@@ -191,19 +198,57 @@ export async function refreshFloorCal() {
   }
 }
 
-// Run a quick SteamVR floor calibration (vrcmd --resetroomsetup). The backend
-// refuses while the service is running; callers also disable the button then.
+// Set the floor, centre and forward direction. Without SteamVR when the runtime
+// can report the headset's pose (needs VR running); otherwise SteamVR's vrcmd
+// (needs the service stopped). Callers gate the button on the right state.
 export async function runFloorCalibration() {
   app.calibratingFloor = true;
   app.floorCalResult = null;
   try {
-    await api.runFloorCalibration();
-    app.floorCalResult = { ok: true, msg: "Floor calibrated" };
+    if (app.floorCal?.native) {
+      const r = await api.runRoomSetup();
+      app.floorCalResult = { ok: true, msg: roomSetupMessage(r) };
+    } else {
+      await api.runFloorCalibration();
+      app.floorCalResult = { ok: true, msg: "Floor calibrated" };
+    }
   } catch (e) {
     app.floorCalResult = { ok: false, msg: String(e) };
   } finally {
     app.calibratingFloor = false;
     await refreshFloorCal();
+  }
+}
+
+function roomSetupMessage(r: import("./types").RoomResult): string {
+  let msg = "Floor and center set.";
+  if (r.previous_height !== null && r.moved !== null) {
+    msg += ` The headset was ${(r.previous_height * 100).toFixed(1)} cm above the old floor, ${(r.moved * 100).toFixed(0)} cm from the old center.`;
+  }
+  if (!r.applied) msg += " Restart VR to apply it.";
+  return msg;
+}
+
+export async function refreshSteamvr() {
+  try {
+    app.steamvr = await api.steamvrInstalled();
+  } catch (e) {
+    app.error = String(e);
+  }
+}
+
+// Install our copy of the xr-hardware udev rules (pkexec prompt), then re-check.
+export async function installUdevRules() {
+  app.installingUdev = true;
+  app.udevResult = null;
+  try {
+    await api.installUdevRules();
+    app.udevResult = { ok: true, msg: "Udev rules installed." };
+  } catch (e) {
+    app.udevResult = { ok: false, msg: String(e) };
+  } finally {
+    app.installingUdev = false;
+    await refreshPreflight();
   }
 }
 

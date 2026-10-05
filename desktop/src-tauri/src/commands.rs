@@ -7,7 +7,7 @@ use monadeck_core::active_runtime::{self, ActiveRuntimeKind};
 use monadeck_core::config::{Backend, MonadeckConfig, OvrRuntime};
 use monadeck_core::desktop::{self, InstalledApp};
 use monadeck_core::devices::{self, Snapshot};
-use monadeck_core::floor_calibration::{self, FloorCalStatus};
+use monadeck_core::floor_calibration;
 use monadeck_core::gpu::{self, AmdGpu};
 use monadeck_core::installer::{self, Installed};
 use monadeck_core::launch_options;
@@ -340,10 +340,14 @@ pub async fn start_service(state: State<'_, AppState>) -> CmdResult<()> {
         st.recovery_cancelled.store(false, Ordering::SeqCst);
         *st.freeze_report.lock().unwrap() = None;
         let cfg = st.config.lock().unwrap().clone();
-        match cfg.backend {
+        let started = match cfg.backend {
             Backend::Monado => start_monado(&st, cfg),
             Backend::Wivrn => start_wivrn(&st, cfg),
+        };
+        if started.is_ok() {
+            crate::lighthouse::switch_base_stations(&st, true);
         }
+        started
     })
     .await
     .map_err(|e| e.to_string())?
@@ -579,7 +583,11 @@ pub async fn stop_service(state: State<'_, AppState>) -> CmdResult<()> {
         if st.recovering.load(Ordering::SeqCst) {
             st.recovery_cancelled.store(true, Ordering::SeqCst);
         }
+        let was_running = st.runner.lock().unwrap().is_running();
         stop_blocking(&st);
+        if was_running {
+            crate::lighthouse::switch_base_stations(&st, false);
+        }
         Ok(())
     })
     .await
@@ -768,16 +776,6 @@ pub fn write_import_openxr() -> CmdResult<()> {
 #[tauri::command]
 pub async fn preflight_check() -> CmdResult<PreflightReport> {
     tauri::async_runtime::spawn_blocking(preflight::run)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// SteamVR floor-calibration status for the `steamvr_lh` driver: whether `vrcmd`
-/// is available and whether a `chaperone_info.vrchap` already exists. Cheap fs
-/// probe, fetched on load and after a calibration.
-#[tauri::command]
-pub async fn floor_cal_status() -> CmdResult<FloorCalStatus> {
-    tauri::async_runtime::spawn_blocking(floor_calibration::status)
         .await
         .map_err(|e| e.to_string())
 }

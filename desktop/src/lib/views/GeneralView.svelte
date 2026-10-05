@@ -7,8 +7,6 @@
     installMonado,
     installXrizer,
     installChihuahua,
-    runFloorCalibration,
-    runSurviveCalibration,
   } from "$lib/state.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
 
@@ -63,7 +61,7 @@
         ? "Stop the service to switch."
         : isWivrn
           ? "Streams to a Quest/Pico-style headset over Wi-Fi via WiVRn's server. Device strip, apps and the overlay work the same."
-          : "Runs your Monado fork for a wired (Lighthouse/Beyond) headset."}
+          : "Runs your Monado fork for a wired headset."}
     </span>
   </div>
 
@@ -227,112 +225,6 @@
     </div>
   </div>
 
-  {#if !isWivrn}
-  <div class="field">
-    <span class="lbl">Lighthouse driver</span>
-    <div class="seg">
-      {#each ["steamvr", "vive", "survive"] as d (d)}
-        <button
-          class:active={app.config?.lighthouse_driver === d}
-          onclick={() => {
-            if (app.config) {
-              app.config.lighthouse_driver = d;
-              saveConfig();
-            }
-          }}>{d}</button>
-      {/each}
-    </div>
-    <span class="note">steamvr (default) drives the Bigscreen Beyond via monado's SteamVR wrapper. vive/survive are the FLOSS drivers for Vive/Index.</span>
-  </div>
-
-  {#if app.config?.lighthouse_driver === "steamvr"}
-    <div class="field">
-      <span class="lbl">Floor calibration</span>
-      <div class="row">
-        <span
-          class="pill"
-          class:good={app.floorCal?.calibrated}
-          class:warn={app.floorCal && app.floorCal.available && !app.floorCal.calibrated}
-        >
-          {!app.floorCal
-            ? "…"
-            : !app.floorCal.available
-              ? "SteamVR not found"
-              : app.floorCal.calibrated
-                ? "Calibrated ✓"
-                : "Not calibrated"}
-        </span>
-        <button
-          class:accent={app.floorCal && app.floorCal.available && !app.floorCal.calibrated}
-          onclick={runFloorCalibration}
-          disabled={app.calibratingFloor ||
-            !app.floorCal?.available ||
-            app.service.running}
-        >
-          {app.calibratingFloor
-            ? "Calibrating…"
-            : app.floorCal?.calibrated
-              ? "Re-run floor calibration"
-              : "Calibrate floor"}
-        </button>
-      </div>
-      <span class="note">
-        monado's SteamVR wrapper reads the floor height + forward direction from
-        SteamVR's room setup. Place the headset on the floor in the middle of your
-        play area (controllers off), facing your "forward", then calibrate.
-        Re-run after moving your base stations.{app.service.running
-          ? " Stop the service first."
-          : ""}
-      </span>
-      {#if app.floorCalResult}
-        <span class="install-ok" class:bad={!app.floorCalResult.ok}
-          >{app.floorCalResult.msg}</span
-        >
-      {/if}
-    </div>
-  {/if}
-
-  {#if app.config?.lighthouse_driver === "survive"}
-    <div class="field">
-      <span class="lbl">Libsurvive calibration</span>
-      <div class="row">
-        <span
-          class="pill"
-          class:good={app.surviveCal?.available && app.surviveCal.source_present}
-          class:warn={app.surviveCal && !app.surviveCal.available}
-        >
-          {!app.surviveCal
-            ? "…"
-            : !app.surviveCal.available
-              ? "survive-cli not found"
-              : !app.surviveCal.source_present
-                ? "No SteamVR data to import"
-                : "Ready to import"}
-        </span>
-        <button
-          onclick={runSurviveCalibration}
-          disabled={app.calibratingSurvive ||
-            !app.surviveCal?.available ||
-            !app.surviveCal?.source_present ||
-            app.service.running}
-        >
-          {app.calibratingSurvive ? "Importing… (~1 min)" : "Import SteamVR calibration"}
-        </button>
-      </div>
-      <span class="note">
-        Seeds libsurvive from SteamVR's base-station solve, then runs it for ~1
-        minute to converge — keep the headset still, on the floor, in view of your
-        base stations. Needs <code>survive-cli</code> (ships with libsurvive) and a
-        prior SteamVR room setup.{app.service.running ? " Stop the service first." : ""}
-      </span>
-      {#if app.surviveCalResult}
-        <span class="install-ok" class:bad={!app.surviveCalResult.ok}
-          >{app.surviveCalResult.msg}</span
-        >
-      {/if}
-    </div>
-  {/if}
-  {/if}
 
   <div class="field">
     <span class="lbl">Service capabilities (CAP_SYS_NICE)</span>

@@ -9,7 +9,10 @@
 //! - [`openvr_paths`] — register xrizer as the OpenVR runtime, with backup/restore.
 //! - [`setcap`] — set/verify `CAP_SYS_NICE=eip` on the service binary.
 //! - [`preflight`] — runtime prerequisite checks (udev rules, pkexec) for other boxes.
-//! - [`floor_calibration`] — detect/run SteamVR floor calibration for steamvr_lh.
+//! - [`room_setup`] — floor/centre/forward for steamvr_lh, written without SteamVR.
+//! - [`floor_calibration`] — the same through SteamVR's `vrcmd` (stock Monado fallback).
+//! - [`pairing`] — pair controllers/trackers to their USB receivers.
+//! - [`basestations`] — base station power + channel over Bluetooth.
 //! - [`survive_calibration`] — import SteamVR calibration into libsurvive (survive driver).
 //! - [`devices`] — live device list via libmonado (`auto_connect`).
 //! - [`wivrn`] — the WiVRn backend: detect the server, drive it over D-Bus.
@@ -18,6 +21,7 @@
 //! - [`config`] / [`paths`] — persisted settings and well-known file locations.
 
 pub mod active_runtime;
+pub mod basestations;
 pub mod bindings;
 pub mod cmd_runner;
 pub mod collections;
@@ -36,12 +40,14 @@ pub mod launch_options;
 pub mod monado_conn;
 pub mod openvr_paths;
 pub mod overlay_config;
+pub mod pairing;
 pub mod paths;
 pub mod playspace_overrides;
 pub mod playtime;
 pub mod plugins;
 pub mod preflight;
 pub mod proton;
+pub mod room_setup;
 pub mod setcap;
 pub mod steam;
 pub mod steamvr;

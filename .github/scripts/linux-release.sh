@@ -41,17 +41,36 @@ deps() {
   chmod +x /usr/local/bin/appimagetool
 }
 
-# Tauri's AppImage carries the build system's libwayland-*, and a newer Mesa
-# can't set up EGL next to them: WebKit's web process aborts, and the window
-# stays empty (invisible, being frameless). Every desktop has its own copy, so
-# take them out and pack the image again.
-drop_wayland() {
-  local img work
+# Tauri's AppImage needs a few fixes, so unpack it and pack it again:
+# - It carries the build system's libwayland-*, and a newer Mesa can't set up
+#   EGL next to them: WebKit's web process aborts, and the window stays empty
+#   (invisible, being frameless). Every desktop has its own copy, so drop them.
+# - Its .DirIcon is an absolute link into the build directory, so it points
+#   nowhere on anyone else's machine and the AppImage shows no icon. Point it
+#   at the biggest of the app's own icons instead (the 256x256 one).
+# - Its Pango comes from this system but HarfBuzz is left to the host's, and
+#   an older one (Ubuntu 22.04's) lacks what this Pango calls: the app dies at
+#   launch. Bring this system's HarfBuzz along (about 1 MB).
+# Unpacking makes every folder owner-only (and AppRun.wrapped comes as 0770):
+# mounts that enforce permissions, like firejail's, then refuse to run it for
+# anyone but root. Open them up before packing again.
+fix_appimage() {
+  local img work root icon
   img=$(realpath "$1")
   work=$(mktemp -d)
+  root="$work/squashfs-root"
   (cd "$work" && "$img" --appimage-extract >/dev/null)
-  rm -f "$work"/squashfs-root/usr/lib/libwayland-*.so*
-  ARCH=x86_64 appimagetool --no-appstream "$work/squashfs-root" "$img"
+  rm -f "$root"/usr/lib/libwayland-*.so*
+  cp -L /usr/lib/x86_64-linux-gnu/libharfbuzz.so.0 "$root/usr/lib/"
+  # shellcheck disable=SC2012 # by size: the biggest file is the biggest icon
+  icon=$(cd "$root" && ls -S usr/share/icons/hicolor/*/apps/*.png 2>/dev/null | head -n1)
+  if [ -z "$icon" ]; then
+    echo "No app icon in the AppImage for .DirIcon" >&2
+    exit 1
+  fi
+  ln -sfn "$icon" "$root/.DirIcon"
+  chmod -R go-w,a+rX "$root"
+  ARCH=x86_64 appimagetool --no-appstream "$root" "$img"
   rm -rf "$work"
 }
 
@@ -84,7 +103,7 @@ build() {
   rm -rf dist
   mkdir -p dist
   local bundle=desktop/src-tauri/target/release/bundle
-  drop_wayland "$bundle"/appimage/*.AppImage
+  fix_appimage "$bundle"/appimage/*.AppImage
   cp "$bundle"/deb/*.deb "$bundle"/rpm/*.rpm "$bundle"/appimage/*.AppImage dist/
   (cd dist && sha256sum -- * >SHA256SUMS)
   ls -l dist

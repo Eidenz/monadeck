@@ -305,6 +305,18 @@ pub struct MonadoApi {
 	mnd_root_get_hold_pose_when_off:
 		Option<unsafe extern "C" fn(root: MndRootPtr, out_hold: *mut bool) -> MndResult>,
 
+	// === API version 1.10 (Monadeck/Monado fork) ===
+	/// Where a device is right now: its first pose input in its tracking
+	/// origin's space (before any offset), and whether that pose is tracked.
+	mnd_root_get_device_pose: Option<
+		unsafe extern "C" fn(
+			root: MndRootPtr,
+			device_index: u32,
+			out_pose: *mut MndPose,
+			out_tracked: *mut bool,
+		) -> MndResult,
+	>,
+
 	/// Set chroma key params for any base application opaque projection layer. Since API version 1.6.
 	mnd_root_set_chroma_key_params: Option<
 		unsafe extern "C" fn(

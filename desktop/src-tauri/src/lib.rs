@@ -7,6 +7,7 @@ mod beyond;
 mod bindings;
 mod commands;
 mod gamepad;
+mod lighthouse;
 mod overlay;
 mod state;
 mod wivrn_watch;
@@ -21,7 +22,15 @@ use tauri::Manager;
 fn cleanup_and_exit(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         state.wivrn_watch.lock().unwrap().stop_watch();
+        let was_running = state.runner.lock().unwrap().is_running();
         state.runner.lock().unwrap().terminate();
+        if was_running {
+            // Out of sight while the base stations are switched off.
+            for win in app.webview_windows().values() {
+                let _ = win.hide();
+            }
+            lighthouse::switch_base_stations_off_now(&state);
+        }
     }
     let _ = monadeck_core::active_runtime::restore_backup();
     let _ = monadeck_core::openvr_paths::restore_backup();
@@ -140,7 +149,18 @@ pub fn run() {
             commands::import_openxr_status,
             commands::write_import_openxr,
             commands::preflight_check,
-            commands::floor_cal_status,
+            lighthouse::floor_cal_status,
+            lighthouse::run_room_setup,
+            lighthouse::head_height,
+            lighthouse::pairing_receivers,
+            lighthouse::pairing_start,
+            lighthouse::bs_scan,
+            lighthouse::bs_state,
+            lighthouse::bs_set_power,
+            lighthouse::bs_set_channel,
+            lighthouse::bs_identify,
+            lighthouse::install_udev_rules,
+            lighthouse::steamvr_installed,
             commands::run_floor_calibration,
             commands::survive_cal_status,
             commands::run_survive_calibration,

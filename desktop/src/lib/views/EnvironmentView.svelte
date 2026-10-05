@@ -6,6 +6,7 @@
     refreshPreflight,
     refreshImportOpenxr,
     applyImportOpenxr,
+    installUdevRules,
   } from "$lib/state.svelte";
   import { KNOWN_ENV_VARS, type KnownVar } from "$lib/knownEnvVars";
   import LaunchOptions from "$lib/components/LaunchOptions.svelte";
@@ -143,11 +144,22 @@
             {c.ok ? "ok ✓" : c.severity === "important" ? "missing" : "optional"}
           </span>
         </div>
+        {#if !c.ok && c.action === "install_udev_rules"}
+          <div class="fix-row">
+            <button class="small accent" onclick={installUdevRules} disabled={app.installingUdev}>
+              {app.installingUdev ? "Installing…" : "Install the rules"}
+            </button>
+            <span class="fix-or">or with your package manager:</span>
+          </div>
+        {/if}
         {#if !c.ok && c.fix}
           <code class="fix">{c.fix}</code>
         {/if}
       </div>
     {/each}
+    {#if app.udevResult}
+      <div class="proton-note" class:bad={!app.udevResult.ok}>{app.udevResult.msg}</div>
+    {/if}
 
     {#if app.preflight && app.preflight.all_ok}
       <div class="rd-allok">Everything's in place. ✓</div>
@@ -368,6 +380,15 @@
   .pill.warn {
     color: hsl(var(--warn));
     border-color: hsl(var(--warn) / 0.4);
+  }
+  .fix-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .fix-or {
+    font-size: 11.5px;
+    color: hsl(var(--muted));
   }
   .rd-allok {
     font-size: 11.5px;

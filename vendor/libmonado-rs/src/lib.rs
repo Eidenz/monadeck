@@ -250,6 +250,12 @@ impl Monado {
 		self.api.has_mnd_root_set_hold_pose_when_off()
 	}
 
+	/// Whether the loaded libmonado.so can report where a device is (the fork's
+	/// API 1.10). Stock Monado returns false.
+	pub fn supports_device_pose(&self) -> bool {
+		self.api.has_mnd_root_get_device_pose()
+	}
+
 	/// Powered-off controllers hold their last pose (true, the default) or go
 	/// untracked so apps can take over (false). Since fork API 1.9.
 	pub fn set_hold_pose_when_off(&self, hold: bool) -> Result<(), MndResult> {
@@ -704,6 +710,23 @@ pub trait DeviceLogic: MonadoRef {
 			connected,
 			tracking,
 		})
+	}
+	/// Where the device is right now: its first pose input (head for a headset,
+	/// grip for a controller) in its tracking origin's space, before origin and
+	/// reference space offsets, and whether that pose is tracked.
+	/// `ErrorInvalidVersion` on libmonado without the fork's API 1.10.
+	fn pose(&self) -> Result<(Pose, bool), MndResult> {
+		let mut pose = MndPose::default();
+		let mut tracked = false;
+		let monado = self.monado();
+		unsafe {
+			monado
+				.api
+				.mnd_root_get_device_pose(monado.root, self.index(), &mut pose, &mut tracked)
+				.ok_or(MndResult::ErrorInvalidVersion)?
+				.to_result()?;
+		}
+		Ok((pose.into(), tracked))
 	}
 	fn serial(&self) -> Result<String, MndResult> {
 		self.get_info_string(MndProperty::PropertySerialString)

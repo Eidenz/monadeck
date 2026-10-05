@@ -12,6 +12,7 @@
     applyCaps,
     applyImportOpenxr,
     runFloorCalibration,
+    installUdevRules,
   } from "$lib/state.svelte";
   import { openSettings } from "$lib/windows";
   import TitleBar from "./TitleBar.svelte";
@@ -34,6 +35,12 @@
   // Floor calibration only applies to the SteamVR Lighthouse driver (Monado).
   const showFloor = $derived(!isWivrn && app.config?.lighthouse_driver === "steamvr");
   const floorDone = $derived(!!app.floorCal?.calibrated);
+  // The same driver is SteamVR's: it has to be installed (it never runs).
+  const steamvrDone = $derived(app.steamvr === true);
+  // The udev rules are the one prerequisite we can install ourselves.
+  const udevFixable = $derived(
+    !!app.preflight?.checks.some((c) => !c.ok && c.action === "install_udev_rules"),
+  );
 
   // CAP_SYS_NICE is a monado-service thing: WiVRn neither needs nor counts it.
   const steps = $derived([
@@ -41,7 +48,7 @@
     ...(isWivrn ? [] : [capsDone]),
     preflightDone,
     protonDone,
-    ...(showFloor ? [floorDone] : []),
+    ...(showFloor ? [steamvrDone, floorDone] : []),
   ]);
   const doneCount = $derived(steps.filter(Boolean).length);
   const allDone = $derived(doneCount === steps.length);
@@ -75,7 +82,7 @@
         onclick={() => setBackend("monado")}
       >
         <span class="ct">Monado</span>
-        <span class="cd">Wired headset: Lighthouse, Bigscreen Beyond, Index…</span>
+        <span class="cd">Wired headset: Lighthouse and others</span>
       </button>
       <button
         class="choice"
@@ -160,6 +167,10 @@
         <div class="act">
           {#if preflightDone}
             <span class="ok">Ready</span>
+          {:else if udevFixable}
+            <button class="accent" onclick={installUdevRules} disabled={app.installingUdev}>
+              {app.installingUdev ? "…" : "Install"}
+            </button>
           {:else}
             <button onclick={() => openSettings("environment")}>View fixes</button>
           {/if}
@@ -184,8 +195,27 @@
         </div>
       </div>
 
-      <!-- Floor calibration (SteamVR Lighthouse only) -->
+      <!-- SteamVR's tracking driver + floor calibration (SteamVR Lighthouse only) -->
       {#if showFloor}
+        <div class="item" class:done={steamvrDone}>
+          <div class="mark">{steamvrDone ? "✓" : ""}</div>
+          <div class="text">
+            <div class="t">SteamVR (tracking driver)</div>
+            <div class="d">
+              {steamvrDone
+                ? "Installed. It never runs: Monado only loads its Lighthouse tracking driver."
+                : "Lighthouse headsets track through SteamVR's driver. Install SteamVR from Steam; it never needs to run."}
+            </div>
+          </div>
+          <div class="act">
+            {#if steamvrDone}
+              <span class="ok">Found</span>
+            {:else}
+              <span class="muted">Install in Steam</span>
+            {/if}
+          </div>
+        </div>
+
         <div class="item" class:done={floorDone}>
           <div class="mark">{floorDone ? "✓" : ""}</div>
           <div class="text">
@@ -193,6 +223,8 @@
             <div class="d">
               {#if floorDone}
                 Play space is set.
+              {:else if app.floorCal?.native}
+                Once VR is running: stand the headset upright on the floor, centered, facing forward.
               {:else if app.service.running}
                 Stop the service first, then calibrate (headset on the floor, centered).
               {:else}
@@ -203,6 +235,14 @@
           <div class="act">
             {#if floorDone}
               <span class="ok">Calibrated</span>
+            {:else if app.floorCal?.native}
+              {#if app.service.connected}
+                <button class="accent" onclick={runFloorCalibration} disabled={app.calibratingFloor}>
+                  {app.calibratingFloor ? "…" : "Set"}
+                </button>
+              {:else}
+                <span class="muted">After starting VR</span>
+              {/if}
             {:else if !app.floorCal?.available}
               <span class="muted">SteamVR not found</span>
             {:else}
