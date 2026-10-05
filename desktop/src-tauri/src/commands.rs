@@ -844,6 +844,20 @@ pub async fn install_builtin_monado(state: State<'_, AppState>) -> CmdResult<Ins
     .map_err(|e| e.to_string())?
 }
 
+/// Newer releases of the built-in Monado (when it's the runtime in use) and
+/// xrizer, from GitHub. Runs off the UI thread and gives up within seconds
+/// offline (then: nothing to report).
+#[tauri::command]
+pub async fn runtime_updates(state: State<'_, AppState>) -> CmdResult<installer::Updates> {
+    let cfg = state.config.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let monado = (cfg.backend == Backend::Monado).then_some(cfg.monado_prefix.as_path());
+        installer::check_updates(monado, cfg.xrizer_path.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Open a web link in the user's browser, through the system's xdg-open (so the
 /// browser doesn't inherit the AppImage's environment: see core::host).
 #[tauri::command]

@@ -40,6 +40,18 @@ export interface MonadeckConfig {
   base_stations: SavedStation[];
   base_stations_auto: boolean; // on when VR starts, off when it stops
   base_stations_off: StationPower; // what "off" means: sleep or standby
+  dismissed_updates: string[]; // "monado:<tag>" / "xrizer:<tag>" put off by the user
+}
+
+// A newer release of a runtime Monadeck installed itself.
+export interface RuntimeUpdate {
+  installed: string;
+  latest: string;
+}
+
+export interface RuntimeUpdates {
+  monado: RuntimeUpdate | null;
+  xrizer: RuntimeUpdate | null;
 }
 
 // --- Lighthouse: base stations, receivers, room setup ------------------------

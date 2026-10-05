@@ -8,6 +8,7 @@
   import PreflightBanner from "$lib/components/PreflightBanner.svelte";
   import FloorCalToast from "$lib/components/FloorCalToast.svelte";
   import ProtonBanner from "$lib/components/ProtonBanner.svelte";
+  import UpdateToast from "$lib/components/UpdateToast.svelte";
   import NoRuntimeBanner from "$lib/components/NoRuntimeBanner.svelte";
   import WelcomeSetup from "$lib/components/WelcomeSetup.svelte";
   import DeviceStrip from "$lib/components/DeviceStrip.svelte";
@@ -15,6 +16,8 @@
   import {
     app,
     loadInitial,
+    refreshUpdates,
+    pendingUpdates,
     refreshStatus,
     refreshSnapshot,
     refreshConfig,
@@ -53,6 +56,8 @@
   );
   // Proton 11 / SLR4 OpenXR import var not set yet → prepare-ahead nudge.
   const showProton = $derived(!app.importOpenxr && !protonDismissed);
+  // A newer release of the built-in Monado fork / xrizer (not put off).
+  const showUpdate = $derived(pendingUpdates().length > 0);
   // First run (no config file existed) → onboarding checklist instead of the
   // deck + a stack of individual notices.
   const showWelcome = $derived(!!app.config && app.config.setup_seen === false);
@@ -147,7 +152,8 @@
         showPreflight ||
         showNoRuntime ||
         showFloorCal ||
-        showProton)
+        showProton ||
+        showUpdate)
       ? toastSlotH
       : 0,
   );
@@ -182,6 +188,9 @@
   onMount(() => {
     (async () => {
       await loadInitial();
+      // Not awaited: offline it gives up after a few seconds, and nothing
+      // (auto-start included) should wait for it.
+      refreshUpdates();
       // Auto-start the service on launch when enabled (and not already up).
       if (
         app.config?.auto_start &&
@@ -251,12 +260,13 @@
     {/if}
   </div>
 
-  {#if showToast || showCrash || showFreeze || showPreflight || showNoRuntime || showFloorCal || showProton}
+  {#if showToast || showCrash || showFreeze || showPreflight || showNoRuntime || showFloorCal || showProton || showUpdate}
     <div class="toast-slot" bind:clientHeight={toastSlotH}>
       {#if showCrash}<CrashToast />{/if}
       {#if showFreeze}<FreezeToast />{/if}
       {#if showNoRuntime}<NoRuntimeBanner bind:dismissed={noRuntimeDismissed} />{/if}
       {#if showPreflight}<PreflightBanner bind:dismissed={preflightDismissed} />{/if}
+      {#if showUpdate}<UpdateToast />{/if}
       {#if showProton}<ProtonBanner bind:dismissed={protonDismissed} />{/if}
       {#if showFloorCal}<FloorCalToast bind:dismissed={floorCalDismissed} />{/if}
       {#if showToast}<CapToast bind:dismissed />{/if}
