@@ -188,6 +188,11 @@ pub struct MonadeckConfig {
     /// What "off" means for 2.0 stations: sleep (default) or standby.
     #[serde(default = "default_base_stations_off")]
     pub base_stations_off: Power,
+
+    /// Runtime updates the user put off, as `monado:<tag>` / `xrizer:<tag>`:
+    /// that release isn't offered again (a newer one is).
+    #[serde(default)]
+    pub dismissed_updates: Vec<String>,
 }
 
 impl Default for MonadeckConfig {
@@ -219,6 +224,7 @@ impl Default for MonadeckConfig {
             base_stations: Vec::new(),
             base_stations_auto: false,
             base_stations_off: default_base_stations_off(),
+            dismissed_updates: Vec::new(),
         }
     }
 }

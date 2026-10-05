@@ -67,6 +67,9 @@ export const app = $state({
     ok: boolean;
     msg: string;
   },
+  // Newer releases of the built-in runtimes in use (deck only). Null until
+  // checked, or when the check couldn't run (offline).
+  updates: null as import("./types").RuntimeUpdates | null,
   error: "" as string,
   // Set when the service stops without us asking (crash) — drives the toast.
   crash: null as { code: number | null } | null,
@@ -489,6 +492,45 @@ export async function installXrizer() {
   } finally {
     app.installing = "";
   }
+}
+
+// Ask GitHub for newer built-in runtimes. Never awaited at startup: offline it
+// just comes back empty after a few seconds, and nothing waits on it.
+export async function refreshUpdates() {
+  try {
+    app.updates = await api.runtimeUpdates();
+  } catch {
+    app.updates = null;
+  }
+}
+
+// The updates on offer: newer than what's installed, and not put off.
+export function pendingUpdates(): { kind: "monado" | "xrizer"; installed: string; latest: string }[] {
+  const out: { kind: "monado" | "xrizer"; installed: string; latest: string }[] = [];
+  const skip = app.config?.dismissed_updates ?? [];
+  for (const kind of ["monado", "xrizer"] as const) {
+    const u = app.updates?.[kind];
+    if (u && !skip.includes(`${kind}:${u.latest}`)) out.push({ kind, ...u });
+  }
+  return out;
+}
+
+// Put the offered releases off: they aren't offered again, a newer one is.
+export async function dismissUpdates() {
+  if (!app.config) return;
+  const tags = pendingUpdates().map((u) => `${u.kind}:${u.latest}`);
+  app.config.dismissed_updates = [...app.config.dismissed_updates, ...tags];
+  await saveConfig();
+}
+
+// Install every offered update (the same installer as Settings › General).
+export async function applyUpdates() {
+  for (const u of pendingUpdates()) {
+    if (u.kind === "monado") await installMonado();
+    else await installXrizer();
+    if (!app.installResult?.ok) break;
+  }
+  await refreshUpdates();
 }
 
 export async function applyCaps() {

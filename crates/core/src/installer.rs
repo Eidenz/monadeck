@@ -79,12 +79,18 @@ fn run(cmd: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Fetch the newest published (non-prerelease) release of `repo`.
+/// Fetch the newest published (non-prerelease) release of `repo`. Bounded, so
+/// a dead connection fails within seconds instead of hanging (the startup
+/// update check runs it too, possibly offline).
 fn latest_release(repo: &str) -> Result<Release> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let out = host::command("curl")
         .args([
             "-fsSL",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "10",
             "-H",
             "Accept: application/vnd.github+json",
             "-H",
@@ -276,6 +282,69 @@ pub fn install_bsbcams() -> Result<Installed> {
     })
 }
 
+// --- Updates -------------------------------------------------------------------
+
+/// A newer release of a runtime Monadeck installed itself.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Update {
+    pub installed: String,
+    pub latest: String,
+}
+
+/// Newer releases of the built-in runtimes in use, if any.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Updates {
+    pub monado: Option<Update>,
+    pub xrizer: Option<Update>,
+}
+
+/// The release a built-in runtime came from, read off the folder the
+/// installer made (`<data>/runtimes/monado-<tag>`, `<data>/xrizer/<tag>`).
+/// `None` for anything else, e.g. the user's own build: theirs to update.
+fn builtin_tag(path: &Path, parent: &Path, prefix: &str) -> Option<String> {
+    if path.parent()? != parent {
+        return None;
+    }
+    let name = path.file_name()?.to_string_lossy();
+    name.strip_prefix(prefix).filter(|t| !t.is_empty()).map(str::to_string)
+}
+
+pub fn builtin_monado_tag(prefix: &Path) -> Option<String> {
+    builtin_tag(prefix, &monadeck_data_dir().join("runtimes"), "monado-")
+}
+
+pub fn builtin_xrizer_tag(path: &Path) -> Option<String> {
+    builtin_tag(path, &monadeck_data_dir().join("xrizer"), "")
+}
+
+/// A tag's numbers, for ordering releases: `v25.1.0-eidenz10` → [25, 1, 0, 10].
+fn version_key(tag: &str) -> Vec<u64> {
+    tag.split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
+fn newer(installed: String, latest: String) -> Option<Update> {
+    (version_key(&latest) > version_key(&installed)).then_some(Update { installed, latest })
+}
+
+/// Ask GitHub whether the built-in runtimes in use have a newer release.
+/// Network; any failure (offline, rate limit) just means nothing to report.
+pub fn check_updates(monado_prefix: Option<&Path>, xrizer_path: Option<&Path>) -> Updates {
+    let check = |installed: Option<String>, repo: &str| {
+        let installed = installed?;
+        let latest = latest_release(repo).map_err(|e| log::info!("update check for {repo}: {e:#}")).ok()?;
+        newer(installed, latest.tag_name)
+    };
+    // Side by side: offline, both time out together rather than one after the other.
+    std::thread::scope(|scope| {
+        let monado = scope.spawn(|| check(monado_prefix.and_then(builtin_monado_tag), MONADO_REPO));
+        let xrizer = check(xrizer_path.and_then(builtin_xrizer_tag), XRIZER_REPO);
+        Updates { monado: monado.join().ok().flatten(), xrizer }
+    })
+}
+
 /// Recursive copy fallback for when `rename` can't cross filesystems.
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
@@ -290,4 +359,35 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_tag_off_builtin_folders_only() {
+        let data = monadeck_data_dir();
+        let monado = data.join("runtimes").join("monado-v25.1.0-eidenz9");
+        assert_eq!(builtin_monado_tag(&monado).as_deref(), Some("v25.1.0-eidenz9"));
+        assert_eq!(builtin_monado_tag(Path::new("/usr")), None);
+        assert_eq!(builtin_monado_tag(&data.join("runtimes").join("monado-")), None);
+        let xrizer = data.join("xrizer").join("v0.5-eidenz1");
+        assert_eq!(builtin_xrizer_tag(&xrizer).as_deref(), Some("v0.5-eidenz1"));
+        assert_eq!(builtin_xrizer_tag(&paths_home_xrizer()), None);
+    }
+
+    fn paths_home_xrizer() -> PathBuf {
+        crate::paths::home().join(".local/share/xrizer/xrizer-nightly")
+    }
+
+    #[test]
+    fn only_newer_releases_count() {
+        let up = |a: &str, b: &str| newer(a.into(), b.into()).is_some();
+        assert!(up("v25.1.0-eidenz9", "v25.1.0-eidenz10"));
+        assert!(up("v25.1.0-eidenz10", "v25.2.0-eidenz1"));
+        assert!(up("v0.5-eidenz1", "v0.5-eidenz2"));
+        assert!(!up("v25.1.0-eidenz10", "v25.1.0-eidenz10"));
+        assert!(!up("v25.1.0-eidenz10", "v25.1.0-eidenz9"));
+    }
 }

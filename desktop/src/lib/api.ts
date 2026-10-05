@@ -88,6 +88,9 @@ export const installBuiltinMonado = () =>
 export const openUrl = (url: string) => invoke<void>("open_url", { url });
 export const installBuiltinXrizer = () =>
   invoke<Installed>("install_builtin_xrizer");
+import type { RuntimeUpdates } from "./types";
+/** Newer built-in Monado/xrizer releases (empty offline; gives up within seconds). */
+export const runtimeUpdates = () => invoke<RuntimeUpdates>("runtime_updates");
 
 export const uevrStatus = () => invoke<UevrStatus>("uevr_status");
 export const installChihuahua = (force: boolean) =>

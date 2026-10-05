@@ -166,6 +166,7 @@ pub fn run() {
             commands::run_survive_calibration,
             commands::install_builtin_monado,
             commands::install_builtin_xrizer,
+            commands::runtime_updates,
             commands::open_url,
             commands::uevr_status,
             commands::install_chihuahua,
