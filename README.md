@@ -35,6 +35,7 @@ Monadeck is two halves that share one configuration: an in-headset overlay you l
 - **Let games talk to the overlay.** An OSC listener lets VRChat avatars and tools like VRCOSC drive the watch, dashboard and screens, or raise a notification.
 - **Control the runtime without taking the headset off.** Move your play area, pick which app the headset shows, freeze an app's controllers or set a timer.
 - **See what's alive at a glance.** Switched-off and out-of-tracking controllers, trackers and gloves grey out, like in SteamVR.
+- **Look after Lighthouse tracking without opening SteamVR.** Set your floor and play area, pair controllers and trackers, and switch base stations on and off with VR.
 - **Set up Monado in one click.** The desktop app installs prebuilt forks of Monado and xrizer, runs the service, and switches runtimes without breaking SteamVR.
 - **Or stream to a standalone headset with WiVRn.** Monadeck can run [WiVRn](https://github.com/WiVRn/WiVRn) instead, with PIN pairing and the same overlay.
 
@@ -44,8 +45,8 @@ It deliberately doesn't build Monado from source or manage drivers. For that, [E
 
 - **Linux** with a Wayland desktop (the screen mirror uses the desktop portal and PipeWire; KDE is what it's tested on).
 - A **Monado**-based OpenXR runtime and **xrizer** for OpenVR games, though not up front: Monadeck can install prebuilt builds of its Monado and xrizer forks for you (Settings → General → *Install built-in*), or use your own. For a standalone headset, install **WiVRn** (26.6 or newer) and choose it as the runtime instead.
-- **Steam** (with Proton for Windows games) for your library and cover art.
-- Some features need the [Monado fork](https://github.com/Eidenz/Monado): controller freeze, in-headset screenshots, device hotplug, switched-off and out-of-tracking device states, glove batteries, and letting go of switched-off controllers. They hide themselves on stock Monado.
+- **Steam** (with Proton for Windows games) for your library and cover art. Lighthouse headsets also need **SteamVR** installed: Monado uses its tracking driver, but SteamVR itself never runs.
+- Some features need the [Monado fork](https://github.com/Eidenz/Monado): controller freeze, in-headset screenshots, device hotplug, switched-off and out-of-tracking device states, glove batteries, letting go of switched-off controllers, and setting the floor without SteamVR. They hide themselves on stock Monado.
 
 ## Install
 
