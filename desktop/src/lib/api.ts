@@ -60,12 +60,12 @@ export const floorCalStatus = () => invoke<FloorCalStatus>("floor_cal_status");
 export const runFloorCalibration = () =>
   invoke<void>("run_floor_calibration");
 
-import type { FoundStation, Receiver, RoomResult, StationPower, StationState, StationVersion } from "./types";
+import type { FoundStation, ReceiverGroup, RoomResult, StationPower, StationState, StationVersion } from "./types";
 export const runRoomSetup = () => invoke<RoomResult>("run_room_setup");
 export const headHeight = () => invoke<number | null>("head_height");
-export const pairingReceivers = () => invoke<Receiver[]>("pairing_receivers");
-/** Returns how many seconds the receiver listens for a device. */
-export const pairingStart = (serial: string) => invoke<number>("pairing_start", { serial });
+export const pairingReceivers = () => invoke<ReceiverGroup[]>("pairing_receivers");
+/** Returns how many seconds the receivers listen for devices. */
+export const pairingStart = (serials: string[]) => invoke<number>("pairing_start", { serials });
 export const bsScan = (secs: number) => invoke<FoundStation[]>("bs_scan", { secs });
 export const bsState = (address: string) => invoke<StationState>("bs_state", { address });
 export const bsSetPower = (address: string, version: StationVersion, power: StationPower, bsid: string | null) =>

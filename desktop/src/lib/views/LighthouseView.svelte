@@ -14,7 +14,7 @@
   import Toggle from "$lib/components/Toggle.svelte";
   import type {
     FoundStation,
-    Receiver,
+    ReceiverGroup,
     SavedStation,
     StationPower,
     StationState,
@@ -34,10 +34,12 @@
   let height = $state<number | null>(null);
 
   // --- Pairing -----------------------------------------------------------------
-  let receivers = $state<Receiver[]>([]);
+  let receivers = $state<ReceiverGroup[]>([]);
   let loadingReceivers = $state(false);
-  let pairing = $state<{ serial: string; left: number } | null>(null);
+  let pairing = $state<{ key: string; left: number } | null>(null);
   let pairResult = $state<{ ok: boolean; msg: string } | null>(null);
+
+  const groupKey = (g: ReceiverGroup) => g.receivers[0].serial;
 
   async function loadReceivers() {
     loadingReceivers = true;
@@ -66,49 +68,70 @@
     return out;
   }
 
-  async function pair(r: Receiver) {
+  // Which of a group's receivers to put in pairing mode: the free ones when we
+  // know (VR running), else all of them.
+  function pairTargets(g: ReceiverGroup): string[] {
+    const free = g.receivers.filter((r) => r.active === false);
+    return (free.length > 0 ? free : g.receivers).map((r) => r.serial);
+  }
+
+  async function pair(g: ReceiverGroup) {
     pairResult = null;
     const before = await liveDevices();
+    const targets = pairTargets(g);
     let secs: number;
     try {
-      secs = await api.pairingStart(r.serial);
+      secs = await api.pairingStart(targets);
     } catch (e) {
       pairResult = { ok: false, msg: String(e) };
       return;
     }
-    pairing = { serial: r.serial, left: secs };
-    // Watch for a device that wasn't on before (VR running), until the
-    // receiver stops listening.
+    pairing = { key: groupKey(g), left: secs };
+    // Collect devices that weren't on before (VR running), until the
+    // receivers stop listening or each has taken one.
+    const paired = new Map<string, string>();
     const end = Date.now() + secs * 1000 + 2000;
-    while (Date.now() < end) {
+    while (Date.now() < end && paired.size < targets.length) {
       await new Promise((res) => setTimeout(res, 1000));
       if (pairing) pairing.left = Math.max(0, Math.ceil((end - 2000 - Date.now()) / 1000));
       if (!app.service.connected) continue;
-      const now = await liveDevices();
-      const fresh = [...now.entries()].find(([k]) => !before.has(k));
-      if (fresh) {
-        pairing = null;
-        pairResult = { ok: true, msg: `Paired: ${fresh[1]}.` };
-        await loadReceivers();
-        return;
+      for (const [k, name] of await liveDevices()) {
+        if (!before.has(k)) paired.set(k, name);
       }
     }
     pairing = null;
-    pairResult = app.service.connected
-      ? {
-          ok: false,
-          msg: "Nothing paired. Put the device in pairing mode first, then press Pair again.",
-        }
-      : {
-          ok: true,
-          msg: "Pairing window closed. If the device's light turned solid, it's paired; start VR to use it.",
-        };
+    if (paired.size > 0) {
+      pairResult = { ok: true, msg: `Paired: ${[...paired.values()].join(", ")}.` };
+    } else if (app.service.connected) {
+      pairResult = {
+        ok: false,
+        msg: "Nothing paired. Put the device in pairing mode first, then press Pair again.",
+      };
+    } else {
+      pairResult = {
+        ok: true,
+        msg: "Pairing window closed. If the device's light turned solid, it's paired; start VR to use it.",
+      };
+    }
     await loadReceivers();
   }
 
-  function receiverState(r: Receiver): string {
-    if (r.active === null) return "";
-    return r.active ? "In use" : "Free";
+  // "In use" / "Free" for one receiver, "2 of 3 in use" for a dongle holding
+  // several; nothing while VR is off (receivers only talk once it runs).
+  function groupState(g: ReceiverGroup): { text: string; free: boolean } | null {
+    if (g.receivers.some((r) => r.active === null)) return null;
+    const used = g.receivers.filter((r) => r.active).length;
+    if (g.receivers.length === 1) return { text: used ? "In use" : "Free", free: !used };
+    return { text: `${used} of ${g.receivers.length} in use`, free: used < g.receivers.length };
+  }
+
+  function groupSub(g: ReceiverGroup): string {
+    if (g.receivers.length === 1) {
+      const r = g.receivers[0];
+      // A name we recognised hides the device's own; keep it visible.
+      return g.kind === "other" ? r.serial : `${r.name} · ${r.serial}`;
+    }
+    return `${g.receivers.length} receivers · ${g.receivers.map((r) => r.serial).join(", ")}`;
   }
 
   // --- Base stations -----------------------------------------------------------
@@ -361,26 +384,24 @@
     </div>
     <span class="help">
       Put the device in pairing mode, then press Pair on a free receiver: whatever it was paired
-      with before is replaced. Works with VR running.
+      with before is replaced. A dongle with several receivers pairs as many devices at once as it
+      has free. Works with VR running.
     </span>
     {#if receivers.length === 0}
       <span class="muted">{loadingReceivers ? "Looking for receivers…" : "No receivers plugged in."}</span>
     {/if}
-    {#each receivers as r (r.serial)}
+    {#each receivers as g (groupKey(g))}
+      {@const st = groupState(g)}
       <div class="item">
         <div class="item-text">
-          <span class="item-name">{r.name}</span>
-          <span class="item-sub">{r.serial}</span>
+          <span class="item-name">{g.label}</span>
+          <span class="item-sub">{groupSub(g)}</span>
         </div>
-        {#if receiverState(r)}
-          <span class="pill" class:good={r.active === false}>{receiverState(r)}</span>
+        {#if st}
+          <span class="pill" class:good={st.free}>{st.text}</span>
         {/if}
-        <button
-          class:accent={r.active === false}
-          onclick={() => pair(r)}
-          disabled={!!pairing}
-        >
-          {pairing?.serial === r.serial ? `Listening… ${pairing.left}s` : "Pair"}
+        <button class:accent={st?.free} onclick={() => pair(g)} disabled={!!pairing}>
+          {pairing?.key === groupKey(g) ? `Listening… ${pairing.left}s` : "Pair"}
         </button>
       </div>
     {/each}

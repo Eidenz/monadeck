@@ -73,6 +73,16 @@ export interface Receiver {
   active: boolean | null; // a device is connected through it (known with VR running)
 }
 
+export type ReceiverKind = "headset_left" | "headset_right" | "multi_dongle" | "vive_dongle" | "other";
+
+// One physical receiver: a dongle, or one of a headset's own. A Tundra dongle
+// holds several receivers, each pairing one device.
+export interface ReceiverGroup {
+  label: string; // "Headset left controller", "Tundra SW3", "Vive dongle", or its own name
+  kind: ReceiverKind;
+  receivers: Receiver[];
+}
+
 export interface RoomResult {
   universe: string;
   previous_height: number | null; // m above the previous floor

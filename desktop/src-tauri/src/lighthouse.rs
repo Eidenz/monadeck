@@ -7,7 +7,7 @@ use monadeck_core::basestations::{self, Found, Power, Saved, StationState, Versi
 use monadeck_core::config::Backend;
 use monadeck_core::devices;
 use monadeck_core::floor_calibration;
-use monadeck_core::pairing::{self, Receiver};
+use monadeck_core::pairing::{self, ReceiverGroup};
 use monadeck_core::preflight;
 use monadeck_core::room_setup::{self, RoomResult};
 use serde::Serialize;
@@ -80,28 +80,30 @@ pub async fn head_height(state: State<'_, AppState>) -> CmdResult<Option<f64>> {
 
 // --- Pairing -------------------------------------------------------------------
 
-/// Plugged-in receivers. With VR running, each says whether a device is
-/// connected through it (listens ~0.4 s).
+/// Plugged-in receivers, named and grouped (a Tundra dongle once). With VR
+/// running, each receiver says whether a device is connected through it
+/// (listens ~0.4 s).
 #[tauri::command]
-pub async fn pairing_receivers() -> CmdResult<Vec<Receiver>> {
+pub async fn pairing_receivers() -> CmdResult<Vec<ReceiverGroup>> {
     blocking(|| {
-        let mut list = pairing::receivers();
+        let mut groups = pairing::groups();
         if devices::service_connected() {
-            let active = pairing::activity(&list);
-            for r in &mut list {
+            let all: Vec<_> = groups.iter().flat_map(|g| g.receivers.iter().cloned()).collect();
+            let active = pairing::activity(&all);
+            for r in groups.iter_mut().flat_map(|g| g.receivers.iter_mut()) {
                 r.active = active.get(&r.node).copied();
             }
         }
-        Ok(list)
+        Ok(groups)
     })
     .await
 }
 
-/// Put a receiver into pairing mode (for `pairing::PAIRING_WINDOW`).
+/// Put receivers into pairing mode, all at once (for `pairing::PAIRING_WINDOW`).
 #[tauri::command]
-pub async fn pairing_start(serial: String) -> CmdResult<u64> {
+pub async fn pairing_start(serials: Vec<String>) -> CmdResult<u64> {
     blocking(move || {
-        pairing::start_pairing(&serial)?;
+        pairing::start_pairing(&serials)?;
         Ok(pairing::PAIRING_WINDOW.as_secs())
     })
     .await
