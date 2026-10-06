@@ -122,6 +122,10 @@ pub struct OverlayConfig {
     pub skybox_enabled: bool,
     /// Custom equirectangular JPEG/PNG for the background (None = built-in).
     pub skybox_path: Option<String>,
+    /// Dim the game behind the open dashboard, like SteamVR.
+    pub dim_game: bool,
+    /// How dark it gets (0.1..=0.9 of black over the game).
+    pub dim_strength: f32,
     // Screenshots (from monado-frame).
     pub qr_detect: bool,
     pub qr_autodelete: bool,
@@ -224,6 +228,8 @@ impl Default for OverlayConfig {
             capture_max_height: 0,
             skybox_enabled: true,
             skybox_path: None,
+            dim_game: true,
+            dim_strength: 0.5,
             qr_detect: false,
             qr_autodelete: false,
             skip_wrist_photo: false,

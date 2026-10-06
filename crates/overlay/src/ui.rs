@@ -118,6 +118,9 @@ pub struct LibState {
     pub capture_max_height: u32,
     pub skybox_enabled: bool,
     pub skybox_source: String,
+    /// Dim the game behind the open dashboard, and how dark (0.1..=0.9).
+    pub dim_game: bool,
+    pub dim_strength: f32,
     // Photos / gestures (monado-frame).
     pub wrist_shot: Option<WristShot>,
     pub wrist_req: crate::photos::WristRequests,
@@ -417,6 +420,8 @@ impl LibState {
             capture_max_height: 0,
             skybox_enabled: true,
             skybox_source: String::new(),
+            dim_game: true,
+            dim_strength: 0.5,
             wrist_shot: None,
             wrist_req: Default::default(),
             gallery_items: Vec::new(),

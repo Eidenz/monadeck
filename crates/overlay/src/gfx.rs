@@ -554,6 +554,19 @@ pub fn fill_laser(
     fence: vk::Fence,
     alpha: f32,
 ) -> Result<()> {
+    let a = alpha.clamp(0.0, 1.0);
+    fill_solid(laser, device, cmd, queue, fence, [0.25 * a, 0.88 * a, 0.81 * a, a])
+}
+
+/// Fill a small solid texture (a [`Laser`]) with one premultiplied colour.
+pub fn fill_solid(
+    laser: &mut Laser,
+    device: &ash::Device,
+    cmd: vk::CommandBuffer,
+    queue: vk::Queue,
+    fence: vk::Fence,
+    rgba: [f32; 4],
+) -> Result<()> {
     let index = laser.swapchain.acquire_image()? as usize;
     laser.swapchain.wait_image(xr::Duration::INFINITE)?;
     let image = laser.images[index];
@@ -588,8 +601,7 @@ pub fn fill_laser(
             &[],
             &[to_dst],
         );
-        let a = alpha.clamp(0.0, 1.0);
-        let color = vk::ClearColorValue { float32: [0.25 * a, 0.88 * a, 0.81 * a, a] };
+        let color = vk::ClearColorValue { float32: rgba };
         device.cmd_clear_color_image(cmd, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &color, &[range]);
         let to_src = vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -634,6 +646,25 @@ pub fn bar_quad<'a>(laser: &'a Laser, space: &'a xr::Space, pose: xr::Posef, hei
         .sub_image(sub)
         .pose(pose)
         .size(xr::Extent2Df { width: 0.012, height })
+        .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+}
+
+/// A solid texture over the whole view, fixed to the head (`view` is the VIEW
+/// space): the dim behind the dashboard. Half a metre out and 4 m across, it
+/// covers any headset's field of view.
+pub fn view_quad<'a>(solid: &'a Laser, view: &'a xr::Space) -> xr::CompositionLayerQuad<'a, xr::Vulkan> {
+    let sub = xr::SwapchainSubImage::new().swapchain(&solid.swapchain).image_array_index(0).image_rect(
+        xr::Rect2Di {
+            offset: xr::Offset2Di { x: 0, y: 0 },
+            extent: xr::Extent2Di { width: 8, height: 8 },
+        },
+    );
+    xr::CompositionLayerQuad::new()
+        .space(view)
+        .eye_visibility(xr::EyeVisibility::BOTH)
+        .sub_image(sub)
+        .pose(xr::Posef { orientation: xr::Quaternionf::IDENTITY, position: xr::Vector3f { x: 0.0, y: 0.0, z: -0.5 } })
+        .size(xr::Extent2Df { width: 4.0, height: 4.0 })
         .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
 }
 

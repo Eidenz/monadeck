@@ -134,6 +134,17 @@ fn dashboard(ui: &mut egui::Ui, st: &mut LibState) {
                 st.sound_tab = true;
             }
         });
+        divider(ui);
+        if switch_row(ui, "Dim the game", "While the dashboard is open over it", &mut st.dim_game) {
+            st.sound_tab = true;
+        }
+        divider(ui);
+        let enabled = st.dim_game;
+        row(ui, "Dimming", "", SLIDER_W, |ui| {
+            ui.add_enabled_ui(enabled, |ui| {
+                slider(ui, &mut st.dim_strength, 0.1..=0.9, SLIDER_W, |v| format!("{:.0}%", v * 100.0));
+            });
+        });
     });
 
     group(ui, "Sound");

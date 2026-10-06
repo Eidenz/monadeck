@@ -101,6 +101,8 @@ const POPUP_FAILED_SECS: f32 = 3.0;
 /// stick); normally the tracker dismisses it far sooner — the game is up, or
 /// it crashed / was closed.
 const POPUP_FALLBACK_SECS: u64 = 60;
+/// Seconds the dim behind the dashboard takes to come in (or go) completely.
+const DIM_FADE_SECS: f32 = 0.25;
 
 struct LaunchPopup {
     name: String,
@@ -604,6 +606,11 @@ fn run() -> Result<()> {
     let mut text_focus_last: Option<Instant> = None;
     // A second laser-coloured swapchain for the docking marker (filled once).
     let mut marker = make_laser(&session, format)?;
+    // The dim behind the open dashboard: one black texture over the whole view.
+    let mut dim_solid = make_laser(&session, format)?;
+    let mut dim_filled = -1.0_f32;
+    let mut dim_alpha = 0.0_f32;
+    let mut dim_tick = Instant::now();
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -853,6 +860,8 @@ fn run() -> Result<()> {
     st.capture_max_fps = ov_cfg.capture_max_fps;
     st.capture_max_height = ov_cfg.capture_max_height;
     st.skybox_enabled = ov_cfg.skybox_enabled;
+    st.dim_game = ov_cfg.dim_game;
+    st.dim_strength = ov_cfg.dim_strength.clamp(0.1, 0.9);
     st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
     st.skybox_custom_hint = sky::custom_path_hint();
     st.watch_zone_ids = ov_cfg.watch_timezones.clone();
@@ -1903,6 +1912,17 @@ fn run() -> Result<()> {
         }
         let show_sky = st.skybox_enabled && running.is_none();
         let sky_layer = if show_sky { sky.as_ref().and_then(|s| s.layer(&space)) } else { None };
+        // SteamVR's dim: the game darkens behind the open dashboard, fading in
+        // and out. The texture is refilled only while the fade moves.
+        let dim_target = if visible && running.is_some() && st.dim_game { st.dim_strength.clamp(0.1, 0.9) } else { 0.0 };
+        let dim_step = dim_tick.elapsed().as_secs_f32().min(0.1) / DIM_FADE_SECS;
+        dim_tick = Instant::now();
+        dim_alpha += (dim_target - dim_alpha).clamp(-dim_step, dim_step);
+        if dim_alpha > 0.005 && (dim_alpha - dim_filled).abs() > 0.004 {
+            gfx::fill_solid(&mut dim_solid, &device, cmd, queue, fence, [0.0, 0.0, 0.0, dim_alpha])?;
+            dim_filled = dim_alpha;
+        }
+        let dim_q = (dim_alpha > 0.005).then(|| gfx::view_quad(&dim_solid, &view_space));
 
         // Text-field focus → keyboard pop-up (debounced; starts the listener on demand).
         if st.keyboard_auto && a11y.is_none() {
@@ -2487,6 +2507,9 @@ fn run() -> Result<()> {
             let mini_q = mini_active.then(|| quad_layer(&mini_panel, &space, true));
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+            if let Some(q) = &dim_q {
+                layers.push(q);
+            }
             if let Some(s) = &sky_layer {
                 layers.push(s);
             }
@@ -2867,6 +2890,10 @@ fn run() -> Result<()> {
         let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
         let popup_q;
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+        // Under everything of ours: only the game darkens.
+        if let Some(q) = &dim_q {
+            layers.push(q);
+        }
         if let Some(s) = &sky_layer {
             layers.push(s);
         }
@@ -3419,6 +3446,8 @@ fn overlay_config_from(
         capture_max_fps: st.capture_max_fps,
         capture_max_height: st.capture_max_height,
         skybox_enabled: st.skybox_enabled,
+        dim_game: st.dim_game,
+        dim_strength: st.dim_strength,
         skybox_path: skybox_path.clone(),
         qr_detect: st.photo_qr_detect,
         qr_autodelete: st.photo_qr_autodelete,
