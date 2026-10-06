@@ -60,7 +60,7 @@ export const floorCalStatus = () => invoke<FloorCalStatus>("floor_cal_status");
 export const runFloorCalibration = () =>
   invoke<void>("run_floor_calibration");
 
-import type { FoundStation, ReceiverGroup, RoomResult, StationPower, StationState, StationVersion } from "./types";
+import type { AudioDevices, FoundStation, ReceiverGroup, RoomResult, StationPower, StationState, StationVersion } from "./types";
 export const runRoomSetup = () => invoke<RoomResult>("run_room_setup");
 export const headHeight = () => invoke<number | null>("head_height");
 export const pairingReceivers = () => invoke<ReceiverGroup[]>("pairing_receivers");
@@ -75,6 +75,7 @@ export const bsSetChannel = (address: string, channel: number) =>
 export const bsIdentify = (address: string) => invoke<void>("bs_identify", { address });
 export const installUdevRules = () => invoke<void>("install_udev_rules");
 export const steamvrInstalled = () => invoke<boolean>("steamvr_installed");
+export const audioDevices = () => invoke<AudioDevices>("audio_devices");
 
 export const surviveCalStatus = () =>
   invoke<SurviveCalStatus>("survive_cal_status");

@@ -86,7 +86,15 @@ pub fn set_config(state: State<AppState>, config: MonadeckConfig) -> CmdResult<(
     }
     config.save().map_err(|e| e.to_string())?;
     devices::set_backend(config.backend);
+    let audio_changed = {
+        let old = state.config.lock().unwrap();
+        old.vr_audio_output != config.vr_audio_output || old.vr_audio_input != config.vr_audio_input
+    };
     *state.config.lock().unwrap() = config;
+    // A device picked while VR runs takes over right away.
+    if audio_changed && state.runner.lock().unwrap().is_running() {
+        crate::vr_audio::start(&state);
+    }
     Ok(())
 }
 
@@ -461,6 +469,7 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
         std::thread::sleep(Duration::from_millis(200));
     }
     launch_session_plugins(st);
+    crate::vr_audio::start(st);
     Ok(())
 }
 
@@ -521,6 +530,7 @@ fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     }
 
     st.wivrn_watch.lock().unwrap().spawn(st.clone());
+    crate::vr_audio::start(st);
     Ok(())
 }
 
@@ -645,6 +655,7 @@ fn stop_blocking(st: &AppState) {
         }
     }
     st.runner.lock().unwrap().terminate();
+    crate::vr_audio::restore(st);
 
     let env = service_env(&cfg);
     for p in cfg

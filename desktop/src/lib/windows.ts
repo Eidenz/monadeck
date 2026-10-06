@@ -8,6 +8,7 @@ export type SettingsSection =
   | "general"
   | "lighthouse"
   | "compositor"
+  | "audio"
   | "environment"
   | "plugins"
   | "wivrn"

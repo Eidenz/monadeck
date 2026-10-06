@@ -4,6 +4,7 @@
 //! workflow Monadeck targets: point at a monado build prefix, optionally set
 //! some env vars, register xrizer, and launch a few plugins by path.
 
+use crate::audio_devices::AudioDevice;
 use crate::basestations::{self, Power};
 use crate::paths::monadeck_config_dir;
 use crate::plugins::Plugin;
@@ -189,6 +190,13 @@ pub struct MonadeckConfig {
     #[serde(default = "default_base_stations_off")]
     pub base_stations_off: Power,
 
+    /// The default output and microphone while VR runs (None leaves the
+    /// desktop's alone); the previous ones come back when it stops.
+    #[serde(default)]
+    pub vr_audio_output: Option<AudioDevice>,
+    #[serde(default)]
+    pub vr_audio_input: Option<AudioDevice>,
+
     /// Runtime updates the user put off, as `monado:<tag>` / `xrizer:<tag>`:
     /// that release isn't offered again (a newer one is).
     #[serde(default)]
@@ -224,6 +232,8 @@ impl Default for MonadeckConfig {
             base_stations: Vec::new(),
             base_stations_auto: false,
             base_stations_off: default_base_stations_off(),
+            vr_audio_output: None,
+            vr_audio_input: None,
             dismissed_updates: Vec::new(),
         }
     }

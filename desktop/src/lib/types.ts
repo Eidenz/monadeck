@@ -40,6 +40,8 @@ export interface MonadeckConfig {
   base_stations: SavedStation[];
   base_stations_auto: boolean; // on when VR starts, off when it stops
   base_stations_off: StationPower; // what "off" means: sleep or standby
+  vr_audio_output: AudioDevice | null; // default output while VR runs (null: leave it)
+  vr_audio_input: AudioDevice | null; // default microphone while VR runs (null: leave it)
   dismissed_updates: string[]; // "monado:<tag>" / "xrizer:<tag>" put off by the user
 }
 
@@ -271,4 +273,19 @@ export interface EyeStatus {
 export interface UevrStatus {
   protontricks: boolean; // protontricks-launch on PATH (needed for VR-Mod launches)
   chihuahua: string | null; // resolved path to the injector, or null if not installed
+}
+
+// --- Audio: the defaults while VR runs ---------------------------------------
+
+export interface AudioDevice {
+  name: string; // node name (alsa_output.usb-…), stable across reboots
+  description: string; // what the desktop calls it
+}
+
+export interface AudioDevices {
+  available: boolean; // pactl answered
+  outputs: AudioDevice[];
+  inputs: AudioDevice[];
+  default_output: string | null;
+  default_input: string | null;
 }

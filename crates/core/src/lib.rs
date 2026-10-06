@@ -13,6 +13,7 @@
 //! - [`floor_calibration`] — the same through SteamVR's `vrcmd` (stock Monado fallback).
 //! - [`pairing`] — pair controllers/trackers to their USB receivers.
 //! - [`basestations`] — base station power + channel over Bluetooth.
+//! - [`audio_devices`] — the headset's speakers and microphone while VR runs.
 //! - [`survive_calibration`] — import SteamVR calibration into libsurvive (survive driver).
 //! - [`devices`] — live device list via libmonado (`auto_connect`).
 //! - [`wivrn`] — the WiVRn backend: detect the server, drive it over D-Bus.
@@ -21,6 +22,7 @@
 //! - [`config`] / [`paths`] — persisted settings and well-known file locations.
 
 pub mod active_runtime;
+pub mod audio_devices;
 pub mod basestations;
 pub mod bindings;
 pub mod cmd_runner;

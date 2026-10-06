@@ -5,6 +5,7 @@
   import WindowControls from "$lib/components/WindowControls.svelte";
   import GeneralView from "$lib/views/GeneralView.svelte";
   import CompositorView from "$lib/views/CompositorView.svelte";
+  import AudioView from "$lib/views/AudioView.svelte";
   import EnvironmentView from "$lib/views/EnvironmentView.svelte";
   import PluginsView from "$lib/views/PluginsView.svelte";
   import LogsView from "$lib/views/LogsView.svelte";
@@ -19,6 +20,7 @@
   const baseNav: { id: SettingsSection; label: string }[] = [
     { id: "general", label: "General" },
     { id: "compositor", label: "Compositor" },
+    { id: "audio", label: "Audio" },
     { id: "environment", label: "Environment" },
     { id: "plugins", label: "Plugins" },
     { id: "logs", label: "Logs" },
@@ -31,9 +33,9 @@
     let items = baseNav;
     if (hasBeyond) {
       items = [
-        ...items.slice(0, 4),
+        ...items.slice(0, 5),
         { id: "beyond" as SettingsSection, label: "Beyond eye tracking" },
-        ...items.slice(4),
+        ...items.slice(5),
       ];
     }
     if (app.config?.backend === "wivrn") {
@@ -101,6 +103,8 @@
         <GeneralView />
       {:else if active === "compositor"}
         <CompositorView />
+      {:else if active === "audio"}
+        <AudioView />
       {:else if active === "environment"}
         <EnvironmentView />
       {:else if active === "plugins"}

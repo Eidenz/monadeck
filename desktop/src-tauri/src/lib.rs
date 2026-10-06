@@ -10,6 +10,7 @@ mod gamepad;
 mod lighthouse;
 mod overlay;
 mod state;
+mod vr_audio;
 mod wivrn_watch;
 
 use state::AppState;
@@ -24,6 +25,7 @@ fn cleanup_and_exit(app: &tauri::AppHandle) {
         state.wivrn_watch.lock().unwrap().stop_watch();
         let was_running = state.runner.lock().unwrap().is_running();
         state.runner.lock().unwrap().terminate();
+        vr_audio::restore(&state);
         if was_running {
             // Out of sight while the base stations are switched off.
             for win in app.webview_windows().values() {
@@ -153,6 +155,7 @@ pub fn run() {
             lighthouse::run_room_setup,
             lighthouse::head_height,
             lighthouse::pairing_receivers,
+            vr_audio::audio_devices,
             lighthouse::pairing_start,
             lighthouse::bs_scan,
             lighthouse::bs_state,
