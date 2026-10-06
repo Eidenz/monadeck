@@ -43,6 +43,7 @@ export interface MonadeckConfig {
   controllers_off_on_stop: boolean; // Lighthouse controllers/trackers off when VR stops
   vr_audio_output: AudioDevice | null; // default output while VR runs (null: leave it)
   vr_audio_input: AudioDevice | null; // default microphone while VR runs (null: leave it)
+  vr_audio_auto: boolean; // WiVRn: the headset's own output and microphone instead
   dismissed_updates: string[]; // "monado:<tag>" / "xrizer:<tag>" put off by the user
 }
 

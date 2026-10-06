@@ -88,7 +88,7 @@ pub fn set_config(state: State<AppState>, config: MonadeckConfig) -> CmdResult<(
     devices::set_backend(config.backend);
     let audio_changed = {
         let old = state.config.lock().unwrap();
-        old.vr_audio_output != config.vr_audio_output || old.vr_audio_input != config.vr_audio_input
+        old.vr_audio_targets() != config.vr_audio_targets()
     };
     *state.config.lock().unwrap() = config;
     // A device picked while VR runs takes over right away.

@@ -5,6 +5,7 @@
   import { app, saveConfig } from "$lib/state.svelte";
   import { audioDevices } from "$lib/api";
   import Select from "$lib/components/Select.svelte";
+  import Toggle from "$lib/components/Toggle.svelte";
   import type { AudioDevice, AudioDevices, SelectOption } from "$lib/types";
 
   type Field = "vr_audio_output" | "vr_audio_input";
@@ -62,7 +63,9 @@
 <section class="view">
   <div class="head">
     <h2>Audio</h2>
-    <button class="small" onclick={load} disabled={loading}>{loading ? "…" : "Refresh"}</button>
+    {#if app.config?.backend !== "wivrn"}
+      <button class="small" onclick={load} disabled={loading}>{loading ? "…" : "Refresh"}</button>
+    {/if}
   </div>
 
   {#if devices && !devices.available}
@@ -72,6 +75,25 @@
     </span>
   {/if}
 
+  {#if app.config?.backend === "wivrn"}
+    <div class="toggle-row">
+      <Toggle
+        label="Use the headset's speakers and microphone"
+        checked={app.config?.vr_audio_auto ?? true}
+        onchange={(v) => {
+          if (app.config) {
+            app.config.vr_audio_auto = v;
+            saveConfig();
+          }
+        }}
+      />
+      <span>Use the headset's speakers and microphone</span>
+    </div>
+    <span class="note">
+      WiVRn adds them while the headset is connected, and they become the default each time it
+      connects. The previous ones come back when VR stops.
+    </span>
+  {:else}
   {#each fields as f (f.field)}
     {@const list = f.list()}
     {@const saved = app.config?.[f.field] ?? null}
@@ -94,6 +116,7 @@
     Made the default as soon as VR starts and the device is there. The previous one comes back
     when VR stops, unless you picked another in the meantime.
   </span>
+  {/if}
 </section>
 
 <style>
@@ -131,6 +154,13 @@
   }
   .pick {
     max-width: 460px;
+  }
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    font-size: 13px;
+    color: hsl(var(--foreground));
   }
   button {
     background: hsl(var(--surface-2));

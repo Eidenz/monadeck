@@ -9,6 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The output and microphone WiVRn adds while a headset is connected.
+pub const WIVRN_OUTPUT: &str = "wivrn.sink";
+pub const WIVRN_INPUT: &str = "wivrn.source";
+
 /// An output (sink) or a microphone (source), by its stable node name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioDevice {
@@ -81,7 +85,8 @@ fn set_default(kind: Kind, name: &str) -> bool {
     pactl(&[&format!("set-default-{}", kind.noun()), name]).is_some()
 }
 
-fn present(kind: Kind, name: &str) -> bool {
+/// Whether device `name` is plugged in (or, for WiVRn's, connected).
+pub fn present(kind: Kind, name: &str) -> bool {
     devices(kind).is_some_and(|d| d.iter().any(|x| x.name == name))
 }
 

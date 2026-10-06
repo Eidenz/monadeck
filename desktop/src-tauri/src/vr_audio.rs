@@ -1,6 +1,6 @@
 //! The headset's speakers and microphone while VR runs: made the desktop's
-//! defaults once VR is up (as soon as they show up: a headset brings its own a
-//! moment after it powers on, a streamed one when it connects), handed back
+//! defaults whenever they show up (a headset brings its own a moment after it
+//! powers on; WiVRn's come and go with the headset's connection), handed back
 //! when VR stops. See `monadeck_core::audio_devices`.
 
 use crate::state::AppState;
@@ -11,30 +11,33 @@ use std::time::Duration;
 /// How often the watch looks for the devices, and for VR having stopped.
 const POLL: Duration = Duration::from_secs(2);
 
-/// Watch this VR session: switch to the chosen devices when they're there,
-/// and hand the old ones back if VR stops without us (a crash; Stop and
-/// quitting hand them back themselves). A newer call takes over.
+/// Watch this VR session: switch to the chosen devices each time they appear
+/// (and only then, so a pick of your own while they're there stays), and hand
+/// the old ones back if VR stops without us (a crash; Stop and quitting hand
+/// them back themselves). A newer call takes over.
 pub(crate) fn start(st: &AppState) {
     let gen = st.vr_audio_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let (output, input) = {
-        let cfg = st.config.lock().unwrap();
-        (cfg.vr_audio_output.as_ref().map(|d| d.name.clone()), cfg.vr_audio_input.as_ref().map(|d| d.name.clone()))
-    };
+    let (output, input) = st.config.lock().unwrap().vr_audio_targets();
     if output.is_none() && input.is_none() {
         return;
     }
     let st = st.clone();
     std::thread::spawn(move || {
-        let mut settled = [false; 2];
+        // Per device: there, and made the default since it appeared.
+        let mut taken = [false; 2];
         while st.vr_audio_gen.load(Ordering::SeqCst) == gen {
             if !st.runner.lock().unwrap().is_running() {
                 restore(&st);
                 return;
             }
-            if !(settled[0] && settled[1]) {
-                let mut done = st.vr_audio.lock().unwrap();
-                settled[0] = settled[0] || audio_devices::switch(Kind::Output, output.as_deref(), &mut done);
-                settled[1] = settled[1] || audio_devices::switch(Kind::Input, input.as_deref(), &mut done);
+            for (i, (kind, want)) in [(Kind::Output, &output), (Kind::Input, &input)].into_iter().enumerate() {
+                let Some(want) = want.as_deref() else { continue };
+                if !audio_devices::present(kind, want) {
+                    taken[i] = false;
+                } else if !taken[i] {
+                    let mut done = st.vr_audio.lock().unwrap();
+                    taken[i] = audio_devices::switch(kind, Some(want), &mut done);
+                }
             }
             std::thread::sleep(POLL);
         }
