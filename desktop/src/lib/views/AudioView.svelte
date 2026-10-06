@@ -4,7 +4,8 @@
   import { onMount } from "svelte";
   import { app, saveConfig } from "$lib/state.svelte";
   import { audioDevices } from "$lib/api";
-  import type { AudioDevice, AudioDevices } from "$lib/types";
+  import Select from "$lib/components/Select.svelte";
+  import type { AudioDevice, AudioDevices, SelectOption } from "$lib/types";
 
   type Field = "vr_audio_output" | "vr_audio_input";
 
@@ -29,6 +30,17 @@
     const saved = app.config[field];
     app.config[field] = name ? (list.find((d) => d.name === name) ?? (saved?.name === name ? saved : null)) : null;
     saveConfig();
+  }
+
+  function choices(list: AudioDevice[], saved: AudioDevice | null, current: string | null): SelectOption[] {
+    const out: SelectOption[] = [{ value: "", label: "Don't change" }];
+    if (saved && !list.some((d) => d.name === saved.name)) {
+      out.push({ value: saved.name, label: `${saved.description} (not plugged in)` });
+    }
+    for (const d of list) {
+      out.push({ value: d.name, label: d.name === current ? `${d.description} (current default)` : d.description });
+    }
+    return out;
   }
 
   const fields: { field: Field; label: string; list: () => AudioDevice[]; current: () => string | null }[] = [
@@ -63,23 +75,18 @@
   {#each fields as f (f.field)}
     {@const list = f.list()}
     {@const saved = app.config?.[f.field] ?? null}
-    {@const missing = saved && !list.some((d) => d.name === saved.name)}
     <div class="field">
       <span class="lbl">{f.label}</span>
-      <select
-        aria-label={f.label}
-        value={saved?.name ?? ""}
-        disabled={!app.config}
-        onchange={(e) => pick(f.field, list, (e.currentTarget as HTMLSelectElement).value)}
-      >
-        <option value="">Don't change</option>
-        {#if missing && saved}
-          <option value={saved.name}>{saved.description} (not plugged in)</option>
-        {/if}
-        {#each list as d (d.name)}
-          <option value={d.name}>{d.description}{d.name === f.current() ? " (current default)" : ""}</option>
-        {/each}
-      </select>
+      <div class="pick">
+        <Select
+          wide
+          label={f.label}
+          value={saved?.name ?? ""}
+          disabled={!app.config}
+          options={choices(list, saved, f.current())}
+          onchange={(v) => pick(f.field, list, v)}
+        />
+      </div>
     </div>
   {/each}
 
@@ -122,18 +129,8 @@
   .note.bad {
     color: hsl(var(--danger));
   }
-  select {
-    background: hsl(var(--surface-2));
-    border: 1px solid hsl(var(--border));
-    color: hsl(var(--foreground));
-    border-radius: var(--radius-s);
-    padding: 7px 8px;
-    font-size: 12.5px;
+  .pick {
     max-width: 460px;
-  }
-  select:focus {
-    outline: none;
-    border-color: hsl(var(--primary));
   }
   button {
     background: hsl(var(--surface-2));

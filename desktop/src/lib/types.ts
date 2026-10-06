@@ -290,3 +290,9 @@ export interface AudioDevices {
   default_output: string | null;
   default_input: string | null;
 }
+
+// One entry of the in-page dropdown (components/Select.svelte).
+export interface SelectOption {
+  value: string;
+  label: string;
+}

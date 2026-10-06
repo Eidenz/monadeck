@@ -2,7 +2,13 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { app, saveConfig } from "$lib/state.svelte";
   import { launchPlugin, listInstalledApps } from "$lib/api";
+  import Select from "$lib/components/Select.svelte";
   import type { ExecWhen, InstalledApp, Plugin } from "$lib/types";
+
+  const WHEN = [
+    { value: "after-start", label: "after start" },
+    { value: "after-stop", label: "after stop" },
+  ];
 
   // --- installed-app picker -------------------------------------------------
   let picking = $state(false);
@@ -133,13 +139,13 @@
             />
             <div class="path" class:app={isDesktop(p.path)} title={p.path}>{sourceLabel(p.path)}</div>
             <div class="opts">
-              <select
+              <Select
+                small
+                label="When it starts"
                 value={p.when}
-                onchange={(e) => update(i, { when: e.currentTarget.value as ExecWhen })}
-              >
-                <option value="after-start">after start</option>
-                <option value="after-stop">after stop</option>
-              </select>
+                options={WHEN}
+                onchange={(v) => update(i, { when: v as ExecWhen })}
+              />
               <input
                 class="args"
                 placeholder="extra args…"
@@ -296,7 +302,6 @@
     display: flex;
     gap: 8px;
   }
-  select,
   .args {
     background: hsl(var(--surface-2));
     border: 1px solid hsl(var(--border));
