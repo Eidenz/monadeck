@@ -51,11 +51,13 @@ export interface MonadeckConfig {
 export interface RuntimeUpdate {
   installed: string;
   latest: string;
+  url: string | null; // the release's page
 }
 
 export interface RuntimeUpdates {
   monado: RuntimeUpdate | null;
   xrizer: RuntimeUpdate | null;
+  monadeck: RuntimeUpdate | null; // Monadeck itself
 }
 
 // --- Lighthouse: base stations, receivers, room setup ------------------------

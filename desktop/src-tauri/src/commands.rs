@@ -884,7 +884,7 @@ pub async fn runtime_updates(state: State<'_, AppState>) -> CmdResult<installer:
     let cfg = state.config.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let monado = (cfg.backend == Backend::Monado).then_some(cfg.monado_prefix.as_path());
-        installer::check_updates(monado, cfg.xrizer_path.as_deref())
+        installer::check_updates(monado, cfg.xrizer_path.as_deref(), env!("CARGO_PKG_VERSION"))
     })
     .await
     .map_err(|e| e.to_string())

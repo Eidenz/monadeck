@@ -22,6 +22,7 @@ use crate::host;
 const MONADO_REPO: &str = "Eidenz/Monado";
 const XRIZER_REPO: &str = "Eidenz/xrizer";
 const BSB_CAMS_REPO: &str = "Eidenz/go-bsb-cams";
+const MONADECK_REPO: &str = "Eidenz/monadeck";
 
 /// What an install produced, handed back so the caller can update config.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -35,6 +36,9 @@ pub struct Installed {
 #[derive(Debug, Deserialize)]
 struct Release {
     tag_name: String,
+    /// The release's page.
+    #[serde(default)]
+    html_url: String,
     #[serde(default)]
     assets: Vec<Asset>,
 }
@@ -284,18 +288,21 @@ pub fn install_bsbcams() -> Result<Installed> {
 
 // --- Updates -------------------------------------------------------------------
 
-/// A newer release of a runtime Monadeck installed itself.
+/// A newer release of a runtime Monadeck installed itself, or of Monadeck.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Update {
     pub installed: String,
     pub latest: String,
+    /// The release's page (where Monadeck's own packages are).
+    pub url: Option<String>,
 }
 
-/// Newer releases of the built-in runtimes in use, if any.
+/// Newer releases of the built-in runtimes in use, and of Monadeck, if any.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Updates {
     pub monado: Option<Update>,
     pub xrizer: Option<Update>,
+    pub monadeck: Option<Update>,
 }
 
 /// The release a built-in runtime came from, read off the folder the
@@ -326,22 +333,25 @@ fn version_key(tag: &str) -> Vec<u64> {
 }
 
 fn newer(installed: String, latest: String) -> Option<Update> {
-    (version_key(&latest) > version_key(&installed)).then_some(Update { installed, latest })
+    (version_key(&latest) > version_key(&installed)).then_some(Update { installed, latest, url: None })
 }
 
-/// Ask GitHub whether the built-in runtimes in use have a newer release.
-/// Network; any failure (offline, rate limit) just means nothing to report.
-pub fn check_updates(monado_prefix: Option<&Path>, xrizer_path: Option<&Path>) -> Updates {
+/// Ask GitHub whether the built-in runtimes in use, or Monadeck itself (at
+/// `app_version`), have a newer release. Network; any failure (offline, rate
+/// limit) just means nothing to report.
+pub fn check_updates(monado_prefix: Option<&Path>, xrizer_path: Option<&Path>, app_version: &str) -> Updates {
     let check = |installed: Option<String>, repo: &str| {
         let installed = installed?;
         let latest = latest_release(repo).map_err(|e| log::info!("update check for {repo}: {e:#}")).ok()?;
-        newer(installed, latest.tag_name)
+        let url = (!latest.html_url.is_empty()).then_some(latest.html_url);
+        newer(installed, latest.tag_name).map(|u| Update { url, ..u })
     };
-    // Side by side: offline, both time out together rather than one after the other.
+    // Side by side: offline, they all time out together rather than one after the other.
     std::thread::scope(|scope| {
         let monado = scope.spawn(|| check(monado_prefix.and_then(builtin_monado_tag), MONADO_REPO));
+        let monadeck = scope.spawn(|| check(Some(app_version.to_string()), MONADECK_REPO));
         let xrizer = check(xrizer_path.and_then(builtin_xrizer_tag), XRIZER_REPO);
-        Updates { monado: monado.join().ok().flatten(), xrizer }
+        Updates { monado: monado.join().ok().flatten(), xrizer, monadeck: monadeck.join().ok().flatten() }
     })
 }
 
@@ -389,5 +399,11 @@ mod update_tests {
         assert!(up("v0.5-eidenz1", "v0.5-eidenz2"));
         assert!(!up("v25.1.0-eidenz10", "v25.1.0-eidenz10"));
         assert!(!up("v25.1.0-eidenz10", "v25.1.0-eidenz9"));
+        // Monadeck's own: the app's x.y.z against its tags (v2.0, v1.8.1).
+        assert!(up("2.0.0", "v2.1"));
+        assert!(up("2.1.0", "v2.1.1"));
+        assert!(up("2.1.0", "v3.0"));
+        assert!(!up("2.1.0", "v2.1"));
+        assert!(!up("2.1.0", "v2.0"));
     }
 }
