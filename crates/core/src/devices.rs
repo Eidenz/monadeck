@@ -55,9 +55,10 @@ pub struct DeviceInfo {
 
 fn classify(role: Option<&str>, name: &str) -> DeviceKind {
     let n = name.to_lowercase();
-    // Gloves (UDCAP) hold the left/right controller roles, so check by name
-    // before the role match or they'd render as controllers.
-    let is_glove = n.contains("glove") || n.contains("udcap");
+    // Hands: gloves (UDCAP) and tracked hands (WiVRn's "left hand
+    // interaction"). They hold the left/right controller roles, so check by
+    // name before the role match or they'd show as controllers.
+    let is_glove = n.contains("glove") || n.contains("udcap") || n.contains("hand interaction");
     match role {
         Some("head") | Some("eyes") => return DeviceKind::Hmd,
         Some("left") | Some("right") => {
@@ -396,5 +397,16 @@ mod tests {
         drop(listener);
         let _ = std::fs::remove_file(&live);
         let _ = std::fs::remove_file(&stale);
+    }
+
+    #[test]
+    fn hands_show_as_hands() {
+        // WiVRn's tracked hands, holding a hand role or not.
+        assert_eq!(classify(Some("left"), "WiVRn left hand interaction"), DeviceKind::Glove);
+        assert_eq!(classify(None, "WiVRn right hand interaction"), DeviceKind::Glove);
+        assert_eq!(classify(Some("left"), "WiVRn left controller"), DeviceKind::Controller);
+        assert_eq!(classify(Some("right"), "UDCAP Glove Right"), DeviceKind::Glove);
+        // Body tracking points stay trackers.
+        assert_eq!(classify(None, "WiVRn Generic Tracker #2"), DeviceKind::Tracker);
     }
 }
