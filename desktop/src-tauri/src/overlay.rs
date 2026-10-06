@@ -46,17 +46,28 @@ fn overlay_bin() -> Option<PathBuf> {
     })
 }
 
+/// `~/.local/share/monadeck/overlay.log`, emptied.
+fn log_file() -> Option<std::fs::File> {
+    let dir = monadeck_core::paths::monadeck_data_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::File::create(dir.join("overlay.log")).ok()
+}
+
 /// Spawn the overlay detached, with `env` overlaid (so it inherits the same
 /// runtime wiring monado-service got). Returns the spawned child so the caller
 /// can stop it when the service goes down.
 pub fn launch(env: &HashMap<String, String>) -> Result<Child, String> {
     let bin = overlay_bin()
         .ok_or_else(|| "overlay binary not found (build it: cargo build -p monadeck-overlay)".to_string())?;
+    // Its log (and why it stopped, if it does), fresh each launch.
+    let log = log_file();
+    let out = log.as_ref().and_then(|f| f.try_clone().ok()).map_or_else(Stdio::null, Stdio::from);
+    let err = log.map_or_else(Stdio::null, Stdio::from);
     let child = host::command(&bin)
         .envs(env)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(out)
+        .stderr(err)
         .spawn()
         .map_err(|e| format!("launching overlay {}: {e}", bin.display()))?;
     log::info!("launched built-in overlay: {}", bin.display());
