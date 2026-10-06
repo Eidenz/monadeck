@@ -304,7 +304,7 @@ fn editor_view(ui: &mut egui::Ui, st: &mut LibState) {
     }
 }
 
-fn controller_glyph(ty: &str, hand: Hand) -> &'static str {
+pub(super) fn controller_glyph(ty: &str, hand: Hand) -> &'static str {
     match (ty, hand) {
         ("knuckles" | "udcap_gloves", Hand::Left) => glyph::INDEX_LEFT,
         ("knuckles" | "udcap_gloves", Hand::Right) => glyph::INDEX_RIGHT,
@@ -664,7 +664,7 @@ fn source_card(ui: &mut egui::Ui, e: &mut Editor, def: Option<&InputDef>, s: &So
 
 // --- the drawings -----------------------------------------------------------------------------
 
-fn art_texture(ctx: &egui::Context, cache: &mut std::collections::HashMap<&'static str, egui::TextureHandle>, ty: &'static str) -> Option<egui::TextureHandle> {
+pub(super) fn art_texture(ctx: &egui::Context, cache: &mut std::collections::HashMap<&'static str, egui::TextureHandle>, ty: &'static str) -> Option<egui::TextureHandle> {
     if let Some(t) = cache.get(ty) {
         return Some(t.clone());
     }

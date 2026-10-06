@@ -9,6 +9,7 @@ use crate::gfx::{glyph, theme};
 // The tool pages (Settings, System, Desktop, Photos): a category list on the
 // left, cards on the right, all built from the shared `kit`.
 mod bindings_page;
+mod controller_test;
 mod desktop_page;
 mod kit;
 mod photos_page;
@@ -46,6 +47,35 @@ pub struct WristShot {
     pub when: String,
     pub idx: usize,
     pub total: usize,
+}
+
+/// One controller as the Controller test page shows it: every input it can
+/// report, raw. What a controller lacks stays at rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TestHand {
+    /// Tracked and bound (a switched-off controller isn't).
+    pub active: bool,
+    pub trigger: f32,
+    pub trigger_touch: bool,
+    pub trigger_click: bool,
+    /// How far the grip is closed, and (Index) how hard it's squeezed.
+    pub grip: f32,
+    pub grip_force: f32,
+    pub stick: (f32, f32),
+    pub stick_touch: bool,
+    pub stick_click: bool,
+    pub pad: (f32, f32),
+    pub pad_touch: bool,
+    pub pad_force: f32,
+    /// A / B on Index and on the right Touch, X / Y on the left Touch.
+    pub a: bool,
+    pub a_touch: bool,
+    pub b: bool,
+    pub b_touch: bool,
+    /// System (Index), menu (left Touch).
+    pub system: bool,
+    pub system_touch: bool,
+    pub thumbrest: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,6 +151,10 @@ pub struct LibState {
     /// Dim the game behind the open dashboard, and how dark (0.1..=0.9).
     pub dim_game: bool,
     pub dim_strength: f32,
+    /// Settings › Controller test: each hand as read this frame (only while
+    /// the page is open), and its controller type (the bindings' ids).
+    pub test_hands: [TestHand; 2],
+    pub test_types: [&'static str; 2],
     // Photos / gestures (monado-frame).
     pub wrist_shot: Option<WristShot>,
     pub wrist_req: crate::photos::WristRequests,
@@ -422,6 +456,8 @@ impl LibState {
             skybox_source: String::new(),
             dim_game: true,
             dim_strength: 0.5,
+            test_hands: [TestHand::default(); 2],
+            test_types: ["knuckles"; 2],
             wrist_shot: None,
             wrist_req: Default::default(),
             gallery_items: Vec::new(),

@@ -11,19 +11,21 @@ pub enum SettingsTab {
     Dashboard,
     Watch,
     Controllers,
+    Test,
     Gaming,
     Notifications,
     Osc,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 6] = [Self::Dashboard, Self::Watch, Self::Controllers, Self::Gaming, Self::Notifications, Self::Osc];
+    pub const ALL: [SettingsTab; 7] = [Self::Dashboard, Self::Watch, Self::Controllers, Self::Test, Self::Gaming, Self::Notifications, Self::Osc];
 
     fn glyph(self) -> &'static str {
         match self {
             Self::Dashboard => icon::LAYOUT,
             Self::Watch => icon::WATCH,
             Self::Controllers => icon::HAND_POINTING,
+            Self::Test => icon::JOYSTICK,
             Self::Gaming => icon::GAME_CONTROLLER,
             Self::Notifications => icon::BELL,
             Self::Osc => icon::BROADCAST,
@@ -35,6 +37,7 @@ impl SettingsTab {
             Self::Dashboard => "Dashboard",
             Self::Watch => "Wrist watch",
             Self::Controllers => "Controllers",
+            Self::Test => "Controller test",
             Self::Gaming => "Gaming mode",
             Self::Notifications => "Notifications",
             Self::Osc => "OSC",
@@ -46,6 +49,7 @@ impl SettingsTab {
             Self::Dashboard => "Where the dashboard sits, what's behind it, how it sounds",
             Self::Watch => "What your wrist shows, and which buttons it carries",
             Self::Controllers => "Switched-off controllers, freezing, and every gesture",
+            Self::Test => "Every button, stick and sensor, live",
             Self::Gaming => "Controllers as an Xbox pad for flat games",
             Self::Notifications => "Desktop and XSOverlay messages as toasts",
             Self::Osc => "Let games and tools drive the overlay",
@@ -61,6 +65,7 @@ pub(super) fn settings_page(ui: &mut egui::Ui, st: &mut LibState) {
         SettingsTab::Dashboard => dashboard(ui, st),
         SettingsTab::Watch => watch(ui, st),
         SettingsTab::Controllers => controllers(ui, st),
+        SettingsTab::Test => super::controller_test::controller_test(ui, st),
         SettingsTab::Gaming => gaming(ui, st),
         SettingsTab::Notifications => notifications(ui, st),
         SettingsTab::Osc => osc(ui, st),

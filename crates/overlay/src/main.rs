@@ -634,40 +634,64 @@ fn run() -> Result<()> {
     let trackpad_action = action_set.create_action::<xr::Vector2f>("trackpad", "Trackpad position", &[left_path, right_path])?;
     let trackpad_touch_action = action_set.create_action::<bool>("trackpad_touch", "Trackpad touch", &[left_path, right_path])?;
     let grip_pose_action = action_set.create_action::<xr::Posef>("grip_pose", "Grip pose", &[left_path, right_path])?;
+    // Settings › Controller test reads the rest: the touch sensors, the
+    // trigger's click, and how far the grip is closed (Index: beside its force).
+    let trigger_touch_action = action_set.create_action::<bool>("trigger_touch", "Trigger touch", &[left_path, right_path])?;
+    let trigger_click_action = action_set.create_action::<bool>("trigger_click", "Trigger click", &[left_path, right_path])?;
+    let squeeze_value_action = action_set.create_action::<f32>("squeeze_value", "Grip closed", &[left_path, right_path])?;
+    let stick_touch_action = action_set.create_action::<bool>("stick_touch", "Thumbstick touch", &[left_path, right_path])?;
+    let a_touch_action = action_set.create_action::<bool>("a_touch", "A touch", &[left_path, right_path])?;
+    let b_touch_action = action_set.create_action::<bool>("b_touch", "B touch", &[left_path, right_path])?;
+    let system_touch_action = action_set.create_action::<bool>("system_touch", "System touch", &[left_path, right_path])?;
+    let thumbrest_action = action_set.create_action::<bool>("thumbrest", "Thumbrest touch", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
-    xr_instance.suggest_interaction_profile_bindings(
-        index_profile,
-        &[
-            xr::Binding::new(&aim_action, xr_instance.string_to_path("/user/hand/left/input/aim/pose")?),
-            xr::Binding::new(&aim_action, xr_instance.string_to_path("/user/hand/right/input/aim/pose")?),
-            xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/left/input/trigger/value")?),
-            xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/right/input/trigger/value")?),
-            xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/left/input/squeeze/force")?),
-            xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/force")?),
-            xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick")?),
-            xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
-            // The system buttons: the left one opens the dashboard by default,
-            // either can in Monadeck's own bindings.
-            xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
-            xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/right/input/system/click")?),
-            xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
-            xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
-            xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/left/input/b/click")?),
-            xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/right/input/b/click")?),
-            xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
-            xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
-            xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/force")?),
-            xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/force")?),
-            xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick/click")?),
-            xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick/click")?),
-            xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad")?),
-            xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad")?),
-            xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/touch")?),
-            xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/touch")?),
-            xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/left/input/grip/pose")?),
-            xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/right/input/grip/pose")?),
-        ],
-    )?;
+    let index_bindings = [
+        xr::Binding::new(&aim_action, xr_instance.string_to_path("/user/hand/left/input/aim/pose")?),
+        xr::Binding::new(&aim_action, xr_instance.string_to_path("/user/hand/right/input/aim/pose")?),
+        xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/left/input/trigger/value")?),
+        xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/right/input/trigger/value")?),
+        xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/left/input/squeeze/force")?),
+        xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/force")?),
+        xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick")?),
+        xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
+        // The system buttons: the left one opens the dashboard by default,
+        // either can in Monadeck's own bindings.
+        xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
+        xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/right/input/system/click")?),
+        xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
+        xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
+        xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/left/input/b/click")?),
+        xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/right/input/b/click")?),
+        xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
+        xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
+        xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/force")?),
+        xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/force")?),
+        xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick/click")?),
+        xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick/click")?),
+        xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad")?),
+        xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad")?),
+        xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/touch")?),
+        xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/touch")?),
+        xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/left/input/grip/pose")?),
+        xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/right/input/grip/pose")?),
+    ];
+    let index_test = (|| -> xr::Result<Vec<xr::Binding>> {
+        let p = |s: &str| xr_instance.string_to_path(s);
+        let mut v = Vec::new();
+        for hand in ["left", "right"] {
+            v.extend([
+                xr::Binding::new(&trigger_touch_action, p(&format!("/user/hand/{hand}/input/trigger/touch"))?),
+                xr::Binding::new(&trigger_click_action, p(&format!("/user/hand/{hand}/input/trigger/click"))?),
+                xr::Binding::new(&squeeze_value_action, p(&format!("/user/hand/{hand}/input/squeeze/value"))?),
+                xr::Binding::new(&stick_touch_action, p(&format!("/user/hand/{hand}/input/thumbstick/touch"))?),
+                xr::Binding::new(&a_touch_action, p(&format!("/user/hand/{hand}/input/a/touch"))?),
+                xr::Binding::new(&b_touch_action, p(&format!("/user/hand/{hand}/input/b/touch"))?),
+                xr::Binding::new(&system_touch_action, p(&format!("/user/hand/{hand}/input/system/touch"))?),
+            ]);
+        }
+        Ok(v)
+    })()?;
+    suggest_bindings(&xr_instance, index_profile, &index_bindings, &index_test, "Index")?;
     // Quest controllers (WiVRn). Through the Index bindings they had no squeeze
     // force (grab never fired) and no trackpad; Monado picks this profile for
     // them, as it's their device's own, and keeps Index for Index controllers.
@@ -699,7 +723,28 @@ fn run() -> Result<()> {
             xr::Binding::new(&grip_pose_action, p("/user/hand/right/input/grip/pose")?),
         ])
     })();
-    if let Err(e) = touch_bindings.and_then(|b| xr_instance.suggest_interaction_profile_bindings(touch_profile, &b)) {
+    let touch_test = (|| -> xr::Result<Vec<xr::Binding>> {
+        let p = |s: &str| xr_instance.string_to_path(s);
+        let mut v = Vec::new();
+        for hand in ["left", "right"] {
+            v.extend([
+                xr::Binding::new(&trigger_touch_action, p(&format!("/user/hand/{hand}/input/trigger/touch"))?),
+                xr::Binding::new(&squeeze_value_action, p(&format!("/user/hand/{hand}/input/squeeze/value"))?),
+                xr::Binding::new(&stick_touch_action, p(&format!("/user/hand/{hand}/input/thumbstick/touch"))?),
+                xr::Binding::new(&thumbrest_action, p(&format!("/user/hand/{hand}/input/thumbrest/touch"))?),
+            ]);
+        }
+        // X / Y on the left, A / B on the right, as the face-button actions.
+        v.extend([
+            xr::Binding::new(&a_touch_action, p("/user/hand/left/input/x/touch")?),
+            xr::Binding::new(&b_touch_action, p("/user/hand/left/input/y/touch")?),
+            xr::Binding::new(&a_touch_action, p("/user/hand/right/input/a/touch")?),
+            xr::Binding::new(&b_touch_action, p("/user/hand/right/input/b/touch")?),
+        ]);
+        Ok(v)
+    })()
+    .unwrap_or_default();
+    if let Err(e) = touch_bindings.and_then(|b| suggest_bindings(&xr_instance, touch_profile, &b, &touch_test, "Touch")) {
         log::warn!("input: Touch controller bindings refused ({e}); Quest controllers go through the Index ones");
     }
     session.attach_action_sets(&[&action_set])?;
@@ -1649,6 +1694,39 @@ fn run() -> Result<()> {
                 grips[hi] = locate_pose(grip_space, &space, time);
             }
         }
+        // Settings › Controller test: every input it shows, read while it's open.
+        if visible && st.nav == ui::Nav::Settings && st.settings_tab == ui::SettingsTab::Test {
+            for (hi, path) in [left_path, right_path].into_iter().enumerate() {
+                if !focused {
+                    st.test_hands[hi] = ui::TestHand::default();
+                    continue;
+                }
+                let on = |a: &xr::Action<bool>| a.state(&session, path).map(|s| s.is_active && s.current_state);
+                let r = &raw[hi];
+                st.test_hands[hi] = ui::TestHand {
+                    active: r.active,
+                    trigger: r.trigger,
+                    trigger_touch: on(&trigger_touch_action)?,
+                    trigger_click: on(&trigger_click_action)?,
+                    grip: squeeze_value_action.state(&session, path)?.current_state,
+                    // The grab action: the squeeze force on Index.
+                    grip_force: r.grip,
+                    stick: r.stick,
+                    stick_touch: on(&stick_touch_action)?,
+                    stick_click: r.stick_click,
+                    pad: r.pad,
+                    pad_touch: r.pad_touch,
+                    pad_force: r.pad_force,
+                    a: r.a,
+                    a_touch: on(&a_touch_action)?,
+                    b: r.b,
+                    b_touch: on(&b_touch_action)?,
+                    system: sys_raw[hi],
+                    system_touch: on(&system_touch_action)?,
+                    thumbrest: on(&thumbrest_action)?,
+                };
+            }
+        }
         let local_in_stage = stage_space.as_ref().and_then(|st| locate_pose(&space, st, time));
         desktop.set_local_in_stage(local_in_stage);
 
@@ -1667,6 +1745,7 @@ fn run() -> Result<()> {
             }
             let glove = [gloves.0, gloves.1];
             let tys = [0, 1].map(|hi| if glove[hi] { own::GLOVES } else { profile_ty[hi] });
+            st.test_types = tys;
             // What the Playspace page says drives it (for the controller the editor would open).
             let shown_ty = if gloves.0 || gloves.1 { own::GLOVES } else { tys[0] };
             if own_summary_for != Some((shown_ty, tys[1])) {
@@ -3255,6 +3334,20 @@ fn screen_laser_alpha(screen: Option<usize>, since: &mut Option<(usize, Instant)
             (1.0 - entered.elapsed().as_secs_f32() / SCREEN_LASER_FADE).clamp(0.0, 1.0)
         }
     }
+}
+
+/// Suggest a profile's bindings together with the Controller test's `extra`
+/// ones; if the runtime refuses them together, the base ones alone (the test
+/// page then shows less, and nothing else changes).
+fn suggest_bindings(instance: &xr::Instance, profile: xr::Path, base: &[xr::Binding], extra: &[xr::Binding], name: &str) -> xr::Result<()> {
+    if !extra.is_empty() {
+        let all: Vec<xr::Binding> = base.iter().chain(extra).copied().collect();
+        match instance.suggest_interaction_profile_bindings(profile, &all) {
+            Ok(()) => return Ok(()),
+            Err(e) => log::warn!("input: {name} test bindings refused ({e}); the Controller test shows less"),
+        }
+    }
+    instance.suggest_interaction_profile_bindings(profile, base)
 }
 
 /// Render the VR keyboard onto its panel (when visible) and build its layer.
