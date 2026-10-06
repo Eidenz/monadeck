@@ -383,6 +383,7 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
 
     // Wire up runtimes (each backs up what it replaces).
     active_runtime::set_to_monado(&cfg).map_err(|e| e.to_string())?;
+    st.monado.resume();
     register_openvr(&cfg)?;
 
     let mut env = service_env(&cfg);
@@ -404,6 +405,12 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
                 cfg.lighthouse_driver.to_lowercase(),
             );
         }
+    }
+    // Controllers and trackers off when VR stops, like SteamVR: the steamvr_lh
+    // driver puts every device in standby as the service shuts down.
+    if cfg.controllers_off_on_stop && lh_standby_applies(&cfg, &env) {
+        env.entry("LH_STANDBY_ON_EXIT".to_string())
+            .or_insert_with(|| "1".to_string());
     }
     // Compositor settings, injected like Envision's profile defaults. An
     // explicit user env var always wins (or_insert).
@@ -473,6 +480,22 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     Ok(())
 }
 
+/// Whether the service tracks Lighthouse devices with SteamVR's driver, the
+/// one `LH_STANDBY_ON_EXIT` belongs to.
+fn lh_standby_applies(cfg: &MonadeckConfig, env: &HashMap<String, String>) -> bool {
+    cfg.backend == Backend::Monado && !env.contains_key("LH_DRIVER") && cfg.lighthouse_driver.eq_ignore_ascii_case("steamvr")
+}
+
+/// How long a stop waits for the service before killing it: switching the
+/// controllers off happens on the way out, so give that a moment.
+pub(crate) fn stop_grace(cfg: &MonadeckConfig) -> Duration {
+    if cfg.controllers_off_on_stop && lh_standby_applies(cfg, &env_map(cfg)) {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(2)
+    }
+}
+
 /// Start WiVRn's server. It idles until a headset connects; the session watch
 /// then launches the plugins/overlay per headset session (see `wivrn_watch`).
 fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
@@ -504,6 +527,7 @@ fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     // Wire up runtimes ourselves (each backs up what it replaces); the server is
     // told not to touch them.
     active_runtime::set_to_wivrn(&manifest).map_err(|e| e.to_string())?;
+    st.monado.resume();
     register_openvr(&cfg)?;
 
     let env = service_env(&cfg);
@@ -638,6 +662,9 @@ fn stop_blocking(st: &AppState) {
     // Stop the plugins/overlay we launched (WayVR, etc.) so they don't
     // outlive the service and collide with the next start.
     kill_plugins(&st);
+    // Our own libmonado client too: the service waits for its clients to
+    // leave before it shuts down.
+    st.monado.release();
 
     if cfg.backend == Backend::Wivrn && st.runner.lock().unwrap().is_running() {
         // Ask nicely over the bus first: Quit tears down a live headset
@@ -654,7 +681,7 @@ fn stop_blocking(st: &AppState) {
             }
         }
     }
-    st.runner.lock().unwrap().terminate();
+    st.runner.lock().unwrap().terminate_within(stop_grace(&cfg));
     crate::vr_audio::restore(st);
 
     let env = service_env(&cfg);

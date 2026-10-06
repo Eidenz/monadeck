@@ -428,6 +428,21 @@
     {#if pairResult}
       <span class="result" class:bad={!pairResult.ok}>{pairResult.msg}</span>
     {/if}
+    {#if driver === "steamvr"}
+      <div class="toggle-row sep">
+        <Toggle
+          label="Switch them off when VR stops"
+          checked={app.config?.controllers_off_on_stop ?? true}
+          onchange={(v) => {
+            if (app.config) {
+              app.config.controllers_off_on_stop = v;
+              saveConfig();
+            }
+          }}
+        />
+        <span>Switch them off when VR stops, like SteamVR does</span>
+      </div>
+    {/if}
   </div>
 
   <div class="card">
@@ -730,5 +745,9 @@
     gap: 11px;
     font-size: 13px;
     color: hsl(var(--foreground));
+  }
+  .toggle-row.sep {
+    padding-top: 10px;
+    border-top: 1px solid hsl(var(--border) / 0.5);
   }
 </style>

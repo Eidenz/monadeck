@@ -40,6 +40,7 @@ export interface MonadeckConfig {
   base_stations: SavedStation[];
   base_stations_auto: boolean; // on when VR starts, off when it stops
   base_stations_off: StationPower; // what "off" means: sleep or standby
+  controllers_off_on_stop: boolean; // Lighthouse controllers/trackers off when VR stops
   vr_audio_output: AudioDevice | null; // default output while VR runs (null: leave it)
   vr_audio_input: AudioDevice | null; // default microphone while VR runs (null: leave it)
   dismissed_updates: string[]; // "monado:<tag>" / "xrizer:<tag>" put off by the user

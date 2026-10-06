@@ -24,7 +24,9 @@ fn cleanup_and_exit(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         state.wivrn_watch.lock().unwrap().stop_watch();
         let was_running = state.runner.lock().unwrap().is_running();
-        state.runner.lock().unwrap().terminate();
+        let grace = commands::stop_grace(&state.config.lock().unwrap());
+        state.monado.release();
+        state.runner.lock().unwrap().terminate_within(grace);
         vr_audio::restore(&state);
         if was_running {
             // Out of sight while the base stations are switched off.

@@ -190,6 +190,11 @@ pub struct MonadeckConfig {
     #[serde(default = "default_base_stations_off")]
     pub base_stations_off: Power,
 
+    /// Switch Lighthouse controllers and trackers off when VR stops, like
+    /// SteamVR does (`LH_STANDBY_ON_EXIT`; the SteamVR driver only).
+    #[serde(default = "default_true")]
+    pub controllers_off_on_stop: bool,
+
     /// The default output and microphone while VR runs (None leaves the
     /// desktop's alone); the previous ones come back when it stops.
     #[serde(default)]
@@ -232,6 +237,7 @@ impl Default for MonadeckConfig {
             base_stations: Vec::new(),
             base_stations_auto: false,
             base_stations_off: default_base_stations_off(),
+            controllers_off_on_stop: true,
             vr_audio_output: None,
             vr_audio_input: None,
             dismissed_updates: Vec::new(),
