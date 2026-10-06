@@ -151,6 +151,16 @@ pub struct LibState {
     /// Dim the game behind the open dashboard, and how dark (0.1..=0.9).
     pub dim_game: bool,
     pub dim_strength: f32,
+    /// Settings › 3D models: which to show, and whether SteamVR's install
+    /// (where they come from) was found.
+    pub models_controllers: bool,
+    pub models_trackers: bool,
+    pub models_hands: bool,
+    pub models_base_stations: bool,
+    pub models_grid: bool,
+    pub models_available: bool,
+    /// Base stations can be placed: SteamVR's Lighthouse driver tracks.
+    pub models_stations_possible: bool,
     /// Settings › Controller test: each hand as read this frame (only while
     /// the page is open), and its controller type (the bindings' ids).
     pub test_hands: [TestHand; 2],
@@ -456,6 +466,13 @@ impl LibState {
             skybox_source: String::new(),
             dim_game: true,
             dim_strength: 0.5,
+            models_controllers: true,
+            models_trackers: true,
+            models_hands: true,
+            models_base_stations: true,
+            models_grid: true,
+            models_available: true,
+            models_stations_possible: true,
             test_hands: [TestHand::default(); 2],
             test_types: ["knuckles"; 2],
             wrist_shot: None,

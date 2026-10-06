@@ -381,6 +381,138 @@ pub fn calibrate(mut sample: impl FnMut() -> Result<HeadSample, String>) -> Resu
     })
 }
 
+// --- Base stations ---------------------------------------------------------------
+
+/// A Lighthouse base station, where the room setup puts it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BaseStation {
+    /// `LHB-868655A9`, as the lighthouse driver names it.
+    pub serial: String,
+    pub position: [f64; 3],
+    /// x, y, z, w. The station's front (what it sweeps) is its -Z.
+    pub orientation: [f64; 4],
+}
+
+/// Stations last seen this long before the most recently seen one are left
+/// out: unplugged, or since moved to another room.
+const STATION_STALE_SECS: i64 = 3600;
+
+/// The base stations of the universe Monado uses, in the same space as every
+/// device's pose (room setup applied, no offsets). Empty without a room setup.
+pub fn base_stations() -> Vec<BaseStation> {
+    let root = steam_root();
+    let Some(db) = read_json(&db_path(&root)) else { return Vec::new() };
+    base_stations_from(&db, read_json(&chap_path(&root)).as_ref())
+}
+
+fn from_to(a: Vec3, b: Vec3) -> Quat {
+    let n = |v: Vec3| {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    let (a, b) = (n(a), n(b));
+    let c = cross(a, b);
+    let q = [c[0], c[1], c[2], 1.0 + a[0] * b[0] + a[1] * b[1] + a[2] * b[2]];
+    let l = q.iter().map(|x| x * x).sum::<f64>().sqrt();
+    if l < 1e-9 {
+        // Opposite: half a turn about any axis across them.
+        return [1.0, 0.0, 0.0, 0.0];
+    }
+    q.map(|x| x / l)
+}
+
+/// `lighthousedb.json` keeps each station as `target_pose.pose`: the
+/// universe's pose in the station's frame, `[qx, qy, qz, qw, x, y, z]`. The
+/// universe is its reference station's frame (the one at the origin), which
+/// hangs tilted; the driver reports poses levelled by that station's gravity,
+/// and Monado then applies the room setup.
+fn base_stations_from(db: &Value, chap: Option<&Value>) -> Vec<BaseStation> {
+    let universes = known_universes(db);
+    let Some((id, standing)) = effective(&universes, chap) else { return Vec::new() };
+    let Some(universe) = db["known_universes"]
+        .as_array()
+        .and_then(|a| a.iter().find(|u| id_string(&u["id"]).as_deref() == Some(id.as_str())))
+    else {
+        return Vec::new();
+    };
+    // Per serial: when it was last seen, and its gravity (in its own frame)
+    // then. The states are a history (a station re-hung tilts differently);
+    // the driver levels by the current one.
+    let mut gravity: std::collections::HashMap<u64, Vec3> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<u64, i64> = std::collections::HashMap::new();
+    for b in db["base_stations"].as_array().into_iter().flatten() {
+        let Some(serial) = b["config"]["serialNumber"].as_u64() else { continue };
+        for state in b["dynamic_states"].as_array().into_iter().flatten() {
+            let t = match &state["time_last_seen"] {
+                Value::String(s) => s.parse::<i64>().ok(),
+                Value::Number(n) => n.as_i64(),
+                _ => None,
+            }
+            .unwrap_or(i64::MIN);
+            let newer = seen.get(&serial).is_none_or(|&prev| t >= prev);
+            if !newer {
+                continue;
+            }
+            seen.insert(serial, t);
+            if let Some(g) = state["dynamic_state"]["gravity_vector"].as_array() {
+                let at = |i: usize| g.get(i).and_then(Value::as_f64).unwrap_or(0.0);
+                gravity.insert(serial, [at(0), at(1), at(2)]);
+            }
+        }
+    }
+    seen.retain(|_, t| *t != i64::MIN);
+
+    struct Raw {
+        serial: u64,
+        /// The station's pose in the universe.
+        q: Quat,
+        p: Vec3,
+    }
+    let raws: Vec<Raw> = universe["base_stations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| {
+            let serial = b["base_serial_number"].as_u64()?;
+            let v: Vec<f64> = b["target_pose"]["pose"].as_array()?.iter().filter_map(Value::as_f64).collect();
+            if v.len() != 7 {
+                return None;
+            }
+            let qi = conjugate([v[0], v[1], v[2], v[3]]);
+            let p = rotate(qi, [v[4], v[5], v[6]]);
+            Some(Raw { serial, q: qi, p: [-p[0], -p[1], -p[2]] })
+        })
+        .collect();
+
+    // Up in the universe: the reference station's gravity, else every
+    // station's averaged (each brought into the universe).
+    let reference = raws.iter().find(|r| r.p.iter().all(|c| c.abs() < 1e-4)).and_then(|r| gravity.get(&r.serial));
+    let up = match reference {
+        Some(g) => *g,
+        None => raws.iter().filter_map(|r| gravity.get(&r.serial).map(|g| rotate(r.q, *g))).fold([0.0; 3], |a, g| {
+            [a[0] + g[0], a[1] + g[1], a[2] + g[2]]
+        }),
+    };
+    let level = if up.iter().all(|c| c.abs() < 1e-9) { [0.0, 0.0, 0.0, 1.0] } else { from_to(up, [0.0, 1.0, 0.0]) };
+    let (rq, rp) = room_transform(standing);
+
+    let newest = seen.values().copied().max();
+    raws.iter()
+        .filter(|r| match (newest, seen.get(&r.serial)) {
+            (Some(newest), Some(t)) => newest - t <= STATION_STALE_SECS,
+            _ => true,
+        })
+        .map(|r| {
+            let p = rotate(rq, rotate(level, r.p));
+            BaseStation {
+                serial: format!("LHB-{:08X}", r.serial),
+                position: [p[0] + rp[0], p[1] + rp[1], p[2] + rp[2]],
+                orientation: mul(rq, mul(level, r.q)),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +633,49 @@ mod tests {
     fn rest_height_by_model() {
         assert_eq!(rest_height("Bigscreen Beyond"), REST_HEIGHT_BEYOND);
         assert_eq!(rest_height("Valve Index"), REST_HEIGHT_DEFAULT);
+    }
+
+    /// The user's room (2026-10): two stations on, a third unplugged hours
+    /// earlier. Where they hang was checked against a sketch of the room.
+    #[test]
+    fn base_stations_land_where_they_hang() {
+        let db: Value = serde_json::from_str(
+            r#"{
+            "known_universes": [{ "id": "1773272405", "base_stations": [
+                { "base_serial_number": 2256950697, "target_pose": { "pose": [-0.0194208361, 0.742555022, 0.661840439, 0.10100542, 0.330521405, 3.30040741, -3.03406167] } },
+                { "base_serial_number": 3895801246, "target_pose": { "pose": [0, 0, 0, 1, 0, 0, 0] } },
+                { "base_serial_number": 3937262724, "target_pose": { "pose": [-0.028, 0.405, 0.283, 0.869, 1.771, 0.362, -0.264] } }
+            ]}],
+            "base_stations": [
+                { "config": { "serialNumber": 2256950697 }, "dynamic_states": [{ "dynamic_state": { "gravity_vector": [0.0128954453, 0.818860769, 0.573847353] }, "time_last_seen": "1791269735" }] },
+                { "config": { "serialNumber": 3895801246 }, "dynamic_states": [
+                    { "dynamic_state": { "gravity_vector": [-0.0342289135, 0.869414449, 0.492896348] }, "time_last_seen": "1774706302" },
+                    { "dynamic_state": { "gravity_vector": [-0.058, 0.821, 0.569] }, "time_last_seen": "1791269782" }
+                ] },
+                { "config": { "serialNumber": 3937262724 }, "dynamic_states": [{ "dynamic_state": { "gravity_vector": [-0.0324627422, 0.824553668, 0.564851701] }, "time_last_seen": "1791244996" }] }
+            ]}"#,
+        )
+        .unwrap();
+        let chap = json!({ "universes": [{ "universeID": "1773272405", "standing": {
+            "translation": [-0.2217541432840871, 2.2037470284573395, 1.2391897404737344], "yaw": -0.9562688746484233 } }] });
+        let st = base_stations_from(&db, Some(&chap));
+        // The unplugged one (seen ~7 h before the others) is left out.
+        assert_eq!(st.iter().map(|s| s.serial.as_str()).collect::<Vec<_>>(), ["LHB-868655A9", "LHB-E835359E"]);
+        let near = |a: [f64; 3], b: [f64; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.02);
+        // Far left in front, high on the wall; right behind.
+        assert!(near(st[0].position, [-3.04, 2.33, -1.30]), "{:?}", st[0].position);
+        assert!(near(st[1].position, [0.88, 2.20, 0.90]), "{:?}", st[1].position);
+        // Each sweeps into the room: its -Z points at the middle, downwards.
+        for s in &st {
+            let front = rotate(s.orientation, [0.0, 0.0, -1.0]);
+            let to_mid = [-s.position[0], 1.0 - s.position[1], -s.position[2]];
+            let dot = front.iter().zip(to_mid).map(|(a, b)| a * b).sum::<f64>();
+            assert!(dot > 0.0 && front[1] < 0.0, "{} faces {front:?}", s.serial);
+        }
+        // The reference station's current gravity points straight up in the room.
+        let up = rotate(st[1].orientation, [-0.058, 0.821, 0.569]);
+        assert!(up[1] > 0.99, "{up:?}");
+        // Without a room setup there's no telling where they are.
+        assert!(base_stations_from(&db, None).is_empty());
     }
 }

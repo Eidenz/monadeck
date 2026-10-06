@@ -104,6 +104,9 @@ struct Status {
     /// The service's hold-pose-when-off mode; `None` when unsupported (not our
     /// fork, or not connected).
     hold_pose: Option<bool>,
+    /// The playspace offset on the first tracking origin (what `set_origin`
+    /// moves): devices' room-setup poses sit in STAGE behind it.
+    origin: Option<openxr::Posef>,
 }
 
 pub struct MonadoLink {
@@ -140,6 +143,11 @@ impl MonadoLink {
     /// our Monado fork. False on stock Monado, so the freeze UI can hide itself.
     pub fn freeze_supported(&self) -> bool {
         self.status.lock().unwrap().freeze_supported
+    }
+
+    /// The playspace offset in effect (None when not connected).
+    pub fn origin_offset(&self) -> Option<openxr::Posef> {
+        self.status.lock().unwrap().origin
     }
 
     /// (left, right): that hand role is currently a UdCap glove.
@@ -233,6 +241,10 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
             Ok(Cmd::SetOrigin { x, y, z, yaw }) => {
                 desired_origin = Some((x, y, z, yaw));
                 set_origin_offset(&mon, x, y, z, yaw);
+                // Seen at once (a playspace drag sends these every frame).
+                if mon.is_some() {
+                    status.lock().unwrap().origin = Some(origin_pose(x, y, z, yaw));
+                }
             }
             Ok(Cmd::SetBlock(block)) => apply_block(&mon, block),
             Ok(Cmd::SetFreeze { client_id, freeze }) => {
@@ -271,7 +283,9 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
                 let clients = poll_clients(&mon, &frozen_ids);
                 let freeze_supported = mon.as_ref().map(|m| m.supports_controller_freeze()).unwrap_or(false);
                 let gloves = poll_gloves(&mon);
+                let origin = poll_origin(&mon);
                 let mut s = status.lock().unwrap();
+                s.origin = origin;
                 s.running_app = running;
                 s.batteries = batteries;
                 s.clients = clients;
@@ -404,6 +418,23 @@ fn poll_batteries(mon: &Option<Monado>, lost_since: &mut HashMap<String, Instant
         _ => 3,
     });
     out
+}
+
+fn origin_pose(x: f32, y: f32, z: f32, yaw: f32) -> openxr::Posef {
+    openxr::Posef {
+        orientation: openxr::Quaternionf { x: 0.0, y: (yaw * 0.5).sin(), z: 0.0, w: (yaw * 0.5).cos() },
+        position: openxr::Vector3f { x, y, z },
+    }
+}
+
+/// The first tracking origin's offset, as `set_origin_offset` sets it.
+fn poll_origin(mon: &Option<Monado>) -> Option<openxr::Posef> {
+    let origin = mon.as_ref()?.tracking_origins().ok()?.into_iter().next()?;
+    let p = origin.get_offset().ok()?;
+    Some(openxr::Posef {
+        orientation: openxr::Quaternionf { x: p.orientation.v.x, y: p.orientation.v.y, z: p.orientation.v.z, w: p.orientation.s },
+        position: openxr::Vector3f { x: p.position.x, y: p.position.y, z: p.position.z },
+    })
 }
 
 /// Apply a playspace offset to the primary tracking origin (OVRAS-style). `yaw`

@@ -408,7 +408,7 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     }
     // Controllers and trackers off when VR stops, like SteamVR: the steamvr_lh
     // driver puts every device in standby as the service shuts down.
-    if cfg.controllers_off_on_stop && lh_standby_applies(&cfg, &env) {
+    if cfg.controllers_off_on_stop && cfg.steamvr_lighthouse() {
         env.entry("LH_STANDBY_ON_EXIT".to_string())
             .or_insert_with(|| "1".to_string());
     }
@@ -480,16 +480,10 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     Ok(())
 }
 
-/// Whether the service tracks Lighthouse devices with SteamVR's driver, the
-/// one `LH_STANDBY_ON_EXIT` belongs to.
-fn lh_standby_applies(cfg: &MonadeckConfig, env: &HashMap<String, String>) -> bool {
-    cfg.backend == Backend::Monado && !env.contains_key("LH_DRIVER") && cfg.lighthouse_driver.eq_ignore_ascii_case("steamvr")
-}
-
 /// How long a stop waits for the service before killing it: switching the
 /// controllers off happens on the way out, so give that a moment.
 pub(crate) fn stop_grace(cfg: &MonadeckConfig) -> Duration {
-    if cfg.controllers_off_on_stop && lh_standby_applies(cfg, &env_map(cfg)) {
+    if cfg.controllers_off_on_stop && cfg.steamvr_lighthouse() {
         Duration::from_secs(10)
     } else {
         Duration::from_secs(2)

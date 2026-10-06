@@ -23,6 +23,7 @@ mod notifications;
 mod osc;
 mod photos;
 mod preview;
+mod scene;
 mod shots;
 mod sky;
 mod toast;
@@ -252,6 +253,14 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = std::env::args().position(|a| a == "--scene-selftest") {
+        let dir = std::env::args().nth(i + 1).unwrap_or_else(|| "scene-selftest".into());
+        if let Err(e) = scene::selftest::run(std::path::Path::new(&dir)) {
+            eprintln!("scene selftest FAILED: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(i) = std::env::args().position(|a| a == "--toast-preview") {
         // Render every toast kind (and the unfold animation) to PNGs, no VR needed.
         let dir = std::env::args().nth(i + 1).unwrap_or_else(|| "toast-preview".into());
@@ -323,6 +332,19 @@ fn run() -> Result<()> {
     exts.khr_composition_layer_equirect2 = equirect;
     exts.extx_overlay = true;
     exts.khr_composition_layer_cylinder = curved;
+    // The 3D layer: glove hands, and a space per tracker (Monado's xdev spaces).
+    let hand_tracking = available.ext_hand_tracking;
+    exts.ext_hand_tracking = hand_tracking;
+    // Hands from cameras and gloves only: an Index's finger tracking is a
+    // controller, drawn as one.
+    let hand_sources = hand_tracking && available.ext_hand_tracking_data_source;
+    exts.ext_hand_tracking_data_source = hand_sources;
+    // `other` holds NUL-terminated names.
+    let xdev_name = [openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(), b"\0"].concat();
+    let xdev_spaces = available.other.contains(&xdev_name);
+    if xdev_spaces {
+        exts.other.push(xdev_name);
+    }
     let xr_instance = entry.create_instance(
         &xr::ApplicationInfo {
             api_version: xr::Version::new(1, 0, 32),
@@ -337,6 +359,9 @@ fn run() -> Result<()> {
     let props = xr_instance.properties()?;
     log::info!("OpenXR runtime: {} {}", props.runtime_name, props.runtime_version);
     let system = xr_instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
+    // The headset's name (WiVRn: "Meta Quest 3 on WiVRn"): picks controller models.
+    let system_name = xr_instance.system_properties(system).map(|p| p.system_name).unwrap_or_default();
+    log::info!("OpenXR system: {system_name}");
     let _reqs = xr_instance.graphics_requirements::<xr::Vulkan>(system)?;
     let blend_mode = xr_instance
         .enumerate_environment_blend_modes(system, xr::ViewConfigurationType::PRIMARY_STEREO)?
@@ -482,6 +507,43 @@ fn run() -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("gpu-allocator init: {e}"))?,
     ));
+
+    // The 3D layer: SteamVR's models of controllers, trackers and base
+    // stations, glove hands and the floor grid (see `scene`).
+    let recommended = xr_instance
+        .enumerate_view_configuration_views(system, xr::ViewConfigurationType::PRIMARY_STEREO)?
+        .first()
+        .map(|v| (v.recommended_image_rect_width, v.recommended_image_rect_height))
+        .unwrap_or((1440, 1600));
+    let mut scene = match scene::Scene::new(&device, allocator.clone(), format, recommended) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warn!("scene: no 3D layer ({e:#})");
+            None
+        }
+    };
+    let hand_trackers = if hand_tracking && xr_instance.supports_hand_tracking(system).unwrap_or(false) {
+        let make = |hand| scene::hand_tracker(&session, &xr_instance, hand, hand_sources);
+        match (make(xr::Hand::LEFT), make(xr::Hand::RIGHT)) {
+            (Ok(l), Ok(r)) => Some([l, r]),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let xdev_list = if xdev_spaces {
+        use openxr_mndx_xdev_space::SessionXDevExtensionMNDX as _;
+        session.get_xdev_list().map_err(|e| log::warn!("scene: no device list ({e})")).ok()
+    } else {
+        None
+    };
+    // Trackers by model, re-listed when the device list changes.
+    let mut trackers3d: Vec<(&'static str, xr::Space)> = Vec::new();
+    let mut xdev_generation: Option<u64> = None;
+    let mut xdev_checked: Option<Instant> = None;
+    // Base stations from SteamVR's files (re-read now and then).
+    let mut stations3d: Vec<monadeck_core::room_setup::BaseStation> = Vec::new();
+    let mut stations_read: Option<Instant> = None;
 
     // Panel sizes (metres). Heights are derived from the texture aspect so the
     // cylinder hit-test matches what's rendered. Tune these for feel.
@@ -907,6 +969,15 @@ fn run() -> Result<()> {
     st.skybox_enabled = ov_cfg.skybox_enabled;
     st.dim_game = ov_cfg.dim_game;
     st.dim_strength = ov_cfg.dim_strength.clamp(0.1, 0.9);
+    st.models_controllers = ov_cfg.models_controllers;
+    st.models_trackers = ov_cfg.models_trackers;
+    st.models_hands = ov_cfg.models_hands;
+    st.models_base_stations = ov_cfg.models_base_stations;
+    st.models_grid = ov_cfg.models_grid;
+    st.models_available = !scene::models::steamvr_roots().is_empty();
+    // Base stations come from SteamVR's calibration, which only places them in
+    // the frame devices are tracked in with SteamVR's own Lighthouse driver.
+    st.models_stations_possible = monadeck_core::config::MonadeckConfig::load().steamvr_lighthouse();
     st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
     st.skybox_custom_hint = sky::custom_path_hint();
     st.watch_zone_ids = ov_cfg.watch_timezones.clone();
@@ -2003,6 +2074,105 @@ fn run() -> Result<()> {
         }
         let dim_q = (dim_alpha > 0.005).then(|| gfx::view_quad(&dim_solid, &view_space));
 
+        // --- The 3D layer: while the dashboard is open, and all the time while
+        // no game runs (SteamVR's empty room): controllers, hands, trackers,
+        // base stations; the floor grid only while no game runs.
+        let home = running.is_none();
+        let (mut world3d, mut hands3d) = (Vec::new(), Vec::new());
+        if scene.is_some() && (visible || home) {
+            let stage = stage_space.as_ref().and_then(|s| locate_pose(s, &space, time));
+            let gloves = [st.gloves.0, st.gloves.1];
+            for hi in 0..2 {
+                // A held controller shows as itself; a hand without one as its
+                // skeleton: a glove, or (when the runtime can leave controllers'
+                // finger tracking out) a camera-tracked hand.
+                let holding = !gloves[hi] && raw[hi].active;
+                if !holding && (gloves[hi] || hand_sources) {
+                    if let (true, Some(trackers)) = (st.models_hands, &hand_trackers) {
+                        if let Ok(Some(joints)) = space.locate_hand_joints(&trackers[hi], time) {
+                            hands3d.push(scene::Item::Hand(Box::new(joints)));
+                        }
+                    }
+                } else if st.models_controllers && holding {
+                    if let (Some(grip), Some(name)) = (grips[hi], scene::controller_model(st.test_types[hi], hi == 1, &system_name)) {
+                        let r = &raw[hi];
+                        let buttons = scene::Buttons {
+                            trigger: r.trigger,
+                            a: r.a,
+                            b: r.b,
+                            system: sys_raw[hi],
+                            stick: r.stick,
+                            stick_click: r.stick_click,
+                        };
+                        hands3d.push(scene::Item::Controller { name, grip, buttons });
+                    }
+                }
+            }
+            if st.models_trackers {
+                if let Some(list) = &xdev_list {
+                    // The device list changes as trackers come and go.
+                    if xdev_checked.is_none_or(|t| t.elapsed().as_secs() >= 2) {
+                        xdev_checked = Some(Instant::now());
+                        let generation = list.get_generation().ok();
+                        if generation != xdev_generation {
+                            xdev_generation = generation;
+                            trackers3d = list
+                                .enumerate_xdevs()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter(|x| x.can_create_space())
+                                .filter_map(|x| Some((scene::tracker_model(x.name())?, x.create_space(xr::Posef::IDENTITY).ok()?)))
+                                .collect();
+                            log::info!("scene: {} tracker(s)", trackers3d.len());
+                        }
+                    }
+                }
+                for (model, sp) in &trackers3d {
+                    if let Some(pose) = locate_pose(sp, &space, time) {
+                        world3d.push(scene::Item::Model { name: model.to_string(), pose, buttons: None, alpha: 0.88 });
+                    }
+                }
+            }
+            if let (true, true, Some(stage)) = (st.models_base_stations, st.models_stations_possible, stage) {
+                if stations_read.is_none_or(|t| t.elapsed().as_secs() >= 10) {
+                    stations_read = Some(Instant::now());
+                    stations3d = monadeck_core::room_setup::base_stations();
+                }
+                // Room setup → STAGE goes through the playspace offset.
+                let in_space = pose_compose(&stage, &monado.origin_offset().unwrap_or(xr::Posef::IDENTITY));
+                for b in &stations3d {
+                    let local = scene::math::pose(b.position.map(|v| v as f32), b.orientation.map(|v| v as f32));
+                    world3d.push(scene::Item::Model { name: scene::BASE_STATION_MODEL.into(), pose: pose_compose(&in_space, &local), buttons: None, alpha: 0.85 });
+                }
+            }
+            if let (true, true, Some(stage)) = (st.models_grid, home, stage) {
+                let at = hmd.map(|h| pose_compose(&pose_invert(&stage), &h)).map(|h| [h.position.x, h.position.z]).unwrap_or([0.0; 2]);
+                world3d.insert(0, scene::Item::Grid { stage, at });
+            }
+        }
+        let mut scene_failed = false;
+        if let Some(sc) = &mut scene {
+            // Only eyes the runtime has a pose for: before the headset is
+            // tracked (right as the service starts) it hands back a zero
+            // rotation, and a layer with one gets the whole frame refused.
+            let tracked = xr::ViewStateFlags::ORIENTATION_VALID | xr::ViewStateFlags::POSITION_VALID;
+            let views = match session.locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, time, &space) {
+                Ok((flags, v)) if !(world3d.is_empty() && hands3d.is_empty()) && flags.contains(tracked) => v,
+                _ => Vec::new(),
+            };
+            if let Err(e) = sc.render(&session, &device, cmd, queue, fence, &views, &world3d, &hands3d) {
+                log::error!("scene: {e:#}; the 3D layer is off until the overlay restarts");
+                scene_failed = true;
+            }
+        }
+        if scene_failed {
+            scene = None;
+        }
+        let world3d_views = scene.as_ref().and_then(|s| s.views(scene::Which::World));
+        let hands3d_views = scene.as_ref().and_then(|s| s.views(scene::Which::Hands));
+        let world3d_q = world3d_views.as_ref().map(|v| scene::projection_layer(&space, v));
+        let hands3d_q = hands3d_views.as_ref().map(|v| scene::projection_layer(&space, v));
+
         // Text-field focus → keyboard pop-up (debounced; starts the listener on demand).
         if st.keyboard_auto && a11y.is_none() {
             a11y = Some(a11y::A11y::start());
@@ -2592,6 +2762,9 @@ fn run() -> Result<()> {
             if let Some(s) = &sky_layer {
                 layers.push(s);
             }
+            if let Some(q) = &world3d_q {
+                layers.push(q);
+            }
             // The launch popup sits beneath everything of ours: screens, the
             // keyboard, photos and the watch all cover it.
             if popup_active {
@@ -2615,6 +2788,9 @@ fn run() -> Result<()> {
             }
             let photo_qs = photos.layers(&space);
             for q in &photo_qs {
+                layers.push(q);
+            }
+            if let Some(q) = &hands3d_q {
                 layers.push(q);
             }
             if toast_active {
@@ -2976,6 +3152,10 @@ fn run() -> Result<()> {
         if let Some(s) = &sky_layer {
             layers.push(s);
         }
+        // The world's models sit beneath every panel; the hands above them.
+        if let Some(q) = &world3d_q {
+            layers.push(q);
+        }
         // Beneath the dashboard and the screens (see the hidden path).
         if popup_active {
             popup_q = quad_layer(&launch_panel, &space, true);
@@ -3015,6 +3195,9 @@ fn run() -> Result<()> {
             layers.push(&main_quad);
             layers.push(&rail_quad);
             layers.push(&bottom_quad);
+        }
+        if let Some(q) = &hands3d_q {
+            layers.push(q);
         }
         let toast_q;
         if toast_active {
@@ -3541,6 +3724,11 @@ fn overlay_config_from(
         skybox_enabled: st.skybox_enabled,
         dim_game: st.dim_game,
         dim_strength: st.dim_strength,
+        models_controllers: st.models_controllers,
+        models_trackers: st.models_trackers,
+        models_hands: st.models_hands,
+        models_base_stations: st.models_base_stations,
+        models_grid: st.models_grid,
         skybox_path: skybox_path.clone(),
         qr_detect: st.photo_qr_detect,
         qr_autodelete: st.photo_qr_autodelete,

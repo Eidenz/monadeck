@@ -12,13 +12,14 @@ pub enum SettingsTab {
     Watch,
     Controllers,
     Test,
+    Models,
     Gaming,
     Notifications,
     Osc,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 7] = [Self::Dashboard, Self::Watch, Self::Controllers, Self::Test, Self::Gaming, Self::Notifications, Self::Osc];
+    pub const ALL: [SettingsTab; 8] = [Self::Dashboard, Self::Watch, Self::Controllers, Self::Test, Self::Models, Self::Gaming, Self::Notifications, Self::Osc];
 
     fn glyph(self) -> &'static str {
         match self {
@@ -26,6 +27,7 @@ impl SettingsTab {
             Self::Watch => icon::WATCH,
             Self::Controllers => icon::HAND_POINTING,
             Self::Test => icon::JOYSTICK,
+            Self::Models => icon::CUBE,
             Self::Gaming => icon::GAME_CONTROLLER,
             Self::Notifications => icon::BELL,
             Self::Osc => icon::BROADCAST,
@@ -38,6 +40,7 @@ impl SettingsTab {
             Self::Watch => "Wrist watch",
             Self::Controllers => "Controllers",
             Self::Test => "Controller test",
+            Self::Models => "3D models",
             Self::Gaming => "Gaming mode",
             Self::Notifications => "Notifications",
             Self::Osc => "OSC",
@@ -50,6 +53,7 @@ impl SettingsTab {
             Self::Watch => "What your wrist shows, and which buttons it carries",
             Self::Controllers => "Switched-off controllers, freezing, and every gesture",
             Self::Test => "Every button, stick and sensor, live",
+            Self::Models => "Your controllers, trackers and base stations, as SteamVR draws them",
             Self::Gaming => "Controllers as an Xbox pad for flat games",
             Self::Notifications => "Desktop and XSOverlay messages as toasts",
             Self::Osc => "Let games and tools drive the overlay",
@@ -66,6 +70,7 @@ pub(super) fn settings_page(ui: &mut egui::Ui, st: &mut LibState) {
         SettingsTab::Watch => watch(ui, st),
         SettingsTab::Controllers => controllers(ui, st),
         SettingsTab::Test => super::controller_test::controller_test(ui, st),
+        SettingsTab::Models => models(ui, st),
         SettingsTab::Gaming => gaming(ui, st),
         SettingsTab::Notifications => notifications(ui, st),
         SettingsTab::Osc => osc(ui, st),
@@ -314,6 +319,34 @@ fn controllers(ui: &mut egui::Ui, st: &mut LibState) {
         }
         ui.add_space(14.0);
     });
+}
+
+fn models(ui: &mut egui::Ui, st: &mut LibState) {
+    let w = ui.available_width();
+    let tile = egui::vec2((w - 12.0) / 2.0, TILE_H);
+    let mut t = false;
+    ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
+    ui.horizontal(|ui| {
+        t |= toggle_tile(ui, tile, icon::GAME_CONTROLLER, "Controllers", "In your hands, buttons and all", &mut st.models_controllers, true);
+        t |= toggle_tile(ui, tile, icon::HAND, "Hands", "From hand tracking or UdCap gloves", &mut st.models_hands, true);
+    });
+    ui.horizontal(|ui| {
+        t |= toggle_tile(ui, tile, icon::TARGET, "Trackers", "Full-body trackers where they're strapped", &mut st.models_trackers, true);
+        let sub = if st.models_stations_possible { "Where they hang, from the room setup" } else { "With SteamVR's Lighthouse driver only" };
+        t |= toggle_tile(ui, tile, icon::LIGHTHOUSE, "Base stations", sub, &mut st.models_base_stations, st.models_stations_possible);
+    });
+    ui.horizontal(|ui| {
+        t |= toggle_tile(ui, tile, icon::GRID_FOUR, "Floor grid", "Under the 360° background, while no game runs", &mut st.models_grid, true);
+    });
+    ui.spacing_mut().item_spacing = egui::vec2(10.0, 12.0);
+    ui.add_space(4.0);
+    note(ui, icon::INFO, "Shown while the dashboard is open, and the whole time no game runs.");
+    if !st.models_available {
+        note(ui, icon::WARNING, "SteamVR isn't installed here: the models come from its install. The floor grid and hands still show.");
+    }
+    if t {
+        st.sound_tab = true;
+    }
 }
 
 fn gaming(ui: &mut egui::Ui, st: &mut LibState) {

@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 # Same in-headset stack as monado-frame (proven on the user's Monado fork).
 openxr = { version = "0.21", features = ["static"] }
+# Monado's XR_MNDX_xdev_space: a space per device (trackers for the 3D layer).
+openxr_mndx_xdev_space = "0.2"
 ash = "0.38"
 egui = "0.31"
 egui-phosphor = "0.9"

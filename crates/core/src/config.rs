@@ -334,6 +334,15 @@ impl MonadeckConfig {
         crate::wivrn::detect_server()
     }
 
+    /// Lighthouse devices are tracked by SteamVR's own driver (Monado's
+    /// `steamvr_lh`): what reads and applies SteamVR's room setup and
+    /// calibration. Not with WiVRn, the FLOSS drivers, or an `LH_DRIVER` override.
+    pub fn steamvr_lighthouse(&self) -> bool {
+        self.backend == Backend::Monado
+            && !self.environment.contains_key("LH_DRIVER")
+            && self.lighthouse_driver.eq_ignore_ascii_case("steamvr")
+    }
+
     /// Whether the selected backend's service binary exists.
     pub fn backend_available(&self) -> bool {
         match self.backend {
