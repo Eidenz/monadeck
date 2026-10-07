@@ -9,7 +9,9 @@ mod commands;
 mod gamepad;
 mod lighthouse;
 mod overlay;
+mod runtime_watch;
 mod state;
+mod vr_audio;
 mod wivrn_watch;
 
 use state::AppState;
@@ -23,7 +25,10 @@ fn cleanup_and_exit(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         state.wivrn_watch.lock().unwrap().stop_watch();
         let was_running = state.runner.lock().unwrap().is_running();
-        state.runner.lock().unwrap().terminate();
+        let grace = commands::stop_grace(&state.config.lock().unwrap());
+        state.monado.release();
+        state.runner.lock().unwrap().terminate_within(grace);
+        vr_audio::restore(&state);
         if was_running {
             // Out of sight while the base stations are switched off.
             for win in app.webview_windows().values() {
@@ -31,9 +36,11 @@ fn cleanup_and_exit(app: &tauri::AppHandle) {
             }
             lighthouse::switch_base_stations_off_now(&state);
         }
+        runtime_watch::hand_back(&state);
+    } else {
+        let _ = monadeck_core::active_runtime::restore_backup();
+        let _ = monadeck_core::openvr_paths::restore_backup();
     }
-    let _ = monadeck_core::active_runtime::restore_backup();
-    let _ = monadeck_core::openvr_paths::restore_backup();
     app.exit(0);
 }
 
@@ -153,6 +160,7 @@ pub fn run() {
             lighthouse::run_room_setup,
             lighthouse::head_height,
             lighthouse::pairing_receivers,
+            vr_audio::audio_devices,
             lighthouse::pairing_start,
             lighthouse::bs_scan,
             lighthouse::bs_state,

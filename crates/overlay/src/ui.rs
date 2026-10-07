@@ -9,6 +9,7 @@ use crate::gfx::{glyph, theme};
 // The tool pages (Settings, System, Desktop, Photos): a category list on the
 // left, cards on the right, all built from the shared `kit`.
 mod bindings_page;
+mod controller_test;
 mod desktop_page;
 mod kit;
 mod photos_page;
@@ -46,6 +47,35 @@ pub struct WristShot {
     pub when: String,
     pub idx: usize,
     pub total: usize,
+}
+
+/// One controller as the Controller test page shows it: every input it can
+/// report, raw. What a controller lacks stays at rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TestHand {
+    /// Tracked and bound (a switched-off controller isn't).
+    pub active: bool,
+    pub trigger: f32,
+    pub trigger_touch: bool,
+    pub trigger_click: bool,
+    /// How far the grip is closed, and (Index) how hard it's squeezed.
+    pub grip: f32,
+    pub grip_force: f32,
+    pub stick: (f32, f32),
+    pub stick_touch: bool,
+    pub stick_click: bool,
+    pub pad: (f32, f32),
+    pub pad_touch: bool,
+    pub pad_force: f32,
+    /// A / B on Index and on the right Touch, X / Y on the left Touch.
+    pub a: bool,
+    pub a_touch: bool,
+    pub b: bool,
+    pub b_touch: bool,
+    /// System (Index), menu (left Touch).
+    pub system: bool,
+    pub system_touch: bool,
+    pub thumbrest: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,6 +148,41 @@ pub struct LibState {
     pub capture_max_height: u32,
     pub skybox_enabled: bool,
     pub skybox_source: String,
+    /// Dim the game behind the open dashboard, and how dark (0.1..=0.9).
+    pub dim_game: bool,
+    pub dim_strength: f32,
+    /// Settings › 3D models: which to show, and whether SteamVR's install
+    /// (where they come from) was found.
+    pub models_controllers: bool,
+    pub models_trackers: bool,
+    pub models_hands: bool,
+    pub models_base_stations: bool,
+    pub models_grid: bool,
+    pub models_available: bool,
+    /// Base stations can be placed: SteamVR's Lighthouse driver tracks.
+    pub models_stations_possible: bool,
+    /// Settings › Boundary: when the walls show.
+    pub boundary_walls: bool,
+    pub boundary_trackers: bool,
+    pub boundary_floor: bool,
+    pub boundary_reach: f32,
+    /// A boundary can be drawn here (not on WiVRn: the headset has its own).
+    pub boundary_possible: bool,
+    /// There's a room setup to draw it in (SteamVR's Lighthouse driver needs one).
+    pub boundary_ready: bool,
+    /// The boundary in effect.
+    pub boundary_info: Option<crate::boundary::Outline>,
+    /// SteamVR's files only: the play area games are told about (centred on
+    /// the room setup's centre), and how big it'd be centred in the boundary.
+    pub boundary_play: Option<[f32; 2]>,
+    pub boundary_roomiest: Option<[f32; 2]>,
+    /// Drawing one: what's down so far, and why it can't be saved yet.
+    pub boundary_setup: Option<(crate::boundary::Outline, Option<&'static str>)>,
+    pub boundary_request: Option<crate::boundary::Cmd>,
+    /// Settings › Controller test: each hand as read this frame (only while
+    /// the page is open), and its controller type (the bindings' ids).
+    pub test_hands: [TestHand; 2],
+    pub test_types: [&'static str; 2],
     // Photos / gestures (monado-frame).
     pub wrist_shot: Option<WristShot>,
     pub wrist_req: crate::photos::WristRequests,
@@ -417,6 +482,28 @@ impl LibState {
             capture_max_height: 0,
             skybox_enabled: true,
             skybox_source: String::new(),
+            dim_game: true,
+            dim_strength: 0.5,
+            models_controllers: true,
+            models_trackers: true,
+            models_hands: true,
+            models_base_stations: true,
+            models_grid: true,
+            models_available: true,
+            models_stations_possible: true,
+            boundary_walls: true,
+            boundary_trackers: true,
+            boundary_floor: false,
+            boundary_reach: 0.4,
+            boundary_possible: true,
+            boundary_ready: true,
+            boundary_info: None,
+            boundary_play: None,
+            boundary_roomiest: None,
+            boundary_setup: None,
+            boundary_request: None,
+            test_hands: [TestHand::default(); 2],
+            test_types: ["knuckles"; 2],
             wrist_shot: None,
             wrist_req: Default::default(),
             gallery_items: Vec::new(),

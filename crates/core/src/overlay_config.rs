@@ -122,6 +122,26 @@ pub struct OverlayConfig {
     pub skybox_enabled: bool,
     /// Custom equirectangular JPEG/PNG for the background (None = built-in).
     pub skybox_path: Option<String>,
+    /// Dim the game behind the open dashboard, like SteamVR.
+    pub dim_game: bool,
+    /// How dark it gets (0.1..=0.9 of black over the game).
+    pub dim_strength: f32,
+    /// SteamVR's 3D models, shown while the dashboard is open or no game runs.
+    pub models_controllers: bool,
+    pub models_trackers: bool,
+    /// Hand skeletons: hand tracking, UdCap gloves.
+    pub models_hands: bool,
+    pub models_base_stations: bool,
+    /// The floor grid, while no game runs.
+    pub models_grid: bool,
+    /// The boundary's walls fade in as you near them (when one is drawn).
+    pub boundary_walls: bool,
+    /// Trackers (feet, waist) bring the walls up too, not only the headset and hands.
+    pub boundary_trackers: bool,
+    /// The boundary's outline stays on the floor in games.
+    pub boundary_floor: bool,
+    /// How close (metres) to a wall before it shows.
+    pub boundary_reach: f32,
     // Screenshots (from monado-frame).
     pub qr_detect: bool,
     pub qr_autodelete: bool,
@@ -224,6 +244,17 @@ impl Default for OverlayConfig {
             capture_max_height: 0,
             skybox_enabled: true,
             skybox_path: None,
+            dim_game: true,
+            dim_strength: 0.5,
+            models_controllers: true,
+            models_trackers: true,
+            models_hands: true,
+            models_base_stations: true,
+            models_grid: true,
+            boundary_walls: true,
+            boundary_trackers: true,
+            boundary_floor: false,
+            boundary_reach: 0.4,
             qr_detect: false,
             qr_autodelete: false,
             skip_wrist_photo: false,

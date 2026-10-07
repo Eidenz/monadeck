@@ -4,6 +4,7 @@
 //! workflow Monadeck targets: point at a monado build prefix, optionally set
 //! some env vars, register xrizer, and launch a few plugins by path.
 
+use crate::audio_devices::AudioDevice;
 use crate::basestations::{self, Power};
 use crate::paths::monadeck_config_dir;
 use crate::plugins::Plugin;
@@ -189,6 +190,22 @@ pub struct MonadeckConfig {
     #[serde(default = "default_base_stations_off")]
     pub base_stations_off: Power,
 
+    /// Switch Lighthouse controllers and trackers off when VR stops, like
+    /// SteamVR does (`LH_STANDBY_ON_EXIT`; the SteamVR driver only).
+    #[serde(default = "default_true")]
+    pub controllers_off_on_stop: bool,
+
+    /// The default output and microphone while VR runs (None leaves the
+    /// desktop's alone); the previous ones come back when it stops.
+    #[serde(default)]
+    pub vr_audio_output: Option<AudioDevice>,
+    #[serde(default)]
+    pub vr_audio_input: Option<AudioDevice>,
+    /// WiVRn: make the headset's own output and microphone (which WiVRn adds
+    /// while it's connected) the defaults; the picks above are for Monado.
+    #[serde(default = "default_true")]
+    pub vr_audio_auto: bool,
+
     /// Runtime updates the user put off, as `monado:<tag>` / `xrizer:<tag>`:
     /// that release isn't offered again (a newer one is).
     #[serde(default)]
@@ -224,6 +241,10 @@ impl Default for MonadeckConfig {
             base_stations: Vec::new(),
             base_stations_auto: false,
             base_stations_off: default_base_stations_off(),
+            controllers_off_on_stop: true,
+            vr_audio_output: None,
+            vr_audio_input: None,
+            vr_audio_auto: true,
             dismissed_updates: Vec::new(),
         }
     }
@@ -316,6 +337,29 @@ impl MonadeckConfig {
             }
         }
         crate::wivrn::detect_server()
+    }
+
+    /// Lighthouse devices are tracked by SteamVR's own driver (Monado's
+    /// `steamvr_lh`): what reads and applies SteamVR's room setup and
+    /// calibration. Not with WiVRn, the FLOSS drivers, or an `LH_DRIVER` override.
+    pub fn steamvr_lighthouse(&self) -> bool {
+        self.backend == Backend::Monado
+            && !self.environment.contains_key("LH_DRIVER")
+            && self.lighthouse_driver.eq_ignore_ascii_case("steamvr")
+    }
+
+    /// The output and microphone VR takes over (node names): WiVRn's own with
+    /// `vr_audio_auto`, else the ones picked.
+    pub fn vr_audio_targets(&self) -> (Option<String>, Option<String>) {
+        use crate::audio_devices::{WIVRN_INPUT, WIVRN_OUTPUT};
+        match self.backend {
+            Backend::Wivrn if self.vr_audio_auto => (Some(WIVRN_OUTPUT.into()), Some(WIVRN_INPUT.into())),
+            Backend::Wivrn => (None, None),
+            Backend::Monado => (
+                self.vr_audio_output.as_ref().map(|d| d.name.clone()),
+                self.vr_audio_input.as_ref().map(|d| d.name.clone()),
+            ),
+        }
     }
 
     /// Whether the selected backend's service binary exists.

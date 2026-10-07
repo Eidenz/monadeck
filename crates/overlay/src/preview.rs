@@ -713,6 +713,42 @@ fn pages(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir:
             st.settings_tab = tab;
         })));
     }
+    // The boundary: kept, being drawn (an outline that crosses itself), and
+    // before any room setup.
+    shots.push(("page-settings-boundary-kept".into(), Box::new(|st| {
+        st.nav = Nav::Settings;
+        st.settings_tab = SettingsTab::Boundary;
+        st.boundary_info = Some(crate::boundary::Outline { corners: 6, length: 13.4, area: 10.8 });
+        st.boundary_play = Some([2.2, 1.8]);
+        st.boundary_roomiest = Some([3.1, 2.6]);
+    })));
+    shots.push(("page-settings-boundary-drawing".into(), Box::new(|st| {
+        st.nav = Nav::Settings;
+        st.settings_tab = SettingsTab::Boundary;
+        let o = crate::boundary::Outline { corners: 5, length: 8.2, area: 3.1 };
+        st.boundary_setup = Some((o, Some("The outline crosses itself · undo back past the crossing")));
+    })));
+    shots.push(("page-settings-boundary-noroom".into(), Box::new(|st| {
+        st.nav = Nav::Settings;
+        st.settings_tab = SettingsTab::Boundary;
+        st.boundary_ready = false;
+    })));
+    // The Controller test with Touch controllers (the right one switched off),
+    // and with UdCap gloves.
+    shots.push(("page-settings-test-touch".into(), Box::new(|st| {
+        st.nav = Nav::Settings;
+        st.settings_tab = SettingsTab::Test;
+        st.test_types = ["oculus_touch"; 2];
+        st.test_hands[0].a_touch = true;
+        st.test_hands[0].system = true;
+        st.test_hands[0].thumbrest = true;
+        st.test_hands[1] = crate::ui::TestHand::default();
+    })));
+    shots.push(("page-settings-test-gloves".into(), Box::new(|st| {
+        st.nav = Nav::Settings;
+        st.settings_tab = SettingsTab::Test;
+        st.test_types = [monadeck_core::bindings::own::GLOVES; 2];
+    })));
     for tab in [SystemTab::Timer, SystemTab::Playspace, SystemTab::Monado] {
         shots.push((name("system", &tab), Box::new(move |st| {
             st.nav = Nav::System;
@@ -898,6 +934,26 @@ fn sample_state() -> crate::ui::LibState {
     st.watch_times = vec![("New York".into(), "4:45 PM".into()), ("Tokyo".into(), "5:45 AM".into())];
     st.skybox_source = "built-in (Table Mountain 2, CC0)".into();
     st.skybox_custom_hint = "~/.config/monadeck/skybox.jpg".into();
+    // The Controller test mid-use: the left stick pushed, the trigger half in;
+    // the right trigger clicked, A held, a thumb on the trackpad.
+    st.test_hands = [
+        crate::ui::TestHand { active: true, trigger: 0.55, trigger_touch: true, grip: 0.3, stick: (0.45, 0.7), stick_touch: true, b_touch: true, ..Default::default() },
+        crate::ui::TestHand {
+            active: true,
+            trigger: 1.0,
+            trigger_touch: true,
+            trigger_click: true,
+            grip: 0.9,
+            grip_force: 0.45,
+            pad: (-0.3, 0.25),
+            pad_touch: true,
+            pad_force: 0.2,
+            a: true,
+            a_touch: true,
+            system_touch: true,
+            ..Default::default()
+        },
+    ];
     st.notif_dbus_ok = true;
     st.notif_udp_ok = true;
     st.game_profiles = vec!["Xbox".into(), "Keyboard + mouse".into(), "Hollow Knight".into()];

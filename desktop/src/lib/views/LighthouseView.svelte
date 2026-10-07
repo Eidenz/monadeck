@@ -12,6 +12,7 @@
   } from "$lib/state.svelte";
   import * as api from "$lib/api";
   import Toggle from "$lib/components/Toggle.svelte";
+  import Select from "$lib/components/Select.svelte";
   import type {
     FoundStation,
     ReceiverGroup,
@@ -21,6 +22,7 @@
   } from "$lib/types";
 
   const driver = $derived(app.config?.lighthouse_driver ?? "steamvr");
+  const CHANNELS = Array.from({ length: 16 }, (_, i) => ({ value: String(i + 1), label: `Channel ${i + 1}` }));
   const vrUp = $derived(app.service.connected);
   const native = $derived(!!app.floorCal?.native);
 
@@ -428,6 +430,21 @@
     {#if pairResult}
       <span class="result" class:bad={!pairResult.ok}>{pairResult.msg}</span>
     {/if}
+    {#if driver === "steamvr"}
+      <div class="toggle-row sep">
+        <Toggle
+          label="Switch them off when VR stops"
+          checked={app.config?.controllers_off_on_stop ?? true}
+          onchange={(v) => {
+            if (app.config) {
+              app.config.controllers_off_on_stop = v;
+              saveConfig();
+            }
+          }}
+        />
+        <span>Switch them off when VR stops, like SteamVR does</span>
+      </div>
+    {/if}
   </div>
 
   <div class="card">
@@ -478,20 +495,17 @@
             <button onclick={() => setPower(s, "standby")} disabled={!!busy[s.address]}>Standby</button>
             <button onclick={() => readState(s)} disabled={!!busy[s.address]}>Read state</button>
             <button onclick={() => identify(s)} disabled={!!busy[s.address]}>Blink</button>
-            <select
-              aria-label="Channel"
+            <Select
+              label="Channel"
+              placeholder="Channel"
               disabled={!!busy[s.address]}
-              value={st?.channel ?? ""}
-              onchange={(e) => {
-                const ch = Number((e.currentTarget as HTMLSelectElement).value);
+              value={st?.channel ? String(st.channel) : ""}
+              options={CHANNELS}
+              onchange={(v) => {
+                const ch = Number(v);
                 if (ch) setChannel(s, ch);
               }}
-            >
-              <option value="" disabled>Channel</option>
-              {#each Array.from({ length: 16 }, (_, i) => i + 1) as ch (ch)}
-                <option value={ch}>Channel {ch}</option>
-              {/each}
-            </select>
+            />
           {:else}
             <input
               placeholder="ID on its back (8 characters)"
@@ -648,7 +662,6 @@
   button:disabled {
     opacity: 0.55;
   }
-  select,
   input {
     background: hsl(var(--surface-2));
     border: 1px solid hsl(var(--border));
@@ -666,8 +679,7 @@
   input::placeholder {
     text-transform: none;
   }
-  input:focus,
-  select:focus {
+  input:focus {
     outline: none;
     border-color: hsl(var(--primary));
   }
@@ -730,5 +742,9 @@
     gap: 11px;
     font-size: 13px;
     color: hsl(var(--foreground));
+  }
+  .toggle-row.sep {
+    padding-top: 10px;
+    border-top: 1px solid hsl(var(--border) / 0.5);
   }
 </style>

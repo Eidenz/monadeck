@@ -86,7 +86,15 @@ pub fn set_config(state: State<AppState>, config: MonadeckConfig) -> CmdResult<(
     }
     config.save().map_err(|e| e.to_string())?;
     devices::set_backend(config.backend);
+    let audio_changed = {
+        let old = state.config.lock().unwrap();
+        old.vr_audio_targets() != config.vr_audio_targets()
+    };
     *state.config.lock().unwrap() = config;
+    // A device picked while VR runs takes over right away.
+    if audio_changed && state.runner.lock().unwrap().is_running() {
+        crate::vr_audio::start(&state);
+    }
     Ok(())
 }
 
@@ -375,7 +383,9 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
 
     // Wire up runtimes (each backs up what it replaces).
     active_runtime::set_to_monado(&cfg).map_err(|e| e.to_string())?;
+    st.monado.resume();
     register_openvr(&cfg)?;
+    crate::runtime_watch::start(st);
 
     let mut env = service_env(&cfg);
     // Emit structured (JSON) logs so the Logs view can show levels + filter.
@@ -396,6 +406,12 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
                 cfg.lighthouse_driver.to_lowercase(),
             );
         }
+    }
+    // Controllers and trackers off when VR stops, like SteamVR: the steamvr_lh
+    // driver puts every device in standby as the service shuts down.
+    if cfg.controllers_off_on_stop && cfg.steamvr_lighthouse() {
+        env.entry("LH_STANDBY_ON_EXIT".to_string())
+            .or_insert_with(|| "1".to_string());
     }
     // Compositor settings, injected like Envision's profile defaults. An
     // explicit user env var always wins (or_insert).
@@ -461,7 +477,18 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
         std::thread::sleep(Duration::from_millis(200));
     }
     launch_session_plugins(st);
+    crate::vr_audio::start(st);
     Ok(())
+}
+
+/// How long a stop waits for the service before killing it: switching the
+/// controllers off happens on the way out, so give that a moment.
+pub(crate) fn stop_grace(cfg: &MonadeckConfig) -> Duration {
+    if cfg.controllers_off_on_stop && cfg.steamvr_lighthouse() {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(2)
+    }
 }
 
 /// Start WiVRn's server. It idles until a headset connects; the session watch
@@ -495,7 +522,9 @@ fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     // Wire up runtimes ourselves (each backs up what it replaces); the server is
     // told not to touch them.
     active_runtime::set_to_wivrn(&manifest).map_err(|e| e.to_string())?;
+    st.monado.resume();
     register_openvr(&cfg)?;
+    crate::runtime_watch::start(st);
 
     let env = service_env(&cfg);
     let args = wivrn::server_args();
@@ -513,14 +542,14 @@ fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
             break;
         }
         if !st.runner.lock().unwrap().is_running() {
-            let _ = active_runtime::restore_backup();
-            let _ = openvr_paths::restore_backup();
+            crate::runtime_watch::hand_back(st);
             return Err("wivrn-server exited right after starting — see Logs.".into());
         }
         std::thread::sleep(Duration::from_millis(200));
     }
 
     st.wivrn_watch.lock().unwrap().spawn(st.clone());
+    crate::vr_audio::start(st);
     Ok(())
 }
 
@@ -628,6 +657,9 @@ fn stop_blocking(st: &AppState) {
     // Stop the plugins/overlay we launched (WayVR, etc.) so they don't
     // outlive the service and collide with the next start.
     kill_plugins(&st);
+    // Our own libmonado client too: the service waits for its clients to
+    // leave before it shuts down.
+    st.monado.release();
 
     if cfg.backend == Backend::Wivrn && st.runner.lock().unwrap().is_running() {
         // Ask nicely over the bus first: Quit tears down a live headset
@@ -644,7 +676,8 @@ fn stop_blocking(st: &AppState) {
             }
         }
     }
-    st.runner.lock().unwrap().terminate();
+    st.runner.lock().unwrap().terminate_within(stop_grace(&cfg));
+    crate::vr_audio::restore(st);
 
     let env = service_env(&cfg);
     for p in cfg
@@ -658,8 +691,7 @@ fn stop_blocking(st: &AppState) {
     }
 
     // Hand the runtimes back so SteamVR keeps working when we're off.
-    let _ = active_runtime::restore_backup();
-    let _ = openvr_paths::restore_backup();
+    crate::runtime_watch::hand_back(st);
 }
 
 // --- WiVRn -------------------------------------------------------------------
@@ -852,7 +884,7 @@ pub async fn runtime_updates(state: State<'_, AppState>) -> CmdResult<installer:
     let cfg = state.config.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let monado = (cfg.backend == Backend::Monado).then_some(cfg.monado_prefix.as_path());
-        installer::check_updates(monado, cfg.xrizer_path.as_deref())
+        installer::check_updates(monado, cfg.xrizer_path.as_deref(), env!("CARGO_PKG_VERSION"))
     })
     .await
     .map_err(|e| e.to_string())

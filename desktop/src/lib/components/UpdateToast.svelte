@@ -1,22 +1,32 @@
 <script lang="ts">
-  // Detached card above the deck (like ProtonBanner), shown when the Monado
-  // fork or xrizer that Monadeck installed itself has a newer release. "Later"
-  // puts off that release only; the next one is offered again. Self-built
-  // runtimes are never checked.
-  import { app, pendingUpdates, dismissUpdates, applyUpdates } from "$lib/state.svelte";
+  // Detached card above the deck (like ProtonBanner), shown when Monadeck, or
+  // the Monado fork or xrizer that it installed itself, has a newer release.
+  // "Later" puts off those releases only; the next one is offered again.
+  // Self-built runtimes are never checked. Monadeck's own update is a download
+  // (its release page): a package can't swap itself out while it runs.
+  import { app, pendingUpdates, dismissUpdates, applyUpdates, downloadMonadeck } from "$lib/state.svelte";
 
   const updates = $derived(pendingUpdates());
-  const names = { monado: "Monado fork", xrizer: "xrizer" } as const;
+  const runtimes = $derived(updates.filter((u) => u.kind !== "monadeck"));
+  const own = $derived(updates.some((u) => u.kind === "monadeck"));
+  const names = { monadeck: "Monadeck", monado: "Monado fork", xrizer: "xrizer" } as const;
+  const title = $derived(
+    updates.length === 1
+      ? `${names[updates[0].kind]} update`
+      : runtimes.length === updates.length
+        ? "Runtime updates"
+        : "Updates",
+  );
 </script>
 
 <div class="toast" role="alert">
-  <div class="title">{updates.length === 1 ? `${names[updates[0].kind]} update` : "Runtime updates"}</div>
+  <div class="title">{title}</div>
   <div class="desc">
     {#each updates as u (u.kind)}
       <div>{names[u.kind]} <b class="tag">{u.latest}</b> is out (you have <span class="tag">{u.installed}</span>).</div>
     {/each}
-    {#if app.service.running}
-      <div class="later">It takes effect the next time you start VR.</div>
+    {#if runtimes.length > 0 && app.service.running}
+      <div class="later">{own ? "The runtime update takes" : "It takes"} effect the next time you start VR.</div>
     {/if}
   </div>
   {#if app.installResult && !app.installResult.ok}
@@ -24,9 +34,17 @@
   {/if}
   <div class="acts">
     <button class="btn ghost" onclick={dismissUpdates} disabled={app.installing !== ""}>Later</button>
-    <button class="btn primary" onclick={applyUpdates} disabled={app.installing !== ""}>
-      {app.installing !== "" ? "Updating…" : "Update"}
-    </button>
+    <!-- With both kinds on offer, each button says which it acts on. -->
+    {#if own}
+      <button class={runtimes.length > 0 ? "btn ghost" : "btn primary"} onclick={downloadMonadeck}>
+        {runtimes.length > 0 ? "Get Monadeck" : "Download"}
+      </button>
+    {/if}
+    {#if runtimes.length > 0}
+      <button class="btn primary" onclick={applyUpdates} disabled={app.installing !== ""}>
+        {app.installing !== "" ? "Updating…" : own ? "Update runtimes" : "Update"}
+      </button>
+    {/if}
   </div>
 </div>
 

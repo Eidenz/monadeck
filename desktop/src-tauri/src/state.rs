@@ -4,6 +4,7 @@
 //! holding the Tauri `State` borrow across an await.
 
 use crate::wivrn_watch::WivrnSessionWatch;
+use monadeck_core::audio_devices::Switched;
 use monadeck_core::cmd_runner::CmdRunner;
 use monadeck_core::kwin_freeze::KwinFreezeWatch;
 use monadeck_core::monado_conn::MonadoConn;
@@ -75,6 +76,12 @@ pub struct AppState {
     /// WiVRn backend only: tracks the server's headset session and launches /
     /// stops the plugins + overlay per session. See `wivrn_watch`.
     pub wivrn_watch: Arc<Mutex<WivrnSessionWatch>>,
+    /// The audio defaults VR took over, to hand back when it stops.
+    pub vr_audio: Arc<Mutex<Switched>>,
+    /// Bumped per VR session: an older session's audio watch steps down.
+    pub vr_audio_gen: Arc<AtomicU64>,
+    /// Keeps xrizer the OpenVR runtime while VR runs (SteamVR takes it back).
+    pub runtime_watch: Arc<Mutex<crate::runtime_watch::RuntimeWatch>>,
 }
 
 impl AppState {
@@ -96,6 +103,9 @@ impl AppState {
             recovery_cancelled: Arc::new(AtomicBool::new(false)),
             deliberate_stop: Arc::new(AtomicBool::new(false)),
             wivrn_watch: Arc::new(Mutex::new(WivrnSessionWatch::default())),
+            vr_audio: Arc::new(Mutex::new(Switched::default())),
+            vr_audio_gen: Arc::new(AtomicU64::new(0)),
+            runtime_watch: Arc::new(Mutex::new(Default::default())),
         }
     }
 }

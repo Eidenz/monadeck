@@ -11,18 +11,23 @@
 use crate::devices::{build_snapshot_from, service_connected, Snapshot};
 use crate::room_setup::HeadSample;
 use libmonado::{DeviceLogic, DeviceRole, Monado};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 enum Req {
     Snapshot(SyncSender<Result<Snapshot, String>>),
     HeadPose(SyncSender<Result<HeadSample, String>>),
+    Disconnect(SyncSender<()>),
 }
 
 /// Handle to the connection worker. Cheap to clone-share via `Arc`.
 pub struct MonadoConn {
     tx: Mutex<Sender<Req>>,
+    /// Let go of the service: no connection until [`MonadoConn::resume`].
+    released: Arc<AtomicBool>,
 }
 
 impl Default for MonadoConn {
@@ -34,11 +39,32 @@ impl Default for MonadoConn {
 impl MonadoConn {
     pub fn new() -> Self {
         let (tx, rx) = channel::<Req>();
+        let released = Arc::new(AtomicBool::new(false));
+        let worker_released = released.clone();
         thread::Builder::new()
             .name("monado-conn".into())
-            .spawn(move || worker_loop(rx))
+            .spawn(move || worker_loop(rx, worker_released))
             .expect("failed to spawn monado-conn thread");
-        Self { tx: Mutex::new(tx) }
+        Self { tx: Mutex::new(tx), released }
+    }
+
+    /// Close the connection and stay away until [`resume`](Self::resume):
+    /// before a stop. monado-service waits up to 3 s for every client to
+    /// leave before it shuts down, and the time it then has left goes to
+    /// switching the devices off.
+    pub fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        let (reply_tx, reply_rx) = sync_channel::<()>(1);
+        let sent = self.tx.lock().map(|tx| tx.send(Req::Disconnect(reply_tx)).is_ok()).unwrap_or(false);
+        if sent {
+            // Behind a slow query at worst; don't hold the stop up for long.
+            let _ = reply_rx.recv_timeout(Duration::from_secs(2));
+        }
+    }
+
+    /// Connect again on the next request (the service is starting).
+    pub fn resume(&self) {
+        self.released.store(false, Ordering::SeqCst);
     }
 
     /// Fetch a devices+clients snapshot over the persistent connection. Blocking
@@ -71,19 +97,32 @@ impl MonadoConn {
     }
 }
 
-fn worker_loop(rx: Receiver<Req>) {
+fn worker_loop(rx: Receiver<Req>, released: Arc<AtomicBool>) {
     // The one connection, owned entirely by this thread.
     let mut conn: Option<Monado> = None;
     while let Ok(req) = rx.recv() {
+        if released.load(Ordering::SeqCst) {
+            conn = None;
+        }
         match req {
             Req::Snapshot(reply) => {
-                let _ = reply.send(query(&mut conn));
+                let _ = reply.send(if conn_allowed(&released) { query(&mut conn) } else { Err(STOPPING.into()) });
             }
             Req::HeadPose(reply) => {
-                let _ = reply.send(head_pose(&mut conn));
+                let _ = reply.send(if conn_allowed(&released) { head_pose(&mut conn) } else { Err(STOPPING.into()) });
+            }
+            Req::Disconnect(reply) => {
+                conn = None;
+                let _ = reply.send(());
             }
         }
     }
+}
+
+const STOPPING: &str = "monado service is stopping";
+
+fn conn_allowed(released: &AtomicBool) -> bool {
+    !released.load(Ordering::SeqCst)
 }
 
 /// The live connection, (re)connecting if needed. Drops a stale one when the

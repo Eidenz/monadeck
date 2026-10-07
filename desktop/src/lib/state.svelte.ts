@@ -504,15 +504,27 @@ export async function refreshUpdates() {
   }
 }
 
+export type UpdateKind = "monadeck" | "monado" | "xrizer";
+
 // The updates on offer: newer than what's installed, and not put off.
-export function pendingUpdates(): { kind: "monado" | "xrizer"; installed: string; latest: string }[] {
-  const out: { kind: "monado" | "xrizer"; installed: string; latest: string }[] = [];
+export function pendingUpdates(): ({ kind: UpdateKind } & import("./types").RuntimeUpdate)[] {
+  const out: ({ kind: UpdateKind } & import("./types").RuntimeUpdate)[] = [];
   const skip = app.config?.dismissed_updates ?? [];
-  for (const kind of ["monado", "xrizer"] as const) {
+  for (const kind of ["monadeck", "monado", "xrizer"] as const) {
     const u = app.updates?.[kind];
     if (u && !skip.includes(`${kind}:${u.latest}`)) out.push({ kind, ...u });
   }
   return out;
+}
+
+// Monadeck's own new release: its page (where the packages are), and it isn't
+// offered again.
+export async function downloadMonadeck() {
+  const u = pendingUpdates().find((u) => u.kind === "monadeck");
+  if (!u || !app.config) return;
+  await api.openUrl(u.url ?? "https://github.com/Eidenz/monadeck/releases/latest").catch(() => {});
+  app.config.dismissed_updates = [...app.config.dismissed_updates, `monadeck:${u.latest}`];
+  await saveConfig();
 }
 
 // Put the offered releases off: they aren't offered again, a newer one is.
@@ -523,9 +535,11 @@ export async function dismissUpdates() {
   await saveConfig();
 }
 
-// Install every offered update (the same installer as Settings › General).
+// Install every offered runtime update (the same installer as Settings ›
+// General). Monadeck's own is a download: see downloadMonadeck.
 export async function applyUpdates() {
   for (const u of pendingUpdates()) {
+    if (u.kind === "monadeck") continue;
     if (u.kind === "monado") await installMonado();
     else await installXrizer();
     if (!app.installResult?.ok) break;

@@ -40,6 +40,10 @@ export interface MonadeckConfig {
   base_stations: SavedStation[];
   base_stations_auto: boolean; // on when VR starts, off when it stops
   base_stations_off: StationPower; // what "off" means: sleep or standby
+  controllers_off_on_stop: boolean; // Lighthouse controllers/trackers off when VR stops
+  vr_audio_output: AudioDevice | null; // default output while VR runs (null: leave it)
+  vr_audio_input: AudioDevice | null; // default microphone while VR runs (null: leave it)
+  vr_audio_auto: boolean; // WiVRn: the headset's own output and microphone instead
   dismissed_updates: string[]; // "monado:<tag>" / "xrizer:<tag>" put off by the user
 }
 
@@ -47,11 +51,13 @@ export interface MonadeckConfig {
 export interface RuntimeUpdate {
   installed: string;
   latest: string;
+  url: string | null; // the release's page
 }
 
 export interface RuntimeUpdates {
   monado: RuntimeUpdate | null;
   xrizer: RuntimeUpdate | null;
+  monadeck: RuntimeUpdate | null; // Monadeck itself
 }
 
 // --- Lighthouse: base stations, receivers, room setup ------------------------
@@ -271,4 +277,25 @@ export interface EyeStatus {
 export interface UevrStatus {
   protontricks: boolean; // protontricks-launch on PATH (needed for VR-Mod launches)
   chihuahua: string | null; // resolved path to the injector, or null if not installed
+}
+
+// --- Audio: the defaults while VR runs ---------------------------------------
+
+export interface AudioDevice {
+  name: string; // node name (alsa_output.usb-…), stable across reboots
+  description: string; // what the desktop calls it
+}
+
+export interface AudioDevices {
+  available: boolean; // pactl answered
+  outputs: AudioDevice[];
+  inputs: AudioDevice[];
+  default_output: string | null;
+  default_input: string | null;
+}
+
+// One entry of the in-page dropdown (components/Select.svelte).
+export interface SelectOption {
+  value: string;
+  label: string;
 }

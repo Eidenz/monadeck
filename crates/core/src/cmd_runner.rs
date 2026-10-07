@@ -31,6 +31,17 @@ struct LogBuf {
     total: u64,
 }
 
+impl LogBuf {
+    fn push(&mut self, line: String) {
+        self.lines.push(line);
+        self.total += 1;
+        let overflow = self.lines.len().saturating_sub(MAX_LINES);
+        if overflow > 0 {
+            self.lines.drain(0..overflow);
+        }
+    }
+}
+
 pub struct CmdRunner {
     process: Option<Child>,
     log: Arc<Mutex<LogBuf>>,
@@ -97,15 +108,7 @@ impl CmdRunner {
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
                     Ok(0) | Err(_) => return, // EOF or read error: reader done
-                    Ok(_) => {
-                        let mut buf = log.lock().expect("log mutex poisoned");
-                        buf.lines.push(line.trim_end_matches('\n').to_string());
-                        buf.total += 1;
-                        let overflow = buf.lines.len().saturating_sub(MAX_LINES);
-                        if overflow > 0 {
-                            buf.lines.drain(0..overflow);
-                        }
-                    }
+                    Ok(_) => log.lock().expect("log mutex poisoned").push(line.trim_end_matches('\n').to_string()),
                 }
             }
         })
@@ -137,14 +140,20 @@ impl CmdRunner {
     /// SIGTERM the process, then SIGKILL after a short grace period, so monado
     /// gets a chance to release its IPC socket and let us restore runtime files.
     pub fn terminate(&mut self) {
+        self.terminate_within(Duration::from_secs(2));
+    }
+
+    /// [`terminate`](Self::terminate) with a longer (or shorter) grace period:
+    /// a shutdown that switches devices off needs a moment more.
+    pub fn terminate_within(&mut self, grace: Duration) {
         let Some(mut proc) = self.process.take() else {
             return;
         };
         let pid = proc.id() as libc::pid_t;
         unsafe { libc::kill(pid, libc::SIGTERM) };
 
-        // Give it two seconds, then force-kill if still alive.
-        for _ in 0..20 {
+        // Give it the grace period, then force-kill if still alive.
+        for _ in 0..grace.as_millis().div_ceil(100) {
             match proc.try_wait() {
                 Ok(Some(status)) => {
                     self.last_exit = status.code();
@@ -154,6 +163,11 @@ impl CmdRunner {
                 _ => sleep(Duration::from_millis(100)),
             }
         }
+        // Said in its own log too: whatever it was doing on the way out
+        // (switching devices off) didn't finish.
+        let note = format!("[monadeck] still running {} s after the stop request: killed", grace.as_secs());
+        log::warn!("{note}");
+        self.log.lock().expect("log mutex poisoned").push(note);
         unsafe { libc::kill(pid, libc::SIGKILL) };
         if let Ok(status) = proc.wait() {
             self.last_exit = status.code();
@@ -168,6 +182,11 @@ impl CmdRunner {
     }
 
     /// Snapshot of the buffered log lines.
+    /// A line of Monadeck's own in the service's log.
+    pub fn note(&self, line: &str) {
+        self.log.lock().expect("log mutex poisoned").push(line.to_string());
+    }
+
     pub fn lines(&self) -> Vec<String> {
         self.log.lock().expect("log mutex poisoned").lines.clone()
     }

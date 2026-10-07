@@ -10,6 +10,7 @@
 mod a11y;
 mod audio;
 mod bindings;
+mod boundary;
 mod desktop;
 mod gamemode;
 mod gamepad;
@@ -23,6 +24,7 @@ mod notifications;
 mod osc;
 mod photos;
 mod preview;
+mod scene;
 mod shots;
 mod sky;
 mod toast;
@@ -101,6 +103,8 @@ const POPUP_FAILED_SECS: f32 = 3.0;
 /// stick); normally the tracker dismisses it far sooner — the game is up, or
 /// it crashed / was closed.
 const POPUP_FALLBACK_SECS: u64 = 60;
+/// Seconds the dim behind the dashboard takes to come in (or go) completely.
+const DIM_FADE_SECS: f32 = 0.25;
 
 struct LaunchPopup {
     name: String,
@@ -250,6 +254,14 @@ fn main() {
         }
         return;
     }
+    if let Some(i) = std::env::args().position(|a| a == "--scene-selftest") {
+        let dir = std::env::args().nth(i + 1).unwrap_or_else(|| "scene-selftest".into());
+        if let Err(e) = scene::selftest::run(std::path::Path::new(&dir)) {
+            eprintln!("scene selftest FAILED: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(i) = std::env::args().position(|a| a == "--toast-preview") {
         // Render every toast kind (and the unfold animation) to PNGs, no VR needed.
         let dir = std::env::args().nth(i + 1).unwrap_or_else(|| "toast-preview".into());
@@ -321,6 +333,19 @@ fn run() -> Result<()> {
     exts.khr_composition_layer_equirect2 = equirect;
     exts.extx_overlay = true;
     exts.khr_composition_layer_cylinder = curved;
+    // The 3D layer: glove hands, and a space per tracker (Monado's xdev spaces).
+    let hand_tracking = available.ext_hand_tracking;
+    exts.ext_hand_tracking = hand_tracking;
+    // Hands from cameras and gloves only: an Index's finger tracking is a
+    // controller, drawn as one.
+    let hand_sources = hand_tracking && available.ext_hand_tracking_data_source;
+    exts.ext_hand_tracking_data_source = hand_sources;
+    // `other` holds NUL-terminated names.
+    let xdev_name = [openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(), b"\0"].concat();
+    let xdev_spaces = available.other.contains(&xdev_name);
+    if xdev_spaces {
+        exts.other.push(xdev_name);
+    }
     let xr_instance = entry.create_instance(
         &xr::ApplicationInfo {
             api_version: xr::Version::new(1, 0, 32),
@@ -335,6 +360,9 @@ fn run() -> Result<()> {
     let props = xr_instance.properties()?;
     log::info!("OpenXR runtime: {} {}", props.runtime_name, props.runtime_version);
     let system = xr_instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
+    // The headset's name (WiVRn: "Meta Quest 3 on WiVRn"): picks controller models.
+    let system_name = xr_instance.system_properties(system).map(|p| p.system_name).unwrap_or_default();
+    log::info!("OpenXR system: {system_name}");
     let _reqs = xr_instance.graphics_requirements::<xr::Vulkan>(system)?;
     let blend_mode = xr_instance
         .enumerate_environment_blend_modes(system, xr::ViewConfigurationType::PRIMARY_STEREO)?
@@ -481,6 +509,51 @@ fn run() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("gpu-allocator init: {e}"))?,
     ));
 
+    // The 3D layer: SteamVR's models of controllers, trackers and base
+    // stations, glove hands and the floor grid (see `scene`).
+    let recommended = xr_instance
+        .enumerate_view_configuration_views(system, xr::ViewConfigurationType::PRIMARY_STEREO)?
+        .first()
+        .map(|v| (v.recommended_image_rect_width, v.recommended_image_rect_height))
+        .unwrap_or((1440, 1600));
+    let mut scene = match scene::Scene::new(&device, allocator.clone(), format, recommended) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warn!("scene: no 3D layer ({e:#})");
+            None
+        }
+    };
+    let hand_trackers = if hand_tracking && xr_instance.supports_hand_tracking(system).unwrap_or(false) {
+        let make = |hand| scene::hand_tracker(&session, &xr_instance, hand, hand_sources);
+        match (make(xr::Hand::LEFT), make(xr::Hand::RIGHT)) {
+            (Ok(l), Ok(r)) => Some([l, r]),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let xdev_list = if xdev_spaces {
+        use openxr_mndx_xdev_space::SessionXDevExtensionMNDX as _;
+        session.get_xdev_list().map_err(|e| log::warn!("scene: no device list ({e})")).ok()
+    } else {
+        None
+    };
+    // Trackers by model, re-listed when the device list changes.
+    let mut trackers3d: Vec<(&'static str, xr::Space)> = Vec::new();
+    let mut xdev_generation: Option<u64> = None;
+    let mut xdev_checked: Option<Instant> = None;
+    // Base stations from SteamVR's files (re-read now and then).
+    let mut stations3d: Vec<monadeck_core::room_setup::BaseStation> = Vec::new();
+    let mut stations_read: Option<Instant> = None;
+    // The boundary (Settings › Boundary): the one kept (re-read now and then),
+    // and one being drawn.
+    let mut boundary_loops: Vec<Vec<boundary::P2>> = Vec::new();
+    let mut boundary_read: Option<Instant> = None;
+    // The roomiest rectangle in it (Settings › Boundary › Centre it): worked
+    // out off the frame loop when the boundary changes.
+    let mut boundary_roomiest_rx: Option<std::sync::mpsc::Receiver<Option<[f64; 2]>>> = None;
+    let mut boundary_setup: Option<boundary::Setup> = None;
+
     // Panel sizes (metres). Heights are derived from the texture aspect so the
     // cylinder hit-test matches what's rendered. Tune these for feel.
     const MAIN_W: f32 = 1.30;
@@ -604,6 +677,11 @@ fn run() -> Result<()> {
     let mut text_focus_last: Option<Instant> = None;
     // A second laser-coloured swapchain for the docking marker (filled once).
     let mut marker = make_laser(&session, format)?;
+    // The dim behind the open dashboard: one black texture over the whole view.
+    let mut dim_solid = make_laser(&session, format)?;
+    let mut dim_filled = -1.0_f32;
+    let mut dim_alpha = 0.0_f32;
+    let mut dim_tick = Instant::now();
 
     // --- Actions ------------------------------------------------------------
     let action_set = xr_instance.create_action_set("monadeck", "monadeck overlay controls", 0)?;
@@ -627,40 +705,64 @@ fn run() -> Result<()> {
     let trackpad_action = action_set.create_action::<xr::Vector2f>("trackpad", "Trackpad position", &[left_path, right_path])?;
     let trackpad_touch_action = action_set.create_action::<bool>("trackpad_touch", "Trackpad touch", &[left_path, right_path])?;
     let grip_pose_action = action_set.create_action::<xr::Posef>("grip_pose", "Grip pose", &[left_path, right_path])?;
+    // Settings › Controller test reads the rest: the touch sensors, the
+    // trigger's click, and how far the grip is closed (Index: beside its force).
+    let trigger_touch_action = action_set.create_action::<bool>("trigger_touch", "Trigger touch", &[left_path, right_path])?;
+    let trigger_click_action = action_set.create_action::<bool>("trigger_click", "Trigger click", &[left_path, right_path])?;
+    let squeeze_value_action = action_set.create_action::<f32>("squeeze_value", "Grip closed", &[left_path, right_path])?;
+    let stick_touch_action = action_set.create_action::<bool>("stick_touch", "Thumbstick touch", &[left_path, right_path])?;
+    let a_touch_action = action_set.create_action::<bool>("a_touch", "A touch", &[left_path, right_path])?;
+    let b_touch_action = action_set.create_action::<bool>("b_touch", "B touch", &[left_path, right_path])?;
+    let system_touch_action = action_set.create_action::<bool>("system_touch", "System touch", &[left_path, right_path])?;
+    let thumbrest_action = action_set.create_action::<bool>("thumbrest", "Thumbrest touch", &[left_path, right_path])?;
     let index_profile = xr_instance.string_to_path("/interaction_profiles/valve/index_controller")?;
-    xr_instance.suggest_interaction_profile_bindings(
-        index_profile,
-        &[
-            xr::Binding::new(&aim_action, xr_instance.string_to_path("/user/hand/left/input/aim/pose")?),
-            xr::Binding::new(&aim_action, xr_instance.string_to_path("/user/hand/right/input/aim/pose")?),
-            xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/left/input/trigger/value")?),
-            xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/right/input/trigger/value")?),
-            xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/left/input/squeeze/force")?),
-            xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/force")?),
-            xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick")?),
-            xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
-            // The system buttons: the left one opens the dashboard by default,
-            // either can in Monadeck's own bindings.
-            xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
-            xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/right/input/system/click")?),
-            xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
-            xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
-            xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/left/input/b/click")?),
-            xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/right/input/b/click")?),
-            xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
-            xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
-            xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/force")?),
-            xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/force")?),
-            xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick/click")?),
-            xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick/click")?),
-            xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad")?),
-            xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad")?),
-            xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/touch")?),
-            xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/touch")?),
-            xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/left/input/grip/pose")?),
-            xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/right/input/grip/pose")?),
-        ],
-    )?;
+    let index_bindings = [
+        xr::Binding::new(&aim_action, xr_instance.string_to_path("/user/hand/left/input/aim/pose")?),
+        xr::Binding::new(&aim_action, xr_instance.string_to_path("/user/hand/right/input/aim/pose")?),
+        xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/left/input/trigger/value")?),
+        xr::Binding::new(&select_action, xr_instance.string_to_path("/user/hand/right/input/trigger/value")?),
+        xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/left/input/squeeze/force")?),
+        xr::Binding::new(&grab_action, xr_instance.string_to_path("/user/hand/right/input/squeeze/force")?),
+        xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick")?),
+        xr::Binding::new(&scroll_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick")?),
+        // The system buttons: the left one opens the dashboard by default,
+        // either can in Monadeck's own bindings.
+        xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/left/input/system/click")?),
+        xr::Binding::new(&system_action, xr_instance.string_to_path("/user/hand/right/input/system/click")?),
+        xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/left/input/a/click")?),
+        xr::Binding::new(&secondary_action, xr_instance.string_to_path("/user/hand/right/input/a/click")?),
+        xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/left/input/b/click")?),
+        xr::Binding::new(&precise_action, xr_instance.string_to_path("/user/hand/right/input/b/click")?),
+        xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/left/output/haptic")?),
+        xr::Binding::new(&haptic_action, xr_instance.string_to_path("/user/hand/right/output/haptic")?),
+        xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/force")?),
+        xr::Binding::new(&pad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/force")?),
+        xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/left/input/thumbstick/click")?),
+        xr::Binding::new(&stick_click_action, xr_instance.string_to_path("/user/hand/right/input/thumbstick/click")?),
+        xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/left/input/trackpad")?),
+        xr::Binding::new(&trackpad_action, xr_instance.string_to_path("/user/hand/right/input/trackpad")?),
+        xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/left/input/trackpad/touch")?),
+        xr::Binding::new(&trackpad_touch_action, xr_instance.string_to_path("/user/hand/right/input/trackpad/touch")?),
+        xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/left/input/grip/pose")?),
+        xr::Binding::new(&grip_pose_action, xr_instance.string_to_path("/user/hand/right/input/grip/pose")?),
+    ];
+    let index_test = (|| -> xr::Result<Vec<xr::Binding>> {
+        let p = |s: &str| xr_instance.string_to_path(s);
+        let mut v = Vec::new();
+        for hand in ["left", "right"] {
+            v.extend([
+                xr::Binding::new(&trigger_touch_action, p(&format!("/user/hand/{hand}/input/trigger/touch"))?),
+                xr::Binding::new(&trigger_click_action, p(&format!("/user/hand/{hand}/input/trigger/click"))?),
+                xr::Binding::new(&squeeze_value_action, p(&format!("/user/hand/{hand}/input/squeeze/value"))?),
+                xr::Binding::new(&stick_touch_action, p(&format!("/user/hand/{hand}/input/thumbstick/touch"))?),
+                xr::Binding::new(&a_touch_action, p(&format!("/user/hand/{hand}/input/a/touch"))?),
+                xr::Binding::new(&b_touch_action, p(&format!("/user/hand/{hand}/input/b/touch"))?),
+                xr::Binding::new(&system_touch_action, p(&format!("/user/hand/{hand}/input/system/touch"))?),
+            ]);
+        }
+        Ok(v)
+    })()?;
+    suggest_bindings(&xr_instance, index_profile, &index_bindings, &index_test, "Index")?;
     // Quest controllers (WiVRn). Through the Index bindings they had no squeeze
     // force (grab never fired) and no trackpad; Monado picks this profile for
     // them, as it's their device's own, and keeps Index for Index controllers.
@@ -692,7 +794,28 @@ fn run() -> Result<()> {
             xr::Binding::new(&grip_pose_action, p("/user/hand/right/input/grip/pose")?),
         ])
     })();
-    if let Err(e) = touch_bindings.and_then(|b| xr_instance.suggest_interaction_profile_bindings(touch_profile, &b)) {
+    let touch_test = (|| -> xr::Result<Vec<xr::Binding>> {
+        let p = |s: &str| xr_instance.string_to_path(s);
+        let mut v = Vec::new();
+        for hand in ["left", "right"] {
+            v.extend([
+                xr::Binding::new(&trigger_touch_action, p(&format!("/user/hand/{hand}/input/trigger/touch"))?),
+                xr::Binding::new(&squeeze_value_action, p(&format!("/user/hand/{hand}/input/squeeze/value"))?),
+                xr::Binding::new(&stick_touch_action, p(&format!("/user/hand/{hand}/input/thumbstick/touch"))?),
+                xr::Binding::new(&thumbrest_action, p(&format!("/user/hand/{hand}/input/thumbrest/touch"))?),
+            ]);
+        }
+        // X / Y on the left, A / B on the right, as the face-button actions.
+        v.extend([
+            xr::Binding::new(&a_touch_action, p("/user/hand/left/input/x/touch")?),
+            xr::Binding::new(&b_touch_action, p("/user/hand/left/input/y/touch")?),
+            xr::Binding::new(&a_touch_action, p("/user/hand/right/input/a/touch")?),
+            xr::Binding::new(&b_touch_action, p("/user/hand/right/input/b/touch")?),
+        ]);
+        Ok(v)
+    })()
+    .unwrap_or_default();
+    if let Err(e) = touch_bindings.and_then(|b| suggest_bindings(&xr_instance, touch_profile, &b, &touch_test, "Touch")) {
         log::warn!("input: Touch controller bindings refused ({e}); Quest controllers go through the Index ones");
     }
     session.attach_action_sets(&[&action_set])?;
@@ -853,6 +976,25 @@ fn run() -> Result<()> {
     st.capture_max_fps = ov_cfg.capture_max_fps;
     st.capture_max_height = ov_cfg.capture_max_height;
     st.skybox_enabled = ov_cfg.skybox_enabled;
+    st.dim_game = ov_cfg.dim_game;
+    st.dim_strength = ov_cfg.dim_strength.clamp(0.1, 0.9);
+    st.models_controllers = ov_cfg.models_controllers;
+    st.models_trackers = ov_cfg.models_trackers;
+    st.models_hands = ov_cfg.models_hands;
+    st.models_base_stations = ov_cfg.models_base_stations;
+    st.models_grid = ov_cfg.models_grid;
+    st.boundary_walls = ov_cfg.boundary_walls;
+    st.boundary_trackers = ov_cfg.boundary_trackers;
+    st.boundary_floor = ov_cfg.boundary_floor;
+    st.boundary_reach = ov_cfg.boundary_reach.clamp(0.2, 1.0);
+    st.models_available = !scene::models::steamvr_roots().is_empty();
+    // Base stations come from SteamVR's calibration, which only places them in
+    // the frame devices are tracked in with SteamVR's own Lighthouse driver.
+    let deck_cfg = monadeck_core::config::MonadeckConfig::load();
+    st.models_stations_possible = deck_cfg.steamvr_lighthouse();
+    // WiVRn's headsets keep their own guardian. With SteamVR's Lighthouse
+    // driver the boundary is SteamVR's (its chaperone file), else Monadeck's.
+    st.boundary_possible = deck_cfg.backend != monadeck_core::config::Backend::Wivrn;
     st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
     st.skybox_custom_hint = sky::custom_path_hint();
     st.watch_zone_ids = ov_cfg.watch_timezones.clone();
@@ -1640,6 +1782,39 @@ fn run() -> Result<()> {
                 grips[hi] = locate_pose(grip_space, &space, time);
             }
         }
+        // Settings › Controller test: every input it shows, read while it's open.
+        if visible && st.nav == ui::Nav::Settings && st.settings_tab == ui::SettingsTab::Test {
+            for (hi, path) in [left_path, right_path].into_iter().enumerate() {
+                if !focused {
+                    st.test_hands[hi] = ui::TestHand::default();
+                    continue;
+                }
+                let on = |a: &xr::Action<bool>| a.state(&session, path).map(|s| s.is_active && s.current_state);
+                let r = &raw[hi];
+                st.test_hands[hi] = ui::TestHand {
+                    active: r.active,
+                    trigger: r.trigger,
+                    trigger_touch: on(&trigger_touch_action)?,
+                    trigger_click: on(&trigger_click_action)?,
+                    grip: squeeze_value_action.state(&session, path)?.current_state,
+                    // The grab action: the squeeze force on Index.
+                    grip_force: r.grip,
+                    stick: r.stick,
+                    stick_touch: on(&stick_touch_action)?,
+                    stick_click: r.stick_click,
+                    pad: r.pad,
+                    pad_touch: r.pad_touch,
+                    pad_force: r.pad_force,
+                    a: r.a,
+                    a_touch: on(&a_touch_action)?,
+                    b: r.b,
+                    b_touch: on(&b_touch_action)?,
+                    system: sys_raw[hi],
+                    system_touch: on(&system_touch_action)?,
+                    thumbrest: on(&thumbrest_action)?,
+                };
+            }
+        }
         let local_in_stage = stage_space.as_ref().and_then(|st| locate_pose(&space, st, time));
         desktop.set_local_in_stage(local_in_stage);
 
@@ -1658,6 +1833,7 @@ fn run() -> Result<()> {
             }
             let glove = [gloves.0, gloves.1];
             let tys = [0, 1].map(|hi| if glove[hi] { own::GLOVES } else { profile_ty[hi] });
+            st.test_types = tys;
             // What the Playspace page says drives it (for the controller the editor would open).
             let shown_ty = if gloves.0 || gloves.1 { own::GLOVES } else { tys[0] };
             if own_summary_for != Some((shown_ty, tys[1])) {
@@ -1903,6 +2079,209 @@ fn run() -> Result<()> {
         }
         let show_sky = st.skybox_enabled && running.is_none();
         let sky_layer = if show_sky { sky.as_ref().and_then(|s| s.layer(&space)) } else { None };
+        // SteamVR's dim: the game darkens behind the open dashboard, fading in
+        // and out. The texture is refilled only while the fade moves.
+        let dim_target = if visible && running.is_some() && st.dim_game { st.dim_strength.clamp(0.1, 0.9) } else { 0.0 };
+        let dim_step = dim_tick.elapsed().as_secs_f32().min(0.1) / DIM_FADE_SECS;
+        dim_tick = Instant::now();
+        dim_alpha += (dim_target - dim_alpha).clamp(-dim_step, dim_step);
+        if dim_alpha > 0.005 && (dim_alpha - dim_filled).abs() > 0.004 {
+            gfx::fill_solid(&mut dim_solid, &device, cmd, queue, fence, [0.0, 0.0, 0.0, dim_alpha])?;
+            dim_filled = dim_alpha;
+        }
+        let dim_q = (dim_alpha > 0.005).then(|| gfx::view_quad(&dim_solid, &view_space));
+
+        // --- The 3D layer: while the dashboard is open, and all the time while
+        // no game runs (SteamVR's empty room): controllers, hands, trackers,
+        // base stations; the floor grid only while no game runs.
+        let home = running.is_none();
+        let (mut world3d, mut hands3d) = (Vec::new(), Vec::new());
+        let stage = stage_space.as_ref().and_then(|s| locate_pose(s, &space, time));
+        // The room setup's frame (base stations, the boundary): STAGE through
+        // the playspace offset.
+        let room = stage.map(|s| pose_compose(&s, &monado.origin_offset().unwrap_or(xr::Posef::IDENTITY)));
+
+        // --- The boundary: kept in a file, drawn from Settings › Boundary.
+        let boundary_lh = st.models_stations_possible;
+        if st.boundary_possible && boundary_read.is_none_or(|t| t.elapsed().as_secs() >= 5) {
+            boundary_read = Some(Instant::now());
+            st.boundary_ready = monadeck_core::boundary::ready(boundary_lh);
+            let mut kept = monadeck_core::boundary::load_with_play_area(boundary_lh);
+            // Drawn before games got a play area: it still has SteamVR's quick-calibration one.
+            if boundary_lh && kept.as_ref().and_then(|(_, a)| *a).is_some_and(monadeck_core::boundary::is_quick_play_area) {
+                match monadeck_core::boundary::refresh_play_area() {
+                    Ok(()) => kept = monadeck_core::boundary::load_with_play_area(boundary_lh),
+                    Err(e) => log::warn!("boundary: couldn't write the play area ({e})"),
+                }
+            }
+            st.boundary_play = kept.as_ref().and_then(|(_, a)| *a).map(|a| a.map(|v| v as f32));
+            let loops = kept.map(|(b, _)| boundary::from_store(&b)).unwrap_or_default();
+            if loops != boundary_loops {
+                boundary_loops = loops;
+                st.boundary_info = (!boundary_loops.is_empty()).then(|| boundary::outline(&boundary_loops));
+                st.boundary_roomiest = None;
+                boundary_roomiest_rx = None;
+                if boundary_lh && !boundary_loops.is_empty() {
+                    let b = boundary::to_store(&boundary_loops);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(monadeck_core::boundary::roomiest(&b).map(|(_, size)| size));
+                    });
+                    boundary_roomiest_rx = Some(rx);
+                }
+            }
+        }
+        if let Some(Ok(size)) = boundary_roomiest_rx.as_ref().map(|rx| rx.try_recv()) {
+            st.boundary_roomiest = size.map(|a| a.map(|v| v as f32));
+            boundary_roomiest_rx = None;
+        }
+        if let Some(cmd) = st.boundary_request.take() {
+            use boundary::Cmd;
+            match (cmd, boundary_setup.as_mut()) {
+                (Cmd::Start, _) => boundary_setup = Some(boundary::Setup::default()),
+                (Cmd::Undo, Some(s)) => s.undo(),
+                (Cmd::Restart, Some(s)) => s.restart(),
+                (Cmd::Cancel, _) => boundary_setup = None,
+                (Cmd::Save, Some(s)) => match s.save(boundary_lh) {
+                    Ok(()) => {
+                        boundary_setup = None;
+                        boundary_read = None;
+                        st.flash("Boundary saved");
+                    }
+                    Err(e) => st.flash(e),
+                },
+                (Cmd::Centre, _) => match monadeck_core::boundary::centre_play_area() {
+                    Ok([w, d]) => {
+                        boundary_read = None;
+                        st.flash(format!("Play area centred · {w:.1} × {d:.1} m for games"));
+                    }
+                    Err(e) => st.flash(e),
+                },
+                (Cmd::Clear, _) => match monadeck_core::boundary::clear(boundary_lh) {
+                    Ok(()) => {
+                        boundary_read = None;
+                        st.flash("Boundary cleared");
+                    }
+                    Err(e) => st.flash(e),
+                },
+                _ => {}
+            }
+        }
+        st.boundary_setup = boundary_setup.as_ref().map(|s| (s.outline(), s.result().err()));
+        let boundary_drawing = boundary_setup.is_some() && st.nav == ui::Nav::Settings && st.settings_tab == ui::SettingsTab::Boundary;
+        let boundary_walls = st.boundary_possible && st.boundary_walls && !boundary_loops.is_empty();
+
+        // Trackers, re-listed as they come and go: for their models, and for
+        // bringing the boundary's walls up.
+        if (st.models_trackers && (visible || home)) || (boundary_walls && st.boundary_trackers) {
+            if let Some(list) = &xdev_list {
+                if xdev_checked.is_none_or(|t| t.elapsed().as_secs() >= 2) {
+                    xdev_checked = Some(Instant::now());
+                    let generation = list.get_generation().ok();
+                    if generation != xdev_generation {
+                        xdev_generation = generation;
+                        trackers3d = list
+                            .enumerate_xdevs()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|x| x.can_create_space())
+                            .filter_map(|x| Some((scene::tracker_model(x.name())?, x.create_space(xr::Posef::IDENTITY).ok()?)))
+                            .collect();
+                        log::info!("scene: {} tracker(s)", trackers3d.len());
+                    }
+                }
+            }
+        }
+        if scene.is_some() && (visible || home) {
+            let gloves = [st.gloves.0, st.gloves.1];
+            for hi in 0..2 {
+                // A held controller shows as itself; a hand without one as its
+                // skeleton: a glove, or (when the runtime can leave controllers'
+                // finger tracking out) a camera-tracked hand.
+                let holding = !gloves[hi] && raw[hi].active;
+                if !holding && (gloves[hi] || hand_sources) {
+                    if let (true, Some(trackers)) = (st.models_hands, &hand_trackers) {
+                        if let Ok(Some(joints)) = space.locate_hand_joints(&trackers[hi], time) {
+                            hands3d.push(scene::Item::Hand(Box::new(joints)));
+                        }
+                    }
+                } else if st.models_controllers && holding {
+                    if let (Some(grip), Some(name)) = (grips[hi], scene::controller_model(st.test_types[hi], hi == 1, &system_name)) {
+                        let r = &raw[hi];
+                        let buttons = scene::Buttons {
+                            trigger: r.trigger,
+                            a: r.a,
+                            b: r.b,
+                            system: sys_raw[hi],
+                            stick: r.stick,
+                            stick_click: r.stick_click,
+                        };
+                        hands3d.push(scene::Item::Controller { name, grip, buttons });
+                    }
+                }
+            }
+            if st.models_trackers {
+                for (model, sp) in &trackers3d {
+                    if let Some(pose) = locate_pose(sp, &space, time) {
+                        world3d.push(scene::Item::Model { name: model.to_string(), pose, buttons: None, alpha: 0.88 });
+                    }
+                }
+            }
+            if let (true, true, Some(in_space)) = (st.models_base_stations, st.models_stations_possible, room) {
+                if stations_read.is_none_or(|t| t.elapsed().as_secs() >= 10) {
+                    stations_read = Some(Instant::now());
+                    stations3d = monadeck_core::room_setup::base_stations();
+                }
+                for b in &stations3d {
+                    let local = scene::math::pose(b.position.map(|v| v as f32), b.orientation.map(|v| v as f32));
+                    world3d.push(scene::Item::Model { name: scene::BASE_STATION_MODEL.into(), pose: pose_compose(&in_space, &local), buttons: None, alpha: 0.85 });
+                }
+            }
+            if let (true, true, Some(stage)) = (st.models_grid, home, stage) {
+                let at = hmd.map(|h| pose_compose(&pose_invert(&stage), &h)).map(|h| [h.position.x, h.position.z]).unwrap_or([0.0; 2]);
+                world3d.insert(0, scene::Item::Grid { stage, at });
+            }
+        }
+        // The boundary goes last in the world: it's see-through.
+        if let (true, Some(room)) = (scene.is_some(), room) {
+            let view = boundary::View {
+                room,
+                head: hmd,
+                hands: [locate_pose(&aim_left, &space, time), locate_pose(&aim_right, &space, time)],
+                trackers: if st.boundary_trackers && boundary_walls { trackers3d.iter().filter_map(|(_, sp)| locate_pose(sp, &space, time)).collect() } else { Vec::new() },
+                reach: st.boundary_reach,
+                floor: visible || home || st.boundary_floor,
+            };
+            // While one's being drawn, it stands in for the kept one (which
+            // comes back as soon as the dashboard closes, drawn or not).
+            match &boundary_setup {
+                Some(s) if visible => world3d.extend(boundary::setup_items(s, &view)),
+                _ if boundary_walls => world3d.extend(boundary::walls(&boundary_loops, &view)),
+                _ => {}
+            }
+        }
+        let mut scene_failed = false;
+        if let Some(sc) = &mut scene {
+            // Only eyes the runtime has a pose for: before the headset is
+            // tracked (right as the service starts) it hands back a zero
+            // rotation, and a layer with one gets the whole frame refused.
+            let tracked = xr::ViewStateFlags::ORIENTATION_VALID | xr::ViewStateFlags::POSITION_VALID;
+            let views = match session.locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, time, &space) {
+                Ok((flags, v)) if !(world3d.is_empty() && hands3d.is_empty()) && flags.contains(tracked) => v,
+                _ => Vec::new(),
+            };
+            if let Err(e) = sc.render(&session, &device, cmd, queue, fence, &views, &world3d, &hands3d) {
+                log::error!("scene: {e:#}; the 3D layer is off until the overlay restarts");
+                scene_failed = true;
+            }
+        }
+        if scene_failed {
+            scene = None;
+        }
+        let world3d_views = scene.as_ref().and_then(|s| s.views(scene::Which::World));
+        let hands3d_views = scene.as_ref().and_then(|s| s.views(scene::Which::Hands));
+        let world3d_q = world3d_views.as_ref().map(|v| scene::projection_layer(&space, v));
+        let hands3d_q = hands3d_views.as_ref().map(|v| scene::projection_layer(&space, v));
 
         // Text-field focus → keyboard pop-up (debounced; starts the listener on demand).
         if st.keyboard_auto && a11y.is_none() {
@@ -2487,8 +2866,14 @@ fn run() -> Result<()> {
             let mini_q = mini_active.then(|| quad_layer(&mini_panel, &space, true));
             let (toast_q, popup_q);
             let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+            if let Some(q) = &dim_q {
+                layers.push(q);
+            }
             if let Some(s) = &sky_layer {
                 layers.push(s);
+            }
+            if let Some(q) = &world3d_q {
+                layers.push(q);
             }
             // The launch popup sits beneath everything of ours: screens, the
             // keyboard, photos and the watch all cover it.
@@ -2513,6 +2898,9 @@ fn run() -> Result<()> {
             }
             let photo_qs = photos.layers(&space);
             for q in &photo_qs {
+                layers.push(q);
+            }
+            if let Some(q) = &hands3d_q {
                 layers.push(q);
             }
             if toast_active {
@@ -2594,6 +2982,8 @@ fn run() -> Result<()> {
         let mut best: Option<Hit> = None;
         let mut scroll = (0.0f32, 0.0f32);
         let mut dash_zone = false;
+        // Per hand: its ray is on the dashboard (not free to draw a boundary).
+        let mut on_dash = [false; 2];
         if focused {
             // Continue an in-progress grab — moves the whole layout anchor.
             if let Some((hand_i, offset)) = grab {
@@ -2640,6 +3030,7 @@ fn run() -> Result<()> {
                         raycast(&p, &main_panel.pose, (zone_w, zone_h)).is_some()
                     };
                     dash_zone |= in_zone;
+                    on_dash[idx] = pointing || in_zone;
                     // Grip while pointing at any panel grabs the whole layout.
                     let grip = grab_action.state(&session, path)?.current_state;
                     if grip > GRAB_START && pointing {
@@ -2694,6 +3085,35 @@ fn run() -> Result<()> {
             best = None;
             scroll = (0.0, 0.0);
         }
+        // Drawing a boundary: the trigger, off the dashboard and the screens,
+        // drops corners (a click) and traces (held down).
+        if let (true, Some(setup), Some(room)) = (boundary_drawing && focused, boundary_setup.as_mut(), room) {
+            let busy = grab.is_some() || desktop.pointing() || p_in.ray.is_some() || watch_busy;
+            let mut closed = false;
+            for (hi, (aim, path)) in [(&aim_left, left_path), (&aim_right, right_path)].into_iter().enumerate() {
+                let down = select_action.state(&session, path)?.current_state > 0.5;
+                let at = locate_pose(aim, &space, time).filter(|_| !busy && !on_dash[hi]).map(|p| {
+                    let q = pose_compose(&pose_invert(&room), &p);
+                    [q.position.x, q.position.z]
+                });
+                match setup.feed(hi, down, at) {
+                    Some(boundary::Event::Pressed) => pulse(&session, &haptic_action, path, 0.3, 12),
+                    Some(boundary::Event::Corner | boundary::Event::Traced) => audio.tab(),
+                    Some(boundary::Event::Closed) => closed = true,
+                    None => {}
+                }
+            }
+            if closed {
+                match setup.save(st.models_stations_possible) {
+                    Ok(()) => {
+                        boundary_setup = None;
+                        boundary_read = None;
+                        st.flash("Boundary saved");
+                    }
+                    Err(e) => st.flash(e),
+                }
+            }
+        }
         let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
         // Typing feedback: the click sound, a tick on the hand that pressed, and a
         // lighter one as the pointer slides onto another key.
@@ -2735,8 +3155,9 @@ fn run() -> Result<()> {
         let bottom_ptr = best.filter(|h| h.panel == PanelId::Bottom).map(|h| (h.u, h.v, h.down));
         let laser_ray = best.map(|h| (h.aim, h.t)).or(d_ray);
 
-        // Block the game's controller input while pointing at the dashboard.
-        let want_block = best.is_some() || desktop.pointing() || p_in.ray.is_some() || game.enabled;
+        // Block the game's controller input while pointing at the dashboard
+        // (or drawing a boundary: the trigger is ours).
+        let want_block = best.is_some() || desktop.pointing() || p_in.ray.is_some() || game.enabled || boundary_drawing;
         if want_block != blocked_prev {
             monado.set_block(want_block);
             blocked_prev = want_block;
@@ -2867,8 +3288,16 @@ fn run() -> Result<()> {
         let (screen_quads, screen_cyls) = desktop.screen_layers(&space);
         let popup_q;
         let mut layers: Vec<&xr::CompositionLayerBase<xr::Vulkan>> = Vec::new();
+        // Under everything of ours: only the game darkens.
+        if let Some(q) = &dim_q {
+            layers.push(q);
+        }
         if let Some(s) = &sky_layer {
             layers.push(s);
+        }
+        // The world's models sit beneath every panel; the hands above them.
+        if let Some(q) = &world3d_q {
+            layers.push(q);
         }
         // Beneath the dashboard and the screens (see the hidden path).
         if popup_active {
@@ -2909,6 +3338,9 @@ fn run() -> Result<()> {
             layers.push(&main_quad);
             layers.push(&rail_quad);
             layers.push(&bottom_quad);
+        }
+        if let Some(q) = &hands3d_q {
+            layers.push(q);
         }
         let toast_q;
         if toast_active {
@@ -3230,6 +3662,20 @@ fn screen_laser_alpha(screen: Option<usize>, since: &mut Option<(usize, Instant)
     }
 }
 
+/// Suggest a profile's bindings together with the Controller test's `extra`
+/// ones; if the runtime refuses them together, the base ones alone (the test
+/// page then shows less, and nothing else changes).
+fn suggest_bindings(instance: &xr::Instance, profile: xr::Path, base: &[xr::Binding], extra: &[xr::Binding], name: &str) -> xr::Result<()> {
+    if !extra.is_empty() {
+        let all: Vec<xr::Binding> = base.iter().chain(extra).copied().collect();
+        match instance.suggest_interaction_profile_bindings(profile, &all) {
+            Ok(()) => return Ok(()),
+            Err(e) => log::warn!("input: {name} test bindings refused ({e}); the Controller test shows less"),
+        }
+    }
+    instance.suggest_interaction_profile_bindings(profile, base)
+}
+
 /// Render the VR keyboard onto its panel (when visible) and build its layer.
 #[allow(clippy::too_many_arguments)]
 fn render_keyboard<'a>(
@@ -3419,6 +3865,17 @@ fn overlay_config_from(
         capture_max_fps: st.capture_max_fps,
         capture_max_height: st.capture_max_height,
         skybox_enabled: st.skybox_enabled,
+        dim_game: st.dim_game,
+        dim_strength: st.dim_strength,
+        models_controllers: st.models_controllers,
+        models_trackers: st.models_trackers,
+        models_hands: st.models_hands,
+        models_base_stations: st.models_base_stations,
+        models_grid: st.models_grid,
+        boundary_walls: st.boundary_walls,
+        boundary_trackers: st.boundary_trackers,
+        boundary_floor: st.boundary_floor,
+        boundary_reach: st.boundary_reach,
         skybox_path: skybox_path.clone(),
         qr_detect: st.photo_qr_detect,
         qr_autodelete: st.photo_qr_autodelete,
