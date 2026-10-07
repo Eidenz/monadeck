@@ -10,6 +10,7 @@
 mod a11y;
 mod audio;
 mod bindings;
+mod boundary;
 mod desktop;
 mod gamemode;
 mod gamepad;
@@ -544,6 +545,11 @@ fn run() -> Result<()> {
     // Base stations from SteamVR's files (re-read now and then).
     let mut stations3d: Vec<monadeck_core::room_setup::BaseStation> = Vec::new();
     let mut stations_read: Option<Instant> = None;
+    // The boundary (Settings › Boundary): the one kept (re-read now and then),
+    // and one being drawn.
+    let mut boundary_loops: Vec<Vec<boundary::P2>> = Vec::new();
+    let mut boundary_read: Option<Instant> = None;
+    let mut boundary_setup: Option<boundary::Setup> = None;
 
     // Panel sizes (metres). Heights are derived from the texture aspect so the
     // cylinder hit-test matches what's rendered. Tune these for feel.
@@ -974,10 +980,18 @@ fn run() -> Result<()> {
     st.models_hands = ov_cfg.models_hands;
     st.models_base_stations = ov_cfg.models_base_stations;
     st.models_grid = ov_cfg.models_grid;
+    st.boundary_walls = ov_cfg.boundary_walls;
+    st.boundary_trackers = ov_cfg.boundary_trackers;
+    st.boundary_floor = ov_cfg.boundary_floor;
+    st.boundary_reach = ov_cfg.boundary_reach.clamp(0.2, 1.0);
     st.models_available = !scene::models::steamvr_roots().is_empty();
     // Base stations come from SteamVR's calibration, which only places them in
     // the frame devices are tracked in with SteamVR's own Lighthouse driver.
-    st.models_stations_possible = monadeck_core::config::MonadeckConfig::load().steamvr_lighthouse();
+    let deck_cfg = monadeck_core::config::MonadeckConfig::load();
+    st.models_stations_possible = deck_cfg.steamvr_lighthouse();
+    // WiVRn's headsets keep their own guardian. With SteamVR's Lighthouse
+    // driver the boundary is SteamVR's (its chaperone file), else Monadeck's.
+    st.boundary_possible = deck_cfg.backend != monadeck_core::config::Backend::Wivrn;
     st.skybox_source = sky.as_ref().map(|s| s.source.clone()).unwrap_or_else(|| "unsupported by runtime".into());
     st.skybox_custom_hint = sky::custom_path_hint();
     st.watch_zone_ids = ov_cfg.watch_timezones.clone();
@@ -2079,8 +2093,70 @@ fn run() -> Result<()> {
         // base stations; the floor grid only while no game runs.
         let home = running.is_none();
         let (mut world3d, mut hands3d) = (Vec::new(), Vec::new());
+        let stage = stage_space.as_ref().and_then(|s| locate_pose(s, &space, time));
+        // The room setup's frame (base stations, the boundary): STAGE through
+        // the playspace offset.
+        let room = stage.map(|s| pose_compose(&s, &monado.origin_offset().unwrap_or(xr::Posef::IDENTITY)));
+
+        // --- The boundary: kept in a file, drawn from Settings › Boundary.
+        let boundary_lh = st.models_stations_possible;
+        if st.boundary_possible && boundary_read.is_none_or(|t| t.elapsed().as_secs() >= 5) {
+            boundary_read = Some(Instant::now());
+            st.boundary_ready = monadeck_core::boundary::ready(boundary_lh);
+            boundary_loops = monadeck_core::boundary::load(boundary_lh).map(|b| boundary::from_store(&b)).unwrap_or_default();
+            st.boundary_info = (!boundary_loops.is_empty()).then(|| boundary::outline(&boundary_loops));
+        }
+        if let Some(cmd) = st.boundary_request.take() {
+            use boundary::Cmd;
+            match (cmd, boundary_setup.as_mut()) {
+                (Cmd::Start, _) => boundary_setup = Some(boundary::Setup::default()),
+                (Cmd::Undo, Some(s)) => s.undo(),
+                (Cmd::Restart, Some(s)) => s.restart(),
+                (Cmd::Cancel, _) => boundary_setup = None,
+                (Cmd::Save, Some(s)) => match s.save(boundary_lh) {
+                    Ok(()) => {
+                        boundary_setup = None;
+                        boundary_read = None;
+                        st.flash("Boundary saved");
+                    }
+                    Err(e) => st.flash(e),
+                },
+                (Cmd::Clear, _) => match monadeck_core::boundary::clear(boundary_lh) {
+                    Ok(()) => {
+                        boundary_read = None;
+                        st.flash("Boundary cleared");
+                    }
+                    Err(e) => st.flash(e),
+                },
+                _ => {}
+            }
+        }
+        st.boundary_setup = boundary_setup.as_ref().map(|s| (s.outline(), s.result().err()));
+        let boundary_drawing = boundary_setup.is_some() && st.nav == ui::Nav::Settings && st.settings_tab == ui::SettingsTab::Boundary;
+        let boundary_walls = st.boundary_possible && st.boundary_walls && !boundary_loops.is_empty();
+
+        // Trackers, re-listed as they come and go: for their models, and for
+        // bringing the boundary's walls up.
+        if (st.models_trackers && (visible || home)) || (boundary_walls && st.boundary_trackers) {
+            if let Some(list) = &xdev_list {
+                if xdev_checked.is_none_or(|t| t.elapsed().as_secs() >= 2) {
+                    xdev_checked = Some(Instant::now());
+                    let generation = list.get_generation().ok();
+                    if generation != xdev_generation {
+                        xdev_generation = generation;
+                        trackers3d = list
+                            .enumerate_xdevs()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|x| x.can_create_space())
+                            .filter_map(|x| Some((scene::tracker_model(x.name())?, x.create_space(xr::Posef::IDENTITY).ok()?)))
+                            .collect();
+                        log::info!("scene: {} tracker(s)", trackers3d.len());
+                    }
+                }
+            }
+        }
         if scene.is_some() && (visible || home) {
-            let stage = stage_space.as_ref().and_then(|s| locate_pose(s, &space, time));
             let gloves = [st.gloves.0, st.gloves.1];
             for hi in 0..2 {
                 // A held controller shows as itself; a hand without one as its
@@ -2109,37 +2185,17 @@ fn run() -> Result<()> {
                 }
             }
             if st.models_trackers {
-                if let Some(list) = &xdev_list {
-                    // The device list changes as trackers come and go.
-                    if xdev_checked.is_none_or(|t| t.elapsed().as_secs() >= 2) {
-                        xdev_checked = Some(Instant::now());
-                        let generation = list.get_generation().ok();
-                        if generation != xdev_generation {
-                            xdev_generation = generation;
-                            trackers3d = list
-                                .enumerate_xdevs()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .filter(|x| x.can_create_space())
-                                .filter_map(|x| Some((scene::tracker_model(x.name())?, x.create_space(xr::Posef::IDENTITY).ok()?)))
-                                .collect();
-                            log::info!("scene: {} tracker(s)", trackers3d.len());
-                        }
-                    }
-                }
                 for (model, sp) in &trackers3d {
                     if let Some(pose) = locate_pose(sp, &space, time) {
                         world3d.push(scene::Item::Model { name: model.to_string(), pose, buttons: None, alpha: 0.88 });
                     }
                 }
             }
-            if let (true, true, Some(stage)) = (st.models_base_stations, st.models_stations_possible, stage) {
+            if let (true, true, Some(in_space)) = (st.models_base_stations, st.models_stations_possible, room) {
                 if stations_read.is_none_or(|t| t.elapsed().as_secs() >= 10) {
                     stations_read = Some(Instant::now());
                     stations3d = monadeck_core::room_setup::base_stations();
                 }
-                // Room setup → STAGE goes through the playspace offset.
-                let in_space = pose_compose(&stage, &monado.origin_offset().unwrap_or(xr::Posef::IDENTITY));
                 for b in &stations3d {
                     let local = scene::math::pose(b.position.map(|v| v as f32), b.orientation.map(|v| v as f32));
                     world3d.push(scene::Item::Model { name: scene::BASE_STATION_MODEL.into(), pose: pose_compose(&in_space, &local), buttons: None, alpha: 0.85 });
@@ -2148,6 +2204,24 @@ fn run() -> Result<()> {
             if let (true, true, Some(stage)) = (st.models_grid, home, stage) {
                 let at = hmd.map(|h| pose_compose(&pose_invert(&stage), &h)).map(|h| [h.position.x, h.position.z]).unwrap_or([0.0; 2]);
                 world3d.insert(0, scene::Item::Grid { stage, at });
+            }
+        }
+        // The boundary goes last in the world: it's see-through.
+        if let (true, Some(room)) = (scene.is_some(), room) {
+            let view = boundary::View {
+                room,
+                head: hmd,
+                hands: [locate_pose(&aim_left, &space, time), locate_pose(&aim_right, &space, time)],
+                trackers: if st.boundary_trackers && boundary_walls { trackers3d.iter().filter_map(|(_, sp)| locate_pose(sp, &space, time)).collect() } else { Vec::new() },
+                reach: st.boundary_reach,
+                floor: visible || home || st.boundary_floor,
+            };
+            // While one's being drawn, it stands in for the kept one (which
+            // comes back as soon as the dashboard closes, drawn or not).
+            match &boundary_setup {
+                Some(s) if visible => world3d.extend(boundary::setup_items(s, &view)),
+                _ if boundary_walls => world3d.extend(boundary::walls(&boundary_loops, &view)),
+                _ => {}
             }
         }
         let mut scene_failed = false;
@@ -2872,6 +2946,8 @@ fn run() -> Result<()> {
         let mut best: Option<Hit> = None;
         let mut scroll = (0.0f32, 0.0f32);
         let mut dash_zone = false;
+        // Per hand: its ray is on the dashboard (not free to draw a boundary).
+        let mut on_dash = [false; 2];
         if focused {
             // Continue an in-progress grab — moves the whole layout anchor.
             if let Some((hand_i, offset)) = grab {
@@ -2918,6 +2994,7 @@ fn run() -> Result<()> {
                         raycast(&p, &main_panel.pose, (zone_w, zone_h)).is_some()
                     };
                     dash_zone |= in_zone;
+                    on_dash[idx] = pointing || in_zone;
                     // Grip while pointing at any panel grabs the whole layout.
                     let grip = grab_action.state(&session, path)?.current_state;
                     if grip > GRAB_START && pointing {
@@ -2972,6 +3049,35 @@ fn run() -> Result<()> {
             best = None;
             scroll = (0.0, 0.0);
         }
+        // Drawing a boundary: the trigger, off the dashboard and the screens,
+        // drops corners (a click) and traces (held down).
+        if let (true, Some(setup), Some(room)) = (boundary_drawing && focused, boundary_setup.as_mut(), room) {
+            let busy = grab.is_some() || desktop.pointing() || p_in.ray.is_some() || watch_busy;
+            let mut closed = false;
+            for (hi, (aim, path)) in [(&aim_left, left_path), (&aim_right, right_path)].into_iter().enumerate() {
+                let down = select_action.state(&session, path)?.current_state > 0.5;
+                let at = locate_pose(aim, &space, time).filter(|_| !busy && !on_dash[hi]).map(|p| {
+                    let q = pose_compose(&pose_invert(&room), &p);
+                    [q.position.x, q.position.z]
+                });
+                match setup.feed(hi, down, at) {
+                    Some(boundary::Event::Pressed) => pulse(&session, &haptic_action, path, 0.3, 12),
+                    Some(boundary::Event::Corner | boundary::Event::Traced) => audio.tab(),
+                    Some(boundary::Event::Closed) => closed = true,
+                    None => {}
+                }
+            }
+            if closed {
+                match setup.save(st.models_stations_possible) {
+                    Ok(()) => {
+                        boundary_setup = None;
+                        boundary_read = None;
+                        st.flash("Boundary saved");
+                    }
+                    Err(e) => st.flash(e),
+                }
+            }
+        }
         let kb_q = render_keyboard(&mut desktop, &mut kb_panel, d_in.keyboard_ptr, &device, render_pass, cmd, cmd_pool, queue, fence, start.elapsed().as_secs_f64(), &space)?;
         // Typing feedback: the click sound, a tick on the hand that pressed, and a
         // lighter one as the pointer slides onto another key.
@@ -3013,8 +3119,9 @@ fn run() -> Result<()> {
         let bottom_ptr = best.filter(|h| h.panel == PanelId::Bottom).map(|h| (h.u, h.v, h.down));
         let laser_ray = best.map(|h| (h.aim, h.t)).or(d_ray);
 
-        // Block the game's controller input while pointing at the dashboard.
-        let want_block = best.is_some() || desktop.pointing() || p_in.ray.is_some() || game.enabled;
+        // Block the game's controller input while pointing at the dashboard
+        // (or drawing a boundary: the trigger is ours).
+        let want_block = best.is_some() || desktop.pointing() || p_in.ray.is_some() || game.enabled || boundary_drawing;
         if want_block != blocked_prev {
             monado.set_block(want_block);
             blocked_prev = want_block;
@@ -3729,6 +3836,10 @@ fn overlay_config_from(
         models_hands: st.models_hands,
         models_base_stations: st.models_base_stations,
         models_grid: st.models_grid,
+        boundary_walls: st.boundary_walls,
+        boundary_trackers: st.boundary_trackers,
+        boundary_floor: st.boundary_floor,
+        boundary_reach: st.boundary_reach,
         skybox_path: skybox_path.clone(),
         qr_detect: st.photo_qr_detect,
         qr_autodelete: st.photo_qr_autodelete,

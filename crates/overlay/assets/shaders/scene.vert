@@ -1,5 +1,6 @@
 #version 450
-// The 3D layer's one vertex shader: models, glove hands and the floor grid.
+// The 3D layer's one vertex shader: models, glove hands, the floor grid and
+// the boundary.
 // See src/scene/gpu.rs for the push constants' layout.
 
 layout(location = 0) in vec3 in_pos;
@@ -12,7 +13,8 @@ layout(push_constant) uniform Push {
     vec4 n0;
     vec4 n1;
     vec4 n2;
-    // x: opacity, y: mode (0 textured, 1 tint, 2 grid), zw: grid centre.
+    // x: opacity, y: mode (0 textured, 1 tint, 2 grid, 3 wall, 4 floor
+    // line), zw: grid centre (walls: z is their height).
     vec4 params;
 } pc;
 
@@ -21,6 +23,7 @@ layout(location = 1) out vec2 v_uv;
 
 void main() {
     gl_Position = pc.mvp * vec4(in_pos, 1.0);
-    v_nrm = vec3(dot(pc.n0.xyz, in_nrm), dot(pc.n1.xyz, in_nrm), dot(pc.n2.xyz, in_nrm));
+    // Walls and floor lines carry how strongly they show in the normal's x.
+    v_nrm = pc.params.y > 2.5 ? in_nrm : vec3(dot(pc.n0.xyz, in_nrm), dot(pc.n1.xyz, in_nrm), dot(pc.n2.xyz, in_nrm));
     v_uv = in_uv;
 }

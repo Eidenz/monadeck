@@ -182,24 +182,63 @@ fn with_standing(chap: Option<Value>, universe: &str, standing: Standing, time: 
         None => {
             // The same 3 × 2 m area SteamVR's quick calibration leaves behind.
             universes.push(json!({
-                "collision_bounds": [
-                    [[1.5, 0, 1], [1.5, 5, 1], [1.5, 5, -1], [1.5, 0, -1]],
-                    [[1.5, 0, -1], [1.5, 5, -1], [-1.5, 5, -1], [-1.5, 0, -1]],
-                    [[-1.5, 0, -1], [-1.5, 5, -1], [-1.5, 5, 1], [-1.5, 0, 1]],
-                    [[-1.5, 0, 1], [-1.5, 5, 1], [1.5, 5, 1], [1.5, 0, 1]]
-                ],
+                "collision_bounds": crate::boundary::placeholder(),
                 "play_area": [3, 2],
                 "universeID": universe,
             }));
             universes.last_mut().expect("just pushed")
         }
     };
+    // A drawn boundary stays where it stands in the room.
+    let before = standing_of(entry);
+    if entry.get("standing").is_some() && entry["collision_bounds"] != crate::boundary::placeholder() {
+        let moved = moved_bounds(&entry["collision_bounds"], before, standing);
+        entry["collision_bounds"] = moved;
+    }
     if let Value::Object(m) = entry {
         m.insert("standing".into(), pose.clone());
         m.insert("seated".into(), pose);
         m.insert("time".into(), Value::String(time.to_string()));
     }
     root
+}
+
+/// The universe Monado uses and its entry in the chaperone file.
+pub(crate) fn current_entry() -> Option<(String, Value)> {
+    let root = steam_root();
+    let universes = known_universes(&read_json(&db_path(&root))?);
+    let chap = read_json(&chap_path(&root))?;
+    let (id, _) = effective(&universes, Some(&chap))?;
+    let entry = chap["universes"].as_array()?.iter().find(|e| id_string(&e["universeID"]).as_deref() == Some(id.as_str()))?.clone();
+    Some((id, entry))
+}
+
+/// Write the walls of the universe Monado uses (SteamVR's `collision_bounds`).
+pub(crate) fn set_collision_bounds(bounds: Value) -> Result<(), String> {
+    let root = steam_root();
+    let universes = read_json(&db_path(&root)).map(|db| known_universes(&db)).unwrap_or_default();
+    let mut chap = read_json(&chap_path(&root)).ok_or("There's no room setup yet.")?;
+    let (id, _) = effective(&universes, Some(&chap)).ok_or("There's no room setup yet.")?;
+    let entry = chap["universes"]
+        .as_array_mut()
+        .and_then(|a| a.iter_mut().find(|e| id_string(&e["universeID"]).as_deref() == Some(id.as_str())))
+        .ok_or("There's no room setup yet.")?;
+    entry["collision_bounds"] = bounds;
+    let text = serde_json::to_string_pretty(&chap).map_err(|e| e.to_string())?;
+    write_atomic(&chap_path(&root), &text)
+}
+
+/// Walls written for one room setup, redrawn for another so they stay where
+/// they stand in the room (heights are kept: they're from the floor).
+fn moved_bounds(bounds: &Value, from: Standing, to: Standing) -> Value {
+    let mut out = bounds.clone();
+    for p in out.as_array_mut().into_iter().flatten().flat_map(|q| q.as_array_mut().into_iter().flatten()) {
+        let Some(v) = p.as_array().map(|a| a.iter().filter_map(Value::as_f64).collect::<Vec<_>>()).filter(|v| v.len() == 3) else { continue };
+        let (raw, _) = unapply(from, [v[0], v[1], v[2]], [0.0, 0.0, 0.0, 1.0]);
+        let (now, _) = apply(to, raw, [0.0, 0.0, 0.0, 1.0]);
+        *p = json!([now[0], v[1], now[2]]);
+    }
+    out
 }
 
 /// Replace `path` in one step (temp file + rename), so monado never reads a
@@ -267,6 +306,13 @@ fn room_transform(s: Standing) -> (Quat, Vec3) {
     let half = s.yaw / 2.0;
     let q = [0.0, -half.sin(), 0.0, half.cos()];
     (q, rotate(q, s.translation))
+}
+
+/// Monado's update_pose: a room setup applied to a raw pose.
+fn apply(s: Standing, position: Vec3, orientation: Quat) -> (Vec3, Quat) {
+    let (q, p) = room_transform(s);
+    let r = rotate(q, position);
+    ([r[0] + p[0], r[1] + p[1], r[2] + p[2]], mul(q, orientation))
 }
 
 /// Undo a room setup: the raw tracking-universe pose behind a reported one.
@@ -517,13 +563,6 @@ fn base_stations_from(db: &Value, chap: Option<&Value>) -> Vec<BaseStation> {
 mod tests {
     use super::*;
 
-    /// Monado's update_pose: room transform applied to a raw pose.
-    fn apply(s: Standing, position: Vec3, orientation: Quat) -> (Vec3, Quat) {
-        let (q, p) = room_transform(s);
-        let r = rotate(q, position);
-        ([r[0] + p[0], r[1] + p[1], r[2] + p[2]], mul(q, orientation))
-    }
-
     fn yaw_quat(angle: f64) -> Quat {
         [0.0, (angle / 2.0).sin(), 0.0, (angle / 2.0).cos()]
     }
@@ -597,7 +636,7 @@ mod tests {
         let chap = json!({
             "jsonid": "chaperone_info", "version": 5,
             "universes": [
-                { "universeID": "1", "play_area": [3, 2], "collision_bounds": [[[0, 0, 0]]],
+                { "universeID": "1", "play_area": [3, 2], "collision_bounds": crate::boundary::placeholder(),
                   "standing": { "translation": [0, 0, 0], "yaw": 0 }, "time": "old" },
                 { "universeID": "2", "standing": { "translation": [9, 9, 9], "yaw": 9 } }
             ]
@@ -608,7 +647,7 @@ mod tests {
         assert_eq!(u["standing"]["translation"], json!([1.0, 2.0, 3.0]));
         assert_eq!(u["seated"], u["standing"]);
         assert_eq!(u["play_area"], json!([3, 2]));
-        assert_eq!(u["collision_bounds"], json!([[[0, 0, 0]]]));
+        assert_eq!(u["collision_bounds"], crate::boundary::placeholder());
         assert_eq!(u["time"], "now");
         assert_eq!(out["universes"][1]["standing"]["yaw"], 9);
         assert_eq!(out["version"], 5);
@@ -627,6 +666,33 @@ mod tests {
         let (id, back) = effective(&["77".to_string()], Some(&out)).unwrap();
         assert_eq!(id, "77");
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_new_room_setup_keeps_the_walls_in_the_room() {
+        let old = Standing { translation: [0.4, 2.1, -1.0], yaw: 0.3 };
+        let new = Standing { translation: [-0.6, 2.05, 0.2], yaw: -1.2 };
+        let wall = json!([[[1.0, 0.0, 2.0], [1.0, 2.4, 2.0], [-1.0, 2.4, 2.0], [-1.0, 0.0, 2.0]]]);
+        let chap = json!({ "universes": [{ "universeID": "1", "collision_bounds": wall,
+            "standing": { "translation": old.translation, "yaw": old.yaw } }] });
+        let out = with_standing(Some(chap), "1", new, "t");
+        let moved = &out["universes"][0]["collision_bounds"][0];
+        for (i, p) in wall[0].as_array().unwrap().iter().enumerate() {
+            let at = |v: &Value, k: usize| v[k].as_f64().unwrap();
+            // The same raw (room) spot under either setup.
+            let (raw_old, _) = unapply(old, [at(p, 0), 0.0, at(p, 2)], [0.0, 0.0, 0.0, 1.0]);
+            let (raw_new, _) = unapply(new, [at(&moved[i], 0), 0.0, at(&moved[i], 2)], [0.0, 0.0, 0.0, 1.0]);
+            assert!(close_mm(raw_old[0], raw_new[0]) && close_mm(raw_old[2], raw_new[2]), "{raw_old:?} {raw_new:?}");
+            assert_eq!(at(&moved[i], 1), at(p, 1));
+        }
+        // SteamVR's quick-calibration box isn't anyone's room: it stays centred.
+        let chap = with_standing(None, "2", old, "t");
+        let out = with_standing(Some(chap), "2", new, "t");
+        assert_eq!(out["universes"][0]["collision_bounds"], crate::boundary::placeholder());
+    }
+
+    fn close_mm(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
     }
 
     #[test]

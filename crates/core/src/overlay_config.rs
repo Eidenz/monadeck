@@ -134,6 +134,14 @@ pub struct OverlayConfig {
     pub models_base_stations: bool,
     /// The floor grid, while no game runs.
     pub models_grid: bool,
+    /// The boundary's walls fade in as you near them (when one is drawn).
+    pub boundary_walls: bool,
+    /// Trackers (feet, waist) bring the walls up too, not only the headset and hands.
+    pub boundary_trackers: bool,
+    /// The boundary's outline stays on the floor in games.
+    pub boundary_floor: bool,
+    /// How close (metres) to a wall before it shows.
+    pub boundary_reach: f32,
     // Screenshots (from monado-frame).
     pub qr_detect: bool,
     pub qr_autodelete: bool,
@@ -243,6 +251,10 @@ impl Default for OverlayConfig {
             models_hands: true,
             models_base_stations: true,
             models_grid: true,
+            boundary_walls: true,
+            boundary_trackers: true,
+            boundary_floor: false,
+            boundary_reach: 0.4,
             qr_detect: false,
             qr_autodelete: false,
             skip_wrist_photo: false,

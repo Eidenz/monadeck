@@ -10,6 +10,7 @@
 //! - [`setcap`] — set/verify `CAP_SYS_NICE=eip` on the service binary.
 //! - [`preflight`] — runtime prerequisite checks (udev rules, pkexec) for other boxes.
 //! - [`room_setup`] — floor/centre/forward for steamvr_lh, written without SteamVR.
+//! - [`boundary`] — the play area's walls, in SteamVR's chaperone file or our own.
 //! - [`floor_calibration`] — the same through SteamVR's `vrcmd` (stock Monado fallback).
 //! - [`pairing`] — pair controllers/trackers to their USB receivers.
 //! - [`basestations`] — base station power + channel over Bluetooth.
@@ -25,6 +26,7 @@ pub mod active_runtime;
 pub mod audio_devices;
 pub mod basestations;
 pub mod bindings;
+pub mod boundary;
 pub mod cmd_runner;
 pub mod collections;
 pub mod config;

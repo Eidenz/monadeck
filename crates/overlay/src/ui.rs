@@ -161,6 +161,20 @@ pub struct LibState {
     pub models_available: bool,
     /// Base stations can be placed: SteamVR's Lighthouse driver tracks.
     pub models_stations_possible: bool,
+    /// Settings › Boundary: when the walls show.
+    pub boundary_walls: bool,
+    pub boundary_trackers: bool,
+    pub boundary_floor: bool,
+    pub boundary_reach: f32,
+    /// A boundary can be drawn here (not on WiVRn: the headset has its own).
+    pub boundary_possible: bool,
+    /// There's a room setup to draw it in (SteamVR's Lighthouse driver needs one).
+    pub boundary_ready: bool,
+    /// The boundary in effect.
+    pub boundary_info: Option<crate::boundary::Outline>,
+    /// Drawing one: what's down so far, and why it can't be saved yet.
+    pub boundary_setup: Option<(crate::boundary::Outline, Option<&'static str>)>,
+    pub boundary_request: Option<crate::boundary::Cmd>,
     /// Settings › Controller test: each hand as read this frame (only while
     /// the page is open), and its controller type (the bindings' ids).
     pub test_hands: [TestHand; 2],
@@ -473,6 +487,15 @@ impl LibState {
             models_grid: true,
             models_available: true,
             models_stations_possible: true,
+            boundary_walls: true,
+            boundary_trackers: true,
+            boundary_floor: false,
+            boundary_reach: 0.4,
+            boundary_possible: true,
+            boundary_ready: true,
+            boundary_info: None,
+            boundary_setup: None,
+            boundary_request: None,
             test_hands: [TestHand::default(); 2],
             test_types: ["knuckles"; 2],
             wrist_shot: None,

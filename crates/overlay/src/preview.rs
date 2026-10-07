@@ -713,6 +713,24 @@ fn pages(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir:
             st.settings_tab = tab;
         })));
     }
+    // The boundary: kept, being drawn (an outline that crosses itself), and
+    // before any room setup.
+    shots.push(("page-settings-boundary-kept".into(), Box::new(|st| {
+        st.nav = Nav::Settings;
+        st.settings_tab = SettingsTab::Boundary;
+        st.boundary_info = Some(crate::boundary::Outline { corners: 6, length: 13.4, area: 10.8 });
+    })));
+    shots.push(("page-settings-boundary-drawing".into(), Box::new(|st| {
+        st.nav = Nav::Settings;
+        st.settings_tab = SettingsTab::Boundary;
+        let o = crate::boundary::Outline { corners: 5, length: 8.2, area: 3.1 };
+        st.boundary_setup = Some((o, Some("The outline crosses itself · undo back past the crossing")));
+    })));
+    shots.push(("page-settings-boundary-noroom".into(), Box::new(|st| {
+        st.nav = Nav::Settings;
+        st.settings_tab = SettingsTab::Boundary;
+        st.boundary_ready = false;
+    })));
     // The Controller test with Touch controllers (the right one switched off),
     // and with UdCap gloves.
     shots.push(("page-settings-test-touch".into(), Box::new(|st| {

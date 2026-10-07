@@ -1,7 +1,8 @@
 //! The 3D layer's Vulkan side: one pipeline (premultiplied alpha, depth
-//! tested, back faces culled), meshes in host-visible buffers, sRGB
-//! textures, and render targets over swapchain images (one array layer per
-//! eye) or an offscreen image (the self-test).
+//! tested, back faces culled) and its see-through twin for the boundary
+//! (tested, not written: a wall never hides what's behind it), meshes in
+//! host-visible buffers, sRGB textures, and render targets over swapchain
+//! images (one array layer per eye) or an offscreen image (the self-test).
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -33,13 +34,25 @@ pub enum Mode {
     Textured = 0,
     Tint = 1,
     Grid = 2,
+    /// The boundary's walls (see-through).
+    Wall = 3,
+    /// The boundary's lines on the floor (see-through).
+    Line = 4,
+}
+
+impl Mode {
+    fn see_through(self) -> bool {
+        matches!(self, Mode::Wall | Mode::Line)
+    }
 }
 
 pub struct Mesh {
     vbuf: vk::Buffer,
     ibuf: vk::Buffer,
     count: u32,
-    _allocs: [Allocation; 2],
+    /// Room in each buffer (bytes), for meshes refilled every frame.
+    room: [usize; 2],
+    allocs: [Allocation; 2],
 }
 
 pub struct Texture {
@@ -57,7 +70,8 @@ pub struct Draw<'a> {
     pub tint: [f32; 3],
     pub alpha: f32,
     pub mode: Mode,
-    /// Grid only: where it fades out from, in the mesh's floor coordinates.
+    /// Grid: where it fades out from, in the mesh's floor coordinates.
+    /// Walls: their height first.
     pub center: [f32; 2],
 }
 
@@ -68,6 +82,7 @@ pub struct Gpu {
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    glass: vk::Pipeline,
     sampler: vk::Sampler,
     pool: vk::DescriptorPool,
     white: Option<Texture>,
@@ -162,6 +177,10 @@ impl Gpu {
                 .depth_test_enable(true)
                 .depth_write_enable(true)
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+            let depth_glass = vk::PipelineDepthStencilStateCreateInfo::default()
+                .depth_test_enable(true)
+                .depth_write_enable(false)
+                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
             let blend_att = [vk::PipelineColorBlendAttachmentState::default()
                 .blend_enable(true)
                 .src_color_blend_factor(vk::BlendFactor::ONE)
@@ -174,22 +193,25 @@ impl Gpu {
             let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_att);
             let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
             let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-            let info = [vk::GraphicsPipelineCreateInfo::default()
-                .stages(&stages)
-                .vertex_input_state(&vertex_input)
-                .input_assembly_state(&assembly)
-                .viewport_state(&viewport)
-                .rasterization_state(&raster)
-                .multisample_state(&multisample)
-                .depth_stencil_state(&depth)
-                .color_blend_state(&blend)
-                .dynamic_state(&dynamic)
-                .layout(layout)
-                .render_pass(render_pass)
-                .subpass(0)];
-            let pipeline = device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &info, None)
-                .map_err(|(_, e)| anyhow!("scene pipeline: {e}"))?[0];
+            let info = |depth| {
+                vk::GraphicsPipelineCreateInfo::default()
+                    .stages(&stages)
+                    .vertex_input_state(&vertex_input)
+                    .input_assembly_state(&assembly)
+                    .viewport_state(&viewport)
+                    .rasterization_state(&raster)
+                    .multisample_state(&multisample)
+                    .depth_stencil_state(depth)
+                    .color_blend_state(&blend)
+                    .dynamic_state(&dynamic)
+                    .layout(layout)
+                    .render_pass(render_pass)
+                    .subpass(0)
+            };
+            let pipelines = device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[info(&depth), info(&depth_glass)], None)
+                .map_err(|(_, e)| anyhow!("scene pipeline: {e}"))?;
+            let (pipeline, glass) = (pipelines[0], pipelines[1]);
             device.destroy_shader_module(vert, None);
             device.destroy_shader_module(frag, None);
 
@@ -204,28 +226,62 @@ impl Gpu {
             )?;
             let sizes = [vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(256)];
             let pool = device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(256).pool_sizes(&sizes), None)?;
-            Ok(Self { device, allocator, render_pass, set_layout, layout, pipeline, sampler, pool, white: None })
+            Ok(Self { device, allocator, render_pass, set_layout, layout, pipeline, glass, sampler, pool, white: None })
         }
     }
 
     pub fn mesh(&self, vertices: &[Vertex], indices: &[u32]) -> Result<Mesh> {
-        let upload = |bytes: &[u8], usage: vk::BufferUsageFlags, name: &str| -> Result<(vk::Buffer, Allocation)> {
+        self.mesh_with_room(vertices, indices, 1.0)
+    }
+
+    /// Replace `slot`'s contents (growing it as needed): for meshes rebuilt
+    /// every frame. Safe between frames: each layer waits for its GPU work.
+    pub fn refill(&self, slot: &mut Option<Mesh>, vertices: &[Vertex], indices: &[u32]) -> Result<()> {
+        let (vbytes, ibytes) = (as_bytes(vertices), as_bytes(indices));
+        if let Some(m) = slot.as_mut().filter(|m| vbytes.len() <= m.room[0] && ibytes.len() <= m.room[1]) {
+            for (a, bytes) in m.allocs.iter_mut().zip([vbytes, ibytes]) {
+                a.mapped_slice_mut().ok_or_else(|| anyhow!("mesh not mapped"))?[..bytes.len()].copy_from_slice(bytes);
+            }
+            m.count = indices.len() as u32;
+            return Ok(());
+        }
+        if let Some(old) = slot.take() {
+            self.free_mesh(old);
+        }
+        *slot = Some(self.mesh_with_room(vertices, indices, 1.5)?);
+        Ok(())
+    }
+
+    fn free_mesh(&self, m: Mesh) {
+        unsafe {
+            self.device.destroy_buffer(m.vbuf, None);
+            self.device.destroy_buffer(m.ibuf, None);
+        }
+        if let Ok(mut a) = self.allocator.lock() {
+            for alloc in m.allocs {
+                let _ = a.free(alloc);
+            }
+        }
+    }
+
+    /// A mesh with `grow` times the room its contents need.
+    fn mesh_with_room(&self, vertices: &[Vertex], indices: &[u32], grow: f32) -> Result<Mesh> {
+        let upload = |bytes: &[u8], usage: vk::BufferUsageFlags, name: &str| -> Result<(vk::Buffer, Allocation, usize)> {
+            let room = ((bytes.len() as f32 * grow) as usize).max(4);
             unsafe {
                 let buffer = self
                     .device
-                    .create_buffer(&vk::BufferCreateInfo::default().size(bytes.len().max(4) as u64).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+                    .create_buffer(&vk::BufferCreateInfo::default().size(room as u64).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
                 let reqs = self.device.get_buffer_memory_requirements(buffer);
                 let mut a = alloc(&self.allocator, name, reqs, MemoryLocation::CpuToGpu, true)?;
                 self.device.bind_buffer_memory(buffer, a.memory(), a.offset())?;
                 a.mapped_slice_mut().ok_or_else(|| anyhow!("{name} not mapped"))?[..bytes.len()].copy_from_slice(bytes);
-                Ok((buffer, a))
+                Ok((buffer, a, room))
             }
         };
-        let vbytes = unsafe { std::slice::from_raw_parts(vertices.as_ptr().cast::<u8>(), std::mem::size_of_val(vertices)) };
-        let ibytes = unsafe { std::slice::from_raw_parts(indices.as_ptr().cast::<u8>(), std::mem::size_of_val(indices)) };
-        let (vbuf, va) = upload(vbytes, vk::BufferUsageFlags::VERTEX_BUFFER, "scene-vertices")?;
-        let (ibuf, ia) = upload(ibytes, vk::BufferUsageFlags::INDEX_BUFFER, "scene-indices")?;
-        Ok(Mesh { vbuf, ibuf, count: indices.len() as u32, _allocs: [va, ia] })
+        let (vbuf, va, vroom) = upload(as_bytes(vertices), vk::BufferUsageFlags::VERTEX_BUFFER, "scene-vertices")?;
+        let (ibuf, ia, iroom) = upload(as_bytes(indices), vk::BufferUsageFlags::INDEX_BUFFER, "scene-indices")?;
+        Ok(Mesh { vbuf, ibuf, count: indices.len() as u32, room: [vroom, iroom], allocs: [va, ia] })
     }
 
     /// Upload an sRGB texture (waits for the copy).
@@ -341,10 +397,18 @@ impl Gpu {
             );
             d.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: extent.width as f32, height: extent.height as f32, min_depth: 0.0, max_depth: 1.0 }]);
             d.cmd_set_scissor(cmd, 0, &[area]);
-            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             let view_proj = math::mul(proj, view);
+            let mut bound = None;
             for draw in draws {
                 let Some(tex) = draw.texture.or(self.white.as_ref()) else { continue };
+                if draw.mesh.count == 0 {
+                    continue;
+                }
+                let pipeline = if draw.mode.see_through() { self.glass } else { self.pipeline };
+                if bound != Some(pipeline) {
+                    d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                    bound = Some(pipeline);
+                }
                 let rot = math::rotation_rows(&math::mul(view, &draw.model));
                 let push = Push {
                     mvp: math::mul(&view_proj, &draw.model),
@@ -453,4 +517,9 @@ pub struct Target {
     _views: Vec<vk::ImageView>,
     _depth: Vec<(vk::Image, Allocation)>,
     _depth_views: Vec<vk::ImageView>,
+}
+
+fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
+    // SAFETY: plain-old-data vertex and index arrays.
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
 }

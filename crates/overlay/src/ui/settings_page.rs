@@ -13,13 +13,15 @@ pub enum SettingsTab {
     Controllers,
     Test,
     Models,
+    Boundary,
     Gaming,
     Notifications,
     Osc,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 8] = [Self::Dashboard, Self::Watch, Self::Controllers, Self::Test, Self::Models, Self::Gaming, Self::Notifications, Self::Osc];
+    pub const ALL: [SettingsTab; 9] =
+        [Self::Dashboard, Self::Watch, Self::Controllers, Self::Test, Self::Models, Self::Boundary, Self::Gaming, Self::Notifications, Self::Osc];
 
     fn glyph(self) -> &'static str {
         match self {
@@ -28,6 +30,7 @@ impl SettingsTab {
             Self::Controllers => icon::HAND_POINTING,
             Self::Test => icon::JOYSTICK,
             Self::Models => icon::CUBE,
+            Self::Boundary => icon::POLYGON,
             Self::Gaming => icon::GAME_CONTROLLER,
             Self::Notifications => icon::BELL,
             Self::Osc => icon::BROADCAST,
@@ -41,6 +44,7 @@ impl SettingsTab {
             Self::Controllers => "Controllers",
             Self::Test => "Controller test",
             Self::Models => "3D models",
+            Self::Boundary => "Boundary",
             Self::Gaming => "Gaming mode",
             Self::Notifications => "Notifications",
             Self::Osc => "OSC",
@@ -54,6 +58,7 @@ impl SettingsTab {
             Self::Controllers => "Switched-off controllers, freezing, and every gesture",
             Self::Test => "Every button, stick and sensor, live",
             Self::Models => "Your controllers, trackers and base stations, as SteamVR draws them",
+            Self::Boundary => "Walls that show as you near the edge of your play area",
             Self::Gaming => "Controllers as an Xbox pad for flat games",
             Self::Notifications => "Desktop and XSOverlay messages as toasts",
             Self::Osc => "Let games and tools drive the overlay",
@@ -62,8 +67,10 @@ impl SettingsTab {
 }
 
 pub(super) fn settings_page(ui: &mut egui::Ui, st: &mut LibState) {
-    let tabs: Vec<Tab> = SettingsTab::ALL.iter().map(|t| Tab { glyph: t.glyph(), label: t.label(), blurb: t.blurb() }).collect();
-    let current = SettingsTab::ALL.iter().position(|t| *t == st.settings_tab).unwrap_or(0);
+    // No Boundary on WiVRn: the headset has its own.
+    let shown: Vec<SettingsTab> = SettingsTab::ALL.into_iter().filter(|t| *t != SettingsTab::Boundary || st.boundary_possible).collect();
+    let tabs: Vec<Tab> = shown.iter().map(|t| Tab { glyph: t.glyph(), label: t.label(), blurb: t.blurb() }).collect();
+    let current = shown.iter().position(|t| *t == st.settings_tab).unwrap_or(0);
     let tab = st.settings_tab;
     let picked = shell(ui, icon::GEAR, "Settings", &tabs, current, "settings", |ui| match tab {
         SettingsTab::Dashboard => dashboard(ui, st),
@@ -71,12 +78,13 @@ pub(super) fn settings_page(ui: &mut egui::Ui, st: &mut LibState) {
         SettingsTab::Controllers => controllers(ui, st),
         SettingsTab::Test => super::controller_test::controller_test(ui, st),
         SettingsTab::Models => models(ui, st),
+        SettingsTab::Boundary => boundary(ui, st),
         SettingsTab::Gaming => gaming(ui, st),
         SettingsTab::Notifications => notifications(ui, st),
         SettingsTab::Osc => osc(ui, st),
     });
     if let Some(i) = picked {
-        st.settings_tab = SettingsTab::ALL[i];
+        st.settings_tab = shown[i];
         st.sound_tab = true;
     }
 }
@@ -347,6 +355,95 @@ fn models(ui: &mut egui::Ui, st: &mut LibState) {
     if t {
         st.sound_tab = true;
     }
+}
+
+fn boundary(ui: &mut egui::Ui, st: &mut LibState) {
+    use crate::boundary::Cmd;
+    let ask = |st: &mut LibState, cmd: Cmd| {
+        st.boundary_request = Some(cmd);
+        st.sound_tab = true;
+    };
+    if let Some((o, problem)) = st.boundary_setup {
+        group(ui, "Drawing your boundary");
+        card(ui, |ui| {
+            ui.add_space(10.0);
+            gesture_row(ui, "Trigger click", "Drop a corner under your controller");
+            ui.add_space(6.0);
+            gesture_row(ui, "Hold the trigger and walk", "Trace a wall, or around furniture");
+            ui.add_space(6.0);
+            gesture_row(ui, "Back at the first corner", "Close the outline and save it");
+            ui.add_space(10.0);
+        });
+        card(ui, |ui| {
+            let (title, sub) = match o.corners {
+                0 => ("Nothing yet", "Walk to the edge of your play area".to_string()),
+                n => ("Your outline", format!("{n} corner{} · {:.1} m", if n == 1 { "" } else { "s" }, o.length)),
+            };
+            row(ui, title, &sub, 0.0, |_| {});
+            ui.horizontal(|ui| {
+                let some = o.corners > 0;
+                if button_enabled(ui, icon::ARROW_U_UP_LEFT, "Undo", Tone::Neutral, 110.0, some).clicked() {
+                    ask(st, Cmd::Undo);
+                }
+                if button_enabled(ui, icon::ARROW_COUNTER_CLOCKWISE, "Start over", Tone::Neutral, 130.0, some).clicked() {
+                    ask(st, Cmd::Restart);
+                }
+                if button_enabled(ui, icon::CHECK, "Save", Tone::Primary, 110.0, problem.is_none()).clicked() {
+                    ask(st, Cmd::Save);
+                }
+                if button(ui, icon::X, "Cancel", Tone::Neutral, 110.0).clicked() {
+                    ask(st, Cmd::Cancel);
+                }
+            });
+            ui.add_space(10.0);
+            if let Some(p) = problem.filter(|_| o.corners >= 3) {
+                note(ui, icon::WARNING, p);
+            }
+        });
+        note(ui, icon::INFO, "Aiming at the dashboard doesn't drop corners · grip it to move it out of the way");
+        return;
+    }
+    if !st.boundary_ready {
+        empty_state(ui, icon::POLYGON, "No room setup yet", "The boundary is drawn on your floor: set it up first in the desktop app's Lighthouse settings");
+        return;
+    }
+    card(ui, |ui| match st.boundary_info {
+        Some(o) => row(ui, "Your boundary", &format!("{} corners · {:.1} m around · {:.1} m²", o.corners, o.length, o.area), 250.0, |ui| {
+            let armed = st.is_armed("boundary-clear");
+            let (label, tone) = if armed { ("Tap again", Tone::DangerArmed) } else { ("Clear", Tone::Danger) };
+            if button(ui, icon::TRASH, label, tone, 110.0).clicked() && st.confirm_tap("boundary-clear") {
+                ask(st, Cmd::Clear);
+            }
+            if button(ui, icon::PENCIL_SIMPLE, "Redraw", Tone::Neutral, 120.0).clicked() {
+                ask(st, Cmd::Start);
+            }
+        }),
+        None => row(ui, "No boundary yet", "Walk the edge of your play area with a controller", 150.0, |ui| {
+            if button(ui, icon::PENCIL_SIMPLE, "Draw it", Tone::Primary, 130.0).clicked() {
+                ask(st, Cmd::Start);
+            }
+        }),
+    });
+
+    group(ui, "Walls");
+    card(ui, |ui| {
+        let mut t = switch_row(ui, "Show the walls", "They fade in as you near the edge, and all show once you step out", &mut st.boundary_walls);
+        divider(ui);
+        row(ui, "Distance", "How close before a wall shows", SLIDER_W, |ui| {
+            slider(ui, &mut st.boundary_reach, 0.2..=1.0, SLIDER_W, |v| format!("{v:.2} m"));
+        });
+        divider(ui);
+        t |= switch_row(ui, "Trackers bring them up", "Feet and other trackers count, not only your head and hands", &mut st.boundary_trackers);
+        divider(ui);
+        t |= switch_row(ui, "Outline on the floor in games", "It's always there while the dashboard is open", &mut st.boundary_floor);
+        if t {
+            st.sound_tab = true;
+        }
+    });
+    if st.models_stations_possible {
+        note(ui, icon::INFO, "Kept with SteamVR's room setup: SteamVR shows this boundary too, and one drawn there shows here");
+    }
+    note(ui, icon::WARNING, "Monadeck's overlay draws the walls: when it isn't running, there are none");
 }
 
 fn gaming(ui: &mut egui::Ui, st: &mut LibState) {

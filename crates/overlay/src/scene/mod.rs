@@ -1,12 +1,13 @@
 //! The 3D layer: SteamVR's models of your controllers, trackers and base
-//! stations, glove hands, and a floor grid, like SteamVR draws them around its
-//! dashboard. Two projection layers: the world (grid, base stations,
-//! trackers) under Monadeck's panels, the hands (controllers, gloves) over
-//! them, since they're nearly always the closer.
+//! stations, glove hands, a floor grid and the boundary, like SteamVR draws
+//! them around its dashboard. Two projection layers: the world (grid, base
+//! stations, trackers, the boundary) under Monadeck's panels, the hands
+//! (controllers, gloves) over them, since they're nearly always the closer.
 pub mod math;
 pub mod models;
 mod gpu;
 pub mod selftest;
+pub mod walls;
 
 use std::collections::HashMap;
 
@@ -19,11 +20,16 @@ use crate::mathx::{pose_compose, pose_invert, quat_from_axis_angle, quat_rotate,
 use gpu::{Draw, Gpu, Mesh, Mode, Target, Texture};
 use math::Mat4;
 use models::{Input, Motion, Vertex};
+pub use walls::Walls;
 
 /// The rim and grid colour (linear): Monadeck's teal.
 const TEAL: [f32; 3] = [0.05, 0.74, 0.63];
 /// Glove hands' joints and bones.
 const HAND_TINT: [f32; 3] = [0.62, 0.68, 0.74];
+/// The boundary's outline on the floor: lighter than the grid it lies on.
+const LINE_TINT: [f32; 3] = [0.55, 0.95, 0.88];
+/// Markers while a boundary is drawn.
+pub const MARKER_TINT: [f32; 3] = [0.85, 0.9, 0.95];
 /// The projection layers render at this share of the runtime's recommended
 /// size: plenty for models a few hundred pixels across.
 const RENDER_SCALE: f32 = 0.6;
@@ -50,6 +56,11 @@ pub enum Item {
     Hand(Box<xr::HandJointLocations>),
     /// The floor grid: STAGE's pose, and where you stand in it.
     Grid { stage: xr::Posef, at: [f32; 2] },
+    /// The play area's boundary (one per frame is drawn).
+    Walls(Box<Walls>),
+    /// A ball, and a rod between two points (markers).
+    Dot { at: [f32; 3], radius: f32, tint: [f32; 3] },
+    Rod { from: [f32; 3], to: [f32; 3], radius: f32, tint: [f32; 3] },
 }
 
 enum Slot {
@@ -89,6 +100,11 @@ pub struct Scene {
     sphere: Mesh,
     cylinder: Mesh,
     grid: Mesh,
+    /// The boundary's, rebuilt each frame it shows.
+    wall_mesh: Option<Mesh>,
+    line_mesh: Option<Mesh>,
+    wall_data: walls::MeshData,
+    line_data: walls::MeshData,
     world: Option<Layer>,
     hands: Option<Layer>,
     extent: vk::Extent2D,
@@ -122,6 +138,10 @@ impl Scene {
             sphere: gpu.mesh(&sv, &si)?,
             cylinder: gpu.mesh(&cv, &ci)?,
             grid: gpu.mesh(&gv, &gi)?,
+            wall_mesh: None,
+            line_mesh: None,
+            wall_data: Default::default(),
+            line_data: Default::default(),
             gpu,
             format,
             loader: models::Loader::spawn(),
@@ -228,6 +248,7 @@ impl Scene {
         }
         let all: Vec<&Item> = world.iter().chain(hands).collect();
         self.prepare(&all, cmd, queue, fence)?;
+        self.prepare_walls(world)?;
         for (which, items) in [(Which::World, world), (Which::Hands, hands)] {
             if items.is_empty() {
                 continue;
@@ -259,6 +280,15 @@ impl Scene {
             }
             r?;
         }
+        Ok(())
+    }
+
+    /// The boundary's meshes for this frame.
+    fn prepare_walls(&mut self, items: &[Item]) -> Result<()> {
+        let Some(w) = items.iter().find_map(|i| if let Item::Walls(w) = i { Some(w) } else { None }) else { return Ok(()) };
+        walls::build(w, &mut self.wall_data, &mut self.line_data);
+        self.gpu.refill(&mut self.wall_mesh, &self.wall_data.0, &self.wall_data.1)?;
+        self.gpu.refill(&mut self.line_mesh, &self.line_data.0, &self.line_data.1)?;
         Ok(())
     }
 
@@ -347,6 +377,26 @@ impl Scene {
                     });
                 }
                 Item::Hand(joints) => self.hand_draws(joints, &mut out),
+                Item::Walls(w) => {
+                    let model = math::from_pose(&w.room);
+                    let draw = |mesh, mode, tint| Draw { mesh, texture: None, model, tint, alpha: 1.0, mode, center: [walls::HEIGHT, 0.0] };
+                    if let Some(m) = &self.line_mesh {
+                        out.push(draw(m, Mode::Line, LINE_TINT));
+                    }
+                    if let Some(m) = &self.wall_mesh {
+                        out.push(draw(m, Mode::Wall, TEAL));
+                    }
+                }
+                Item::Dot { at, radius, tint } => out.push(Draw {
+                    mesh: &self.sphere,
+                    texture: None,
+                    model: math::from_trs(*at, [0.0, 0.0, 0.0, 1.0], [*radius; 3]),
+                    tint: *tint,
+                    alpha: 0.9,
+                    mode: Mode::Tint,
+                    center: [0.0; 2],
+                }),
+                Item::Rod { from, to, radius, tint } => out.extend(self.rod(*from, *to, *radius, *tint, 0.9)),
                 Item::Model { name, pose, buttons, alpha } => self.model_draws(name, pose, buttons.as_ref(), *alpha, &mut out),
                 Item::Controller { name, grip, buttons } => {
                     if let Some(Slot::Ready(m)) = self.models.get(name) {
@@ -402,26 +452,21 @@ impl Scene {
             if !valid(ja) || !valid(jb) {
                 continue;
             }
-            let (pa, pb) = (math::pos(&ja.pose), math::pos(&jb.pose));
-            let d = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
-            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            if len < 1e-4 {
-                continue;
-            }
-            let dir = [d[0] / len, d[1] / len, d[2] / len];
-            // The rod's +Y onto the bone.
-            let q = from_to([0.0, 1.0, 0.0], dir);
             let r = ja.radius.min(jb.radius).max(0.003) * 0.75;
-            out.push(Draw {
-                mesh: &self.cylinder,
-                texture: None,
-                model: math::from_trs(pa, q, [r, len, r]),
-                tint: HAND_TINT,
-                alpha: 0.9,
-                mode: Mode::Tint,
-                center: [0.0; 2],
-            });
+            out.extend(self.rod(math::pos(&ja.pose), math::pos(&jb.pose), r, HAND_TINT, 0.9));
         }
+    }
+
+    /// A rod of radius `r` from `a` to `b`.
+    fn rod(&self, a: [f32; 3], b: [f32; 3], r: f32, tint: [f32; 3], alpha: f32) -> Option<Draw<'_>> {
+        let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-4 {
+            return None;
+        }
+        // The rod's +Y onto the line.
+        let q = from_to([0.0, 1.0, 0.0], [d[0] / len, d[1] / len, d[2] / len]);
+        Some(Draw { mesh: &self.cylinder, texture: None, model: math::from_trs(a, q, [r, len, r]), tint, alpha, mode: Mode::Tint, center: [0.0; 2] })
     }
 }
 

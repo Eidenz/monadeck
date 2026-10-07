@@ -1,7 +1,9 @@
 #version 450
 // Models lit from the eye with a rim in the tint (SteamVR's look over a
-// game), flat tinted parts for glove hands, and an anti-aliased floor grid
-// that fades out around its centre. Output is premultiplied alpha.
+// game), flat tinted parts for glove hands, an anti-aliased floor grid
+// that fades out around its centre, and the boundary: a lattice on its walls
+// and lines on the floor, as strong as their vertices say. Output is
+// premultiplied alpha.
 
 layout(location = 0) in vec3 v_nrm;
 layout(location = 1) in vec2 v_uv;
@@ -23,6 +25,16 @@ float grid_line(vec2 uv, float width) {
     return 1.0 - clamp(min(d.x, d.y) - width, 0.0, 1.0);
 }
 
+// Lines `thick` metres wide every `cell` metres, never thinner than a pixel.
+float lattice(vec2 uv, float cell, float thick) {
+    vec2 fw = max(fwidth(uv), vec2(1e-5));
+    vec2 d = abs(fract(uv / cell - 0.5) - 0.5) * cell;
+    vec2 cov = 1.0 - clamp(d / fw - max(vec2(0.5), 0.5 * thick / fw), 0.0, 1.0);
+    // Too fine to draw far away: fade to the fill instead of shimmering.
+    vec2 fine = 1.0 - smoothstep(0.25, 0.6, fw / cell);
+    return max(cov.x * fine.x, cov.y * fine.y);
+}
+
 void main() {
     float alpha = pc.params.x;
     int mode = int(pc.params.y + 0.5);
@@ -36,6 +48,21 @@ void main() {
         float minor = grid_line(v_uv * 4.0, 0.0) * 0.25 * (1.0 - smoothstep(1.0, 3.0, dist));
         float fade = 1.0 - smoothstep(2.0, 7.0, dist);
         float a = max(major, minor) * fade * alpha;
+        out_color = vec4(tint * a, a);
+        return;
+    }
+
+    if (mode == 3) {
+        // v_uv: metres along the walls and up them. Thins out towards the top.
+        float k = clamp(v_nrm.x, 0.0, 1.0);
+        float lines = lattice(v_uv, 0.25, 0.012);
+        float top = 1.0 - smoothstep(pc.params.z - 0.7, pc.params.z, v_uv.y);
+        float a = k * alpha * mix(0.10, 0.95, lines) * top;
+        out_color = vec4(tint * a, a);
+        return;
+    }
+    if (mode == 4) {
+        float a = clamp(v_nrm.x, 0.0, 1.0) * alpha;
         out_color = vec4(tint * a, a);
         return;
     }

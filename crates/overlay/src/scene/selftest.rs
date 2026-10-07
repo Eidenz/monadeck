@@ -1,7 +1,9 @@
 //! `--scene-selftest [dir]`: the 3D layer drawn without a headset. A
 //! headless Vulkan device renders a sample room (Index controllers mid-use, a
-//! tracker, a glove hand, the floor grid and this machine's real base
-//! stations) from a few viewpoints into PNGs, over a dark backdrop.
+//! tracker, a glove hand, the floor grid, this machine's real base stations
+//! and a boundary with a hand near one wall) from a few viewpoints into PNGs,
+//! over a dark backdrop; then the same boundary seen from outside it, and one
+//! halfway drawn.
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,7 +12,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use ash::vk;
 use openxr as xr;
 
-use super::{math, Buttons, Item, Scene, Slot, BASE_STATION_MODEL};
+use super::{math, Buttons, Item, Scene, Slot, Walls, BASE_STATION_MODEL};
 use crate::mathx::{normalize, quat_from_axes};
 
 const W: u32 = 1280;
@@ -83,7 +85,7 @@ pub fn run(dir: &Path) -> Result<()> {
     let balloc = super::gpu::alloc_for_selftest(&allocator, breqs, true)?;
     unsafe { device.bind_buffer_memory(readback, balloc.memory(), balloc.offset())? };
 
-    let items = sample();
+    let mut items = sample();
     // Load every model first (the loader works off-thread).
     let refs: Vec<&Item> = items.iter().collect();
     let start = Instant::now();
@@ -107,13 +109,40 @@ pub fn run(dir: &Path) -> Result<()> {
         ("scene-hands", [0.0, 1.45, 0.15], [0.0, 1.05, -0.45]),
         ("scene-room", [0.4, 1.7, 3.2], [-0.6, 1.4, 0.0]),
         ("scene-top", [-0.7, 7.5, 0.0], [-0.7, 0.0, -0.001]),
+        ("scene-wall", [0.3, 1.65, 0.4], [1.7, 1.2, -0.5]),
+        ("scene-outside", [4.2, 1.7, 2.6], [0.0, 0.8, -0.4]),
+        ("scene-drawing", [0.3, 1.7, 0.7], [-0.3, 0.3, -1.8]),
     ];
     for (name, eye, at) in shots {
+        if name == "scene-outside" {
+            for item in &mut items {
+                if let Item::Walls(w) = item {
+                    w.base = 1.0;
+                    w.near.clear();
+                }
+            }
+        }
+        if name == "scene-drawing" {
+            items.retain(|i| !matches!(i, Item::Walls(_)));
+            let mut setup = crate::boundary::Setup::default();
+            setup.points = vec![[-2.1, 1.3], [1.7, 1.5], [1.85, -1.4], [0.6, -1.9]];
+            let view = crate::boundary::View {
+                room: xr::Posef::IDENTITY,
+                head: None,
+                hands: [Some(math::pose([-0.9, 1.0, -2.0], tilt(-30.0))), Some(math::pose([-0.3, 0.9, -2.2], tilt(-30.0)))],
+                trackers: Vec::new(),
+                reach: 0.4,
+                floor: true,
+            };
+            items.extend(crate::boundary::setup_items(&setup, &view));
+            scene.prepare(&items.iter().collect::<Vec<_>>(), cmd, queue, fence)?;
+        }
         let pose = look_at(eye, at);
         unsafe {
             device.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())?;
             device.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))?;
         }
+        scene.prepare_walls(&items)?;
         let draws = scene.draws(&items);
         scene.gpu.record(cmd, target.framebuffers[0][0], extent, &math::view(&pose), &math::projection(&fov, 0.03, 100.0), &draws);
         crate::desktop::dmabuf::cmd_transition(
@@ -165,8 +194,11 @@ fn look_at(eye: [f32; 3], at: [f32; 3]) -> xr::Posef {
 }
 
 /// The sample room: what the overlay would show with the dashboard open.
+fn tilt(deg: f32) -> [f32; 4] {
+    crate::mathx::quat_from_axis_angle([1.0, 0.0, 0.0], deg.to_radians())
+}
+
 fn sample() -> Vec<Item> {
-    let tilt = |deg: f32| crate::mathx::quat_from_axis_angle([1.0, 0.0, 0.0], deg.to_radians());
     let mut items = vec![Item::Grid { stage: xr::Posef::IDENTITY, at: [0.0, -0.3] }];
     for s in monadeck_core::room_setup::base_stations() {
         let p = s.position.map(|v| v as f32);
@@ -194,6 +226,16 @@ fn sample() -> Vec<Item> {
         buttons: right,
     });
     items.push(Item::Hand(Box::new(sample_hand([0.36, 1.12, -0.55]))));
+    // A traced room, a hand reaching for its right wall.
+    items.push(Item::Walls(Box::new(Walls {
+        room: xr::Posef::IDENTITY,
+        loops: vec![vec![[-2.1, 1.3], [1.7, 1.5], [1.85, -1.4], [0.6, -1.9], [-0.5, -2.3], [-2.3, -0.9]]],
+        open: false,
+        near: vec![[1.5, 1.15, -0.35], [0.0, 1.7, 0.1]],
+        reach: 0.4,
+        base: 0.0,
+        floor: 0.9,
+    })));
     items
 }
 
