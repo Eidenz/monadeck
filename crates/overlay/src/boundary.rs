@@ -31,6 +31,8 @@ pub enum Cmd {
     Save,
     Cancel,
     Clear,
+    /// Move the room setup's centre into the roomiest spot of the boundary.
+    Centre,
 }
 
 /// A boundary's size, for the page.

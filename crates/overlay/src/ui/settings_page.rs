@@ -408,16 +408,23 @@ fn boundary(ui: &mut egui::Ui, st: &mut LibState) {
         return;
     }
     card(ui, |ui| match st.boundary_info {
-        Some(o) => row(ui, "Your boundary", &format!("{} corners · {:.1} m around · {:.1} m²", o.corners, o.length, o.area), 250.0, |ui| {
-            let armed = st.is_armed("boundary-clear");
-            let (label, tone) = if armed { ("Tap again", Tone::DangerArmed) } else { ("Clear", Tone::Danger) };
-            if button(ui, icon::TRASH, label, tone, 110.0).clicked() && st.confirm_tap("boundary-clear") {
-                ask(st, Cmd::Clear);
+        Some(o) => {
+            row(ui, "Your boundary", &format!("{} corners · {:.1} m around · {:.1} m²", o.corners, o.length, o.area), 250.0, |ui| {
+                let armed = st.is_armed("boundary-clear");
+                let (label, tone) = if armed { ("Tap again", Tone::DangerArmed) } else { ("Clear", Tone::Danger) };
+                if button(ui, icon::TRASH, label, tone, 110.0).clicked() && st.confirm_tap("boundary-clear") {
+                    ask(st, Cmd::Clear);
+                }
+                if button(ui, icon::PENCIL_SIMPLE, "Redraw", Tone::Neutral, 120.0).clicked() {
+                    ask(st, Cmd::Start);
+                }
+            });
+            // Games' play area (SteamVR's files): centred on the room setup's centre.
+            if st.models_stations_possible {
+                divider(ui);
+                play_area_row(ui, st, &ask);
             }
-            if button(ui, icon::PENCIL_SIMPLE, "Redraw", Tone::Neutral, 120.0).clicked() {
-                ask(st, Cmd::Start);
-            }
-        }),
+        }
         None => row(ui, "No boundary yet", "Walk the edge of your play area with a controller", 150.0, |ui| {
             if button(ui, icon::PENCIL_SIMPLE, "Draw it", Tone::Primary, 130.0).clicked() {
                 ask(st, Cmd::Start);
@@ -444,6 +451,32 @@ fn boundary(ui: &mut egui::Ui, st: &mut LibState) {
         note(ui, icon::INFO, "Kept with SteamVR's room setup: SteamVR shows this boundary too, and one drawn there shows here");
     }
     note(ui, icon::WARNING, "Monadeck's overlay draws the walls: when it isn't running, there are none");
+}
+
+/// The play area games are told about, and the way to make it bigger: move
+/// the room's centre into the roomiest spot of the boundary.
+fn play_area_row(ui: &mut egui::Ui, st: &mut LibState, ask: &dyn Fn(&mut LibState, crate::boundary::Cmd)) {
+    let size = |a: [f32; 2]| format!("{:.1} × {:.1} m", a[0], a[1]);
+    let area = |a: Option<[f32; 2]>| a.map_or(0.0, |a| a[0] * a[1]);
+    // Worth moving the centre for: a fifth more room, and half a square metre.
+    let roomier = st.boundary_roomiest.filter(|r| area(Some(*r)) > area(st.boundary_play) * 1.2 && area(Some(*r)) > area(st.boundary_play) + 0.5);
+    let sub = match (st.boundary_play, roomier) {
+        (Some(p), Some(r)) => format!("{} around your room's centre · {} with the centre moved into the boundary", size(p), size(r)),
+        (Some(p), None) => format!("{} around your room's centre", size(p)),
+        (None, Some(r)) => format!("None: your room's centre is outside the boundary · {} with it moved in", size(r)),
+        (None, None) => "None fits around your room's centre".to_string(),
+    };
+    row(ui, "Play area for games", &sub, 160.0, |ui| {
+        if roomier.is_some() {
+            let armed = st.is_armed("boundary-centre");
+            let (label, tone) = if armed { ("Tap again", Tone::DangerArmed) } else { ("Centre it", Tone::Neutral) };
+            if button(ui, icon::CROSSHAIR_SIMPLE, label, tone, 140.0).on_hover_text("Moves your room's centre: games start you there").clicked()
+                && st.confirm_tap("boundary-centre")
+            {
+                ask(st, crate::boundary::Cmd::Centre);
+            }
+        }
+    });
 }
 
 fn gaming(ui: &mut egui::Ui, st: &mut LibState) {

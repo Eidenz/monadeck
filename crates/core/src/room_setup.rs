@@ -193,6 +193,8 @@ fn with_standing(chap: Option<Value>, universe: &str, standing: Standing, time: 
     let before = standing_of(entry);
     if entry.get("standing").is_some() && entry["collision_bounds"] != crate::boundary::placeholder() {
         let moved = moved_bounds(&entry["collision_bounds"], before, standing);
+        // Games' play area is centred on the new origin.
+        entry["play_area"] = crate::boundary::play_area_for_walls(&moved);
         entry["collision_bounds"] = moved;
     }
     if let Value::Object(m) = entry {
@@ -213,8 +215,9 @@ pub(crate) fn current_entry() -> Option<(String, Value)> {
     Some((id, entry))
 }
 
-/// Write the walls of the universe Monado uses (SteamVR's `collision_bounds`).
-pub(crate) fn set_collision_bounds(bounds: Value) -> Result<(), String> {
+/// Write the walls of the universe Monado uses (SteamVR's `collision_bounds`)
+/// and the play area games get with them.
+pub(crate) fn set_walls(bounds: Value, play_area: Value) -> Result<(), String> {
     let root = steam_root();
     let universes = read_json(&db_path(&root)).map(|db| known_universes(&db)).unwrap_or_default();
     let mut chap = read_json(&chap_path(&root)).ok_or("There's no room setup yet.")?;
@@ -224,8 +227,31 @@ pub(crate) fn set_collision_bounds(bounds: Value) -> Result<(), String> {
         .and_then(|a| a.iter_mut().find(|e| id_string(&e["universeID"]).as_deref() == Some(id.as_str())))
         .ok_or("There's no room setup yet.")?;
     entry["collision_bounds"] = bounds;
+    entry["play_area"] = play_area;
     let text = serde_json::to_string_pretty(&chap).map_err(|e| e.to_string())?;
     write_atomic(&chap_path(&root), &text)
+}
+
+/// Move `universe`'s room setup centre to `centre` (x, z in the room as it is
+/// now), facing the same way; the walls stay where they stand.
+pub(crate) fn shift_centre(universe: &str, centre: [f64; 2]) -> Result<(), String> {
+    let root = steam_root();
+    let chap = read_json(&chap_path(&root)).ok_or("There's no room setup yet.")?;
+    let entry = chap["universes"]
+        .as_array()
+        .and_then(|a| a.iter().find(|e| id_string(&e["universeID"]).as_deref() == Some(universe)))
+        .ok_or("There's no room setup yet.")?;
+    let doc = with_standing(Some(chap.clone()), universe, centred_on(standing_of(entry), centre), &local_time_string());
+    let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    write_atomic(&chap_path(&root), &text)
+}
+
+/// The room setup with its centre moved to `centre` (room coordinates).
+fn centred_on(s: Standing, centre: [f64; 2]) -> Standing {
+    // Room = q · (raw + t): a centre c away means t' = t - q⁻¹ · c.
+    let (q, _) = room_transform(s);
+    let back = rotate(conjugate(q), [centre[0], 0.0, centre[1]]);
+    Standing { translation: [s.translation[0] - back[0], s.translation[1] - back[1], s.translation[2] - back[2]], yaw: s.yaw }
 }
 
 /// Walls written for one room setup, redrawn for another so they stay where
@@ -689,6 +715,17 @@ mod tests {
         let chap = with_standing(None, "2", old, "t");
         let out = with_standing(Some(chap), "2", new, "t");
         assert_eq!(out["universes"][0]["collision_bounds"], crate::boundary::placeholder());
+    }
+
+    #[test]
+    fn centring_moves_the_origin_not_the_walls() {
+        let s = Standing { translation: [0.4, 2.1, -1.0], yaw: 0.7 };
+        let c = centred_on(s, [-0.5, 0.25]);
+        assert_eq!(c.yaw, s.yaw);
+        // The spot that was at the centre now sits at the origin; the floor stays.
+        let (raw, _) = unapply(s, [-0.5, 0.0, 0.25], [0.0, 0.0, 0.0, 1.0]);
+        let (now, _) = apply(c, raw, [0.0, 0.0, 0.0, 1.0]);
+        assert!(now.iter().all(|v| v.abs() < 1e-9), "{now:?}");
     }
 
     fn close_mm(a: f64, b: f64) -> bool {

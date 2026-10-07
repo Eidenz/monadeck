@@ -172,6 +172,10 @@ pub struct LibState {
     pub boundary_ready: bool,
     /// The boundary in effect.
     pub boundary_info: Option<crate::boundary::Outline>,
+    /// SteamVR's files only: the play area games are told about (centred on
+    /// the room setup's centre), and how big it'd be centred in the boundary.
+    pub boundary_play: Option<[f32; 2]>,
+    pub boundary_roomiest: Option<[f32; 2]>,
     /// Drawing one: what's down so far, and why it can't be saved yet.
     pub boundary_setup: Option<(crate::boundary::Outline, Option<&'static str>)>,
     pub boundary_request: Option<crate::boundary::Cmd>,
@@ -494,6 +498,8 @@ impl LibState {
             boundary_possible: true,
             boundary_ready: true,
             boundary_info: None,
+            boundary_play: None,
+            boundary_roomiest: None,
             boundary_setup: None,
             boundary_request: None,
             test_hands: [TestHand::default(); 2],

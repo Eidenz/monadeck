@@ -549,6 +549,9 @@ fn run() -> Result<()> {
     // and one being drawn.
     let mut boundary_loops: Vec<Vec<boundary::P2>> = Vec::new();
     let mut boundary_read: Option<Instant> = None;
+    // The roomiest rectangle in it (Settings › Boundary › Centre it): worked
+    // out off the frame loop when the boundary changes.
+    let mut boundary_roomiest_rx: Option<std::sync::mpsc::Receiver<Option<[f64; 2]>>> = None;
     let mut boundary_setup: Option<boundary::Setup> = None;
 
     // Panel sizes (metres). Heights are derived from the texture aspect so the
@@ -2103,8 +2106,34 @@ fn run() -> Result<()> {
         if st.boundary_possible && boundary_read.is_none_or(|t| t.elapsed().as_secs() >= 5) {
             boundary_read = Some(Instant::now());
             st.boundary_ready = monadeck_core::boundary::ready(boundary_lh);
-            boundary_loops = monadeck_core::boundary::load(boundary_lh).map(|b| boundary::from_store(&b)).unwrap_or_default();
-            st.boundary_info = (!boundary_loops.is_empty()).then(|| boundary::outline(&boundary_loops));
+            let mut kept = monadeck_core::boundary::load_with_play_area(boundary_lh);
+            // Drawn before games got a play area: it still has SteamVR's quick-calibration one.
+            if boundary_lh && kept.as_ref().and_then(|(_, a)| *a).is_some_and(monadeck_core::boundary::is_quick_play_area) {
+                match monadeck_core::boundary::refresh_play_area() {
+                    Ok(()) => kept = monadeck_core::boundary::load_with_play_area(boundary_lh),
+                    Err(e) => log::warn!("boundary: couldn't write the play area ({e})"),
+                }
+            }
+            st.boundary_play = kept.as_ref().and_then(|(_, a)| *a).map(|a| a.map(|v| v as f32));
+            let loops = kept.map(|(b, _)| boundary::from_store(&b)).unwrap_or_default();
+            if loops != boundary_loops {
+                boundary_loops = loops;
+                st.boundary_info = (!boundary_loops.is_empty()).then(|| boundary::outline(&boundary_loops));
+                st.boundary_roomiest = None;
+                boundary_roomiest_rx = None;
+                if boundary_lh && !boundary_loops.is_empty() {
+                    let b = boundary::to_store(&boundary_loops);
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(monadeck_core::boundary::roomiest(&b).map(|(_, size)| size));
+                    });
+                    boundary_roomiest_rx = Some(rx);
+                }
+            }
+        }
+        if let Some(Ok(size)) = boundary_roomiest_rx.as_ref().map(|rx| rx.try_recv()) {
+            st.boundary_roomiest = size.map(|a| a.map(|v| v as f32));
+            boundary_roomiest_rx = None;
         }
         if let Some(cmd) = st.boundary_request.take() {
             use boundary::Cmd;
@@ -2118,6 +2147,13 @@ fn run() -> Result<()> {
                         boundary_setup = None;
                         boundary_read = None;
                         st.flash("Boundary saved");
+                    }
+                    Err(e) => st.flash(e),
+                },
+                (Cmd::Centre, _) => match monadeck_core::boundary::centre_play_area() {
+                    Ok([w, d]) => {
+                        boundary_read = None;
+                        st.flash(format!("Play area centred · {w:.1} × {d:.1} m for games"));
                     }
                     Err(e) => st.flash(e),
                 },

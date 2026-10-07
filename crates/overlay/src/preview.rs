@@ -719,6 +719,8 @@ fn pages(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, dir:
         st.nav = Nav::Settings;
         st.settings_tab = SettingsTab::Boundary;
         st.boundary_info = Some(crate::boundary::Outline { corners: 6, length: 13.4, area: 10.8 });
+        st.boundary_play = Some([2.2, 1.8]);
+        st.boundary_roomiest = Some([3.1, 2.6]);
     })));
     shots.push(("page-settings-boundary-drawing".into(), Box::new(|st| {
         st.nav = Nav::Settings;
