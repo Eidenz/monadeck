@@ -9,6 +9,7 @@ mod commands;
 mod gamepad;
 mod lighthouse;
 mod overlay;
+mod runtime_watch;
 mod state;
 mod vr_audio;
 mod wivrn_watch;
@@ -35,9 +36,11 @@ fn cleanup_and_exit(app: &tauri::AppHandle) {
             }
             lighthouse::switch_base_stations_off_now(&state);
         }
+        runtime_watch::hand_back(&state);
+    } else {
+        let _ = monadeck_core::active_runtime::restore_backup();
+        let _ = monadeck_core::openvr_paths::restore_backup();
     }
-    let _ = monadeck_core::active_runtime::restore_backup();
-    let _ = monadeck_core::openvr_paths::restore_backup();
     app.exit(0);
 }
 

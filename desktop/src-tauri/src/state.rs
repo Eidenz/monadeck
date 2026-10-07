@@ -80,6 +80,8 @@ pub struct AppState {
     pub vr_audio: Arc<Mutex<Switched>>,
     /// Bumped per VR session: an older session's audio watch steps down.
     pub vr_audio_gen: Arc<AtomicU64>,
+    /// Keeps xrizer the OpenVR runtime while VR runs (SteamVR takes it back).
+    pub runtime_watch: Arc<Mutex<crate::runtime_watch::RuntimeWatch>>,
 }
 
 impl AppState {
@@ -103,6 +105,7 @@ impl AppState {
             wivrn_watch: Arc::new(Mutex::new(WivrnSessionWatch::default())),
             vr_audio: Arc::new(Mutex::new(Switched::default())),
             vr_audio_gen: Arc::new(AtomicU64::new(0)),
+            runtime_watch: Arc::new(Mutex::new(Default::default())),
         }
     }
 }

@@ -182,6 +182,11 @@ impl CmdRunner {
     }
 
     /// Snapshot of the buffered log lines.
+    /// A line of Monadeck's own in the service's log.
+    pub fn note(&self, line: &str) {
+        self.log.lock().expect("log mutex poisoned").push(line.to_string());
+    }
+
     pub fn lines(&self) -> Vec<String> {
         self.log.lock().expect("log mutex poisoned").lines.clone()
     }

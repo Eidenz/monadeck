@@ -385,6 +385,7 @@ fn start_monado(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     active_runtime::set_to_monado(&cfg).map_err(|e| e.to_string())?;
     st.monado.resume();
     register_openvr(&cfg)?;
+    crate::runtime_watch::start(st);
 
     let mut env = service_env(&cfg);
     // Emit structured (JSON) logs so the Logs view can show levels + filter.
@@ -523,6 +524,7 @@ fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
     active_runtime::set_to_wivrn(&manifest).map_err(|e| e.to_string())?;
     st.monado.resume();
     register_openvr(&cfg)?;
+    crate::runtime_watch::start(st);
 
     let env = service_env(&cfg);
     let args = wivrn::server_args();
@@ -540,8 +542,7 @@ fn start_wivrn(st: &AppState, cfg: MonadeckConfig) -> CmdResult<()> {
             break;
         }
         if !st.runner.lock().unwrap().is_running() {
-            let _ = active_runtime::restore_backup();
-            let _ = openvr_paths::restore_backup();
+            crate::runtime_watch::hand_back(st);
             return Err("wivrn-server exited right after starting — see Logs.".into());
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -690,8 +691,7 @@ fn stop_blocking(st: &AppState) {
     }
 
     // Hand the runtimes back so SteamVR keeps working when we're off.
-    let _ = active_runtime::restore_backup();
-    let _ = openvr_paths::restore_backup();
+    crate::runtime_watch::hand_back(st);
 }
 
 // --- WiVRn -------------------------------------------------------------------
