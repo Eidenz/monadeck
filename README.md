@@ -35,6 +35,9 @@ Monadeck is two halves that share one configuration: an in-headset overlay you l
 - **Let games talk to the overlay.** An OSC listener lets VRChat avatars and tools like VRCOSC drive the watch, dashboard and screens, or raise a notification.
 - **Control the runtime without taking the headset off.** Move your play area, pick which app the headset shows, freeze an app's controllers or set a timer.
 - **See what's alive at a glance.** Switched-off and out-of-tracking controllers, trackers and gloves grey out, like in SteamVR.
+- **See your room the way SteamVR draws it.** Your controllers, trackers, hands and base stations as 3D models around the dashboard, over a floor grid.
+- **Draw a boundary around your play area.** Trace it in the headset and its walls fade in as you get close; games learn its size too.
+- **Hear VR through your headset.** Its speakers and microphone become the desktop's defaults while VR runs, and the old ones come back when it stops.
 - **Look after Lighthouse tracking without opening SteamVR.** Set your floor and play area, pair controllers and trackers, and switch base stations on and off with VR.
 - **Set up Monado in one click.** The desktop app installs prebuilt forks of Monado and xrizer, runs the service, and switches runtimes without breaking SteamVR.
 - **Or stream to a standalone headset with WiVRn.** Monadeck can run [WiVRn](https://github.com/WiVRn/WiVRn) instead, with PIN pairing and the same overlay.
