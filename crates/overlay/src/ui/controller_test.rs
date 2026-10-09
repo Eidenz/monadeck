@@ -79,7 +79,7 @@ fn hand_card(ui: &mut egui::Ui, cache: &mut HashMap<&'static str, egui::TextureH
     let has = has(ty, hand);
     egui::Frame::default()
         .fill(theme::SURFACE_CONTAINER)
-        .stroke(Stroke::new(1.0, kit::alpha(Color32::WHITE, 0.05)))
+        .stroke(Stroke::new(1.0f32, kit::alpha(Color32::WHITE, 0.05)))
         .corner_radius(18)
         .inner_margin(egui::Margin::same(18))
         .show(ui, |ui| {
@@ -196,12 +196,12 @@ fn drawing(ui: &mut egui::Ui, cache: &mut HashMap<&'static str, egui::TextureHan
         let x = if hand == Hand::Left { 1.0 - fx } else { fx };
         let c = Pos2::new(art.left() + x * art.width(), art.top() + fy * art.height());
         let r = (fr * art.width()).max(7.0);
-        p.circle_stroke(c, r, Stroke::new(1.0, kit::alpha(theme::ON_SURFACE_VAR, 0.3)));
+        p.circle_stroke(c, r, Stroke::new(1.0f32, kit::alpha(theme::ON_SURFACE_VAR, 0.3)));
         if sp.press > 0.01 {
             p.circle_filled(c, r, kit::alpha(theme::PRIMARY, 0.25 + 0.6 * sp.press.clamp(0.0, 1.0)));
         }
         if sp.touch {
-            p.circle_stroke(c, r + 2.0, Stroke::new(2.0, theme::PRIMARY));
+            p.circle_stroke(c, r + 2.0, Stroke::new(2.0f32, theme::PRIMARY));
         }
         if let Some((dx, dy)) = sp.dot {
             p.circle_filled(c + egui::vec2(dx, -dy) * r * 0.8, 3.0, Color32::WHITE);
@@ -222,15 +222,15 @@ fn dial(ui: &mut egui::Ui, label: &str, (x, y): (f32, f32), show_dot: bool, touc
     let c = Pos2::new(rect.left() + DIAL / 2.0, rect.center().y);
     let r = DIAL / 2.0 - 2.0;
     p.circle_filled(c, r, theme::SURFACE_CONTAINER_HIGH);
-    let faint = Stroke::new(1.0, kit::alpha(Color32::WHITE, 0.08));
+    let faint = Stroke::new(1.0f32, kit::alpha(Color32::WHITE, 0.08));
     p.line_segment([c - egui::vec2(r, 0.0), c + egui::vec2(r, 0.0)], faint);
     p.line_segment([c - egui::vec2(0.0, r), c + egui::vec2(0.0, r)], faint);
     if touch == Some(true) {
-        p.circle_stroke(c, r, Stroke::new(2.0, theme::PRIMARY));
+        p.circle_stroke(c, r, Stroke::new(2.0f32, theme::PRIMARY));
     }
     if show_dot {
         let d = c + egui::vec2(x.clamp(-1.0, 1.0), -y.clamp(-1.0, 1.0)) * (r - 7.0);
-        p.line_segment([c, d], Stroke::new(2.0, kit::alpha(theme::PRIMARY, 0.5)));
+        p.line_segment([c, d], Stroke::new(2.0f32, kit::alpha(theme::PRIMARY, 0.5)));
         p.circle_filled(d, 7.0, if click == Some(true) { theme::PRIMARY } else { Color32::WHITE });
     }
     let tx = rect.left() + DIAL + 16.0;
@@ -281,7 +281,7 @@ fn flag(p: &egui::Painter, left_center: Pos2, text: &str, on: bool) -> f32 {
     if on {
         p.rect_filled(r, CornerRadius::same(11), kit::alpha(theme::PRIMARY, 0.16));
     } else {
-        p.rect_stroke(r, CornerRadius::same(11), Stroke::new(1.0, kit::alpha(Color32::WHITE, 0.08)), StrokeKind::Inside);
+        p.rect_stroke(r, CornerRadius::same(11), Stroke::new(1.0f32, kit::alpha(Color32::WHITE, 0.08)), StrokeKind::Inside);
     }
     p.galley(Pos2::new(r.left() + 8.0, r.center().y - g.size().y / 2.0), g, color);
     r.width()
@@ -295,7 +295,7 @@ fn button_chip(ui: &mut egui::Ui, label: &str, touch: bool, press: bool) {
     let p = ui.painter();
     p.rect_filled(r, CornerRadius::same(12), fill);
     if touch && !press {
-        p.rect_stroke(r, CornerRadius::same(12), Stroke::new(2.0, theme::PRIMARY), StrokeKind::Inside);
+        p.rect_stroke(r, CornerRadius::same(12), Stroke::new(2.0f32, theme::PRIMARY), StrokeKind::Inside);
     }
     p.galley(r.center() - g.size() / 2.0, g, text);
 }

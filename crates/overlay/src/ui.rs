@@ -787,7 +787,7 @@ fn overlays(ctx: &egui::Context, st: &mut LibState) {
         let rect = egui::Rect::from_center_size(center, size);
         painter.rect_filled(rect.translate(egui::vec2(0.0, 2.0)), egui::CornerRadius::same(16), egui::Color32::from_black_alpha((a * 90.0) as u8));
         painter.rect_filled(rect, egui::CornerRadius::same(16), egui::Color32::from_rgba_unmultiplied(22, 96, 90, (a * 240.0) as u8));
-        painter.rect_stroke(rect, egui::CornerRadius::same(16), egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(64, 224, 208, (a * 120.0) as u8)), egui::StrokeKind::Inside);
+        painter.rect_stroke(rect, egui::CornerRadius::same(16), egui::Stroke::new(1.0f32, egui::Color32::from_rgba_unmultiplied(64, 224, 208, (a * 120.0) as u8)), egui::StrokeKind::Inside);
         painter.galley(rect.min + egui::vec2(19.0, 9.0), galley, egui::Color32::from_white_alpha((a * 255.0) as u8));
     }
     if st.fade_in > 0.001 {
@@ -804,7 +804,7 @@ fn overlays(ctx: &egui::Context, st: &mut LibState) {
 pub fn build_rail(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgb(18, 22, 28))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)))
+        .stroke(egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(12)))
         .corner_radius(26)
         .inner_margin(egui::Margin::symmetric(8, 14));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
@@ -910,7 +910,7 @@ pub fn build_watch(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgba_unmultiplied(16, 20, 26, 242))
         .corner_radius(24)
-        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(64, 224, 208, 70)))
+        .stroke(egui::Stroke::new(1.5f32, egui::Color32::from_rgba_unmultiplied(64, 224, 208, 70)))
         .inner_margin(egui::Margin::same(10));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
@@ -1352,7 +1352,7 @@ pub fn build_watch_mini(ctx: &egui::Context, st: &LibState, hot: bool) {
     let radius = rect.height() / 2.0;
     kit::gradient_rect(&painter, rect, radius, egui::Color32::from_rgba_unmultiplied(24, 30, 38, 245), egui::Color32::from_rgba_unmultiplied(14, 18, 24, 245));
     let rim = if hot { theme::PRIMARY } else { egui::Color32::from_rgba_unmultiplied(64, 224, 208, 70) };
-    painter.rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(1.5, rim), egui::StrokeKind::Inside);
+    painter.rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(1.5f32, rim), egui::StrokeKind::Inside);
     painter.text(rect.center() - egui::vec2(0.0, rect.height() * 0.12), egui::Align2::CENTER_CENTER, &st.clock, egui::FontId::proportional(rect.height() * 0.44), egui::Color32::WHITE);
 
     // The line under the clock: timer or date · lowest live battery.
@@ -1534,7 +1534,7 @@ fn watch_btn_off(ui: &mut egui::Ui, size: egui::Vec2, text: &str, font: f32, lit
 fn watch_card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
         .fill(theme::SURFACE_CONTAINER)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(14)))
+        .stroke(egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(14)))
         .corner_radius(16)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
@@ -1548,7 +1548,7 @@ fn watch_card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
 pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgb(18, 22, 28))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)))
+        .stroke(egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(12)))
         .corner_radius(26)
         .inner_margin(egui::Margin::symmetric(16, 6));
     egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
@@ -1870,7 +1870,7 @@ fn battery_pill(ui: &mut egui::Ui, text: String, color: egui::Color32, tip: &str
 fn keyboard(ctx: &egui::Context, st: &mut LibState) {
     let frame = egui::Frame::default()
         .fill(egui::Color32::from_rgb(18, 22, 28))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)))
+        .stroke(egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(12)))
         .inner_margin(egui::Margin::symmetric(14, 14));
     let naming = st.naming;
     egui::TopBottomPanel::bottom("keyboard").show_separator_line(false).frame(frame).show(ctx, |ui| {
@@ -2395,7 +2395,7 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(290.0, 435.0), egui::Sense::hover());
         ui.painter().rect_filled(rect.translate(egui::vec2(0.0, 8.0)).expand(4.0), egui::CornerRadius::same(24), egui::Color32::from_black_alpha(110));
         draw_art(ui, rect, &g.cover, &g.name, 20.0);
-        ui.painter().rect_stroke(rect, egui::CornerRadius::same(20), egui::Stroke::new(1.0, egui::Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, egui::CornerRadius::same(20), egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
         ui.add_space(52.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
@@ -2555,7 +2555,7 @@ pub fn build_launch_popup(ctx: &egui::Context, name: &str, status: &str, hero: &
         painter.rect_stroke(
             rect,
             radius,
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(44, 52, 62)),
+            egui::Stroke::new(1.0f32, egui::Color32::from_rgb(44, 52, 62)),
             egui::StrokeKind::Inside,
         );
         // Centred content: spinner, title, status.
@@ -2646,7 +2646,7 @@ fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, session: Option<u3
     }
     let painter = ui.painter();
     kit::gradient_rect(painter, rect, radius, egui::Color32::from_black_alpha(0), egui::Color32::from_black_alpha(215));
-    painter.rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(1.0, egui::Color32::from_white_alpha(16)), egui::StrokeKind::Inside);
+    painter.rect_stroke(rect, egui::CornerRadius::same(radius as u8), egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(16)), egui::StrokeKind::Inside);
 
     // Badges, top-left: running, source, VR.
     let mut x = rect.left() + 20.0;
@@ -2655,7 +2655,7 @@ fn hero_banner(ui: &mut egui::Ui, g: &LibGame, running: bool, session: Option<u3
         let pad = if dot { 30.0 } else { 14.0 };
         let r = egui::Rect::from_min_size(egui::pos2(x, rect.top() + 18.0), egui::vec2(g.size().x + pad + 14.0, 30.0));
         painter.rect_filled(r, egui::CornerRadius::same(15), egui::Color32::from_black_alpha(150));
-        painter.rect_stroke(r, egui::CornerRadius::same(15), egui::Stroke::new(1.0, kit::alpha(fg, 0.35)), egui::StrokeKind::Inside);
+        painter.rect_stroke(r, egui::CornerRadius::same(15), egui::Stroke::new(1.0f32, kit::alpha(fg, 0.35)), egui::StrokeKind::Inside);
         if dot {
             painter.circle_filled(egui::pos2(r.left() + 16.0, r.center().y), 4.5, fg);
         }
@@ -2767,7 +2767,7 @@ fn hero_empty(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 240.0), egui::Sense::hover());
     let p = ui.painter();
     p.rect_filled(rect, egui::CornerRadius::same(22), theme::SURFACE_CONTAINER);
-    p.rect_stroke(rect, egui::CornerRadius::same(22), egui::Stroke::new(1.0, egui::Color32::from_white_alpha(12)), egui::StrokeKind::Inside);
+    p.rect_stroke(rect, egui::CornerRadius::same(22), egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(12)), egui::StrokeKind::Inside);
     p.text(rect.center() - egui::vec2(0.0, 18.0), egui::Align2::CENTER_CENTER, icon::GAME_CONTROLLER, egui::FontId::proportional(40.0), theme::ON_SURFACE_VAR);
     p.text(rect.center() + egui::vec2(0.0, 26.0), egui::Align2::CENTER_CENTER, "Pick a game to get started", egui::FontId::proportional(18.0), theme::ON_SURFACE);
 }

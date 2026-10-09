@@ -443,7 +443,7 @@ pub fn build(ctx: &egui::Context, st: &mut KeyboardState) {
             painter.rect_stroke(
                 rect,
                 egui::CornerRadius::same(7),
-                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(14)),
+                egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(14)),
                 egui::StrokeKind::Inside,
             );
             let (main, secondary, size) = match k.kind {

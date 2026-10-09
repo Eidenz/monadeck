@@ -485,7 +485,7 @@ fn draw(ctx: &egui::Context, t: &Toast, now: Instant, queued: usize) {
             // Fill carries a whisper of the accent; the stroke a little more.
             let fill = mix(egui::Color32::from_rgb(24, 28, 35), accent, 0.06);
             p.rect_filled(rect, radius, alpha(fill, card_a));
-            p.rect_stroke(rect, radius, egui::Stroke::new(1.0, alpha(mix(egui::Color32::from_rgb(46, 54, 64), accent, 0.35), card_a)), egui::StrokeKind::Inside);
+            p.rect_stroke(rect, radius, egui::Stroke::new(1.0f32, alpha(mix(egui::Color32::from_rgb(46, 54, 64), accent, 0.35), card_a)), egui::StrokeKind::Inside);
 
             match size {
                 Size::Compact => {

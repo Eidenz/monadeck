@@ -666,7 +666,7 @@ struct PhotoView {
 fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
         .fill(egui::Color32::from_rgba_unmultiplied(18, 22, 28, 240))
-        .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 110, 120)))
+        .stroke(egui::Stroke::new(1.5f32, egui::Color32::from_rgb(40, 110, 120)))
         .corner_radius(16)
         .inner_margin(egui::Margin::same(14))
         // Keep the stroke inside the panel (it was clipped at the bottom edge).
@@ -735,7 +735,7 @@ fn build_photo(ctx: &egui::Context, v: &PhotoView, action: &mut PhotoAction) {
                     ui.centered_and_justified(|ui| {
                         if let Some(t) = &v.tex {
                             let resp = ui.add(egui::Image::new(t).max_size(ui.available_size() * 0.96).corner_radius(8));
-                            paint_corner_brackets(ui.painter(), resp.rect.expand(8.0), 24.0, egui::Stroke::new(2.5, theme::PRIMARY));
+                            paint_corner_brackets(ui.painter(), resp.rect.expand(8.0), 24.0, egui::Stroke::new(2.5f32, theme::PRIMARY));
                         } else {
                             ui.label(egui::RichText::new("No content").color(theme::ON_SURFACE_VAR));
                         }

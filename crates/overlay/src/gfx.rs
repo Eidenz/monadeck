@@ -44,7 +44,7 @@ pub mod off {
     /// The slash across button `r`.
     pub fn slash(p: &Painter, r: Rect) {
         let inset = egui::vec2(r.width() * 0.22, r.height() * 0.18);
-        p.line_segment([r.left_bottom() + egui::vec2(inset.x, -inset.y), r.right_top() + egui::vec2(-inset.x, inset.y)], Stroke::new(2.0, SLASH));
+        p.line_segment([r.left_bottom() + egui::vec2(inset.x, -inset.y), r.right_top() + egui::vec2(-inset.x, inset.y)], Stroke::new(2.0f32, SLASH));
     }
 }
 
@@ -163,17 +163,17 @@ pub fn apply_style(ctx: &egui::Context) {
     v.extreme_bg_color = Color32::from_rgb(14, 17, 21);
     v.override_text_color = Some(theme::ON_SURFACE);
     v.selection.bg_fill = Color32::from_rgb(20, 90, 84);
-    v.selection.stroke = Stroke::new(1.0, theme::PRIMARY);
+    v.selection.stroke = Stroke::new(1.0f32, theme::PRIMARY);
     v.hyperlink_color = theme::PRIMARY;
     v.widgets.noninteractive.bg_fill = theme::SURFACE;
     v.widgets.inactive.bg_fill = theme::SURFACE_CONTAINER_HIGH;
     v.widgets.inactive.weak_bg_fill = theme::SURFACE_CONTAINER_HIGH;
     v.widgets.hovered.bg_fill = Color32::from_rgb(48, 70, 74);
     v.widgets.hovered.weak_bg_fill = Color32::from_rgb(48, 70, 74);
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0f32, Color32::WHITE);
     v.widgets.active.bg_fill = theme::PRIMARY;
     v.widgets.active.weak_bg_fill = theme::PRIMARY;
-    v.widgets.active.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+    v.widgets.active.fg_stroke = Stroke::new(1.0f32, Color32::BLACK);
     for w in [
         &mut v.widgets.noninteractive,
         &mut v.widgets.inactive,
@@ -384,7 +384,7 @@ pub fn render_panel(
             let painter =
                 ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("cursor")));
             painter.circle_filled(ps, 5.0, theme::PRIMARY);
-            painter.circle_stroke(ps, 5.0, egui::Stroke::new(1.5, egui::Color32::from_black_alpha(150)));
+            painter.circle_stroke(ps, 5.0, egui::Stroke::new(1.5f32, egui::Color32::from_black_alpha(150)));
         }
     });
 

@@ -63,7 +63,7 @@ pub fn build(ctx: &egui::Context, items: &[(usize, super::BarItem)], current: us
         ui.set_opacity(alpha);
         egui::Frame::default()
             .fill(egui::Color32::from_rgba_unmultiplied(12, 15, 20, 236))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 110, 120)))
+            .stroke(egui::Stroke::new(1.0f32, egui::Color32::from_rgb(40, 110, 120)))
             .corner_radius(17)
             .inner_margin(egui::Margin::symmetric(PAD as i8, 5))
             .show(ui, |ui| {

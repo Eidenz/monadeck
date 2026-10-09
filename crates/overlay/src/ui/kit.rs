@@ -195,7 +195,7 @@ pub(super) fn glass_button(ui: &mut egui::Ui, rect: Rect, id: egui::Id, glyph: &
     let p = ui.painter();
     let radius = CornerRadius::same((rect.height() / 2.0) as u8);
     p.rect_filled(rect, radius, mix(Color32::from_black_alpha(130), Color32::from_black_alpha(170), h));
-    p.rect_stroke(rect, radius, Stroke::new(1.0, mix(alpha(Color32::WHITE, 0.14 + 0.2 * h), alpha(accent, 0.8), on)), StrokeKind::Inside);
+    p.rect_stroke(rect, radius, Stroke::new(1.0f32, mix(alpha(Color32::WHITE, 0.14 + 0.2 * h), alpha(accent, 0.8), on)), StrokeKind::Inside);
     let fg = mix(mix(theme::ON_SURFACE, Color32::WHITE, h), accent, on);
     let text = if label.is_empty() { glyph.to_string() } else { format!("{glyph}  {label}") };
     p.text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(if label.is_empty() { 21.0 } else { 16.0 }), fg);
@@ -220,7 +220,7 @@ pub(super) fn group(ui: &mut egui::Ui, text: &str) {
 pub(super) fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
         .fill(theme::SURFACE_CONTAINER)
-        .stroke(Stroke::new(1.0, alpha(Color32::WHITE, 0.05)))
+        .stroke(Stroke::new(1.0f32, alpha(Color32::WHITE, 0.05)))
         .corner_radius(18)
         .inner_margin(egui::Margin::symmetric(20, 6))
         .show(ui, |ui| {
@@ -233,7 +233,7 @@ pub(super) fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
 
 pub(super) fn divider(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, alpha(Color32::WHITE, 0.07)));
+    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0f32, alpha(Color32::WHITE, 0.07)));
 }
 
 /// Title (+ a quieter line, wrapped) on the left, a control of `ctrl_w` on the
@@ -322,7 +322,7 @@ pub(super) fn toggle_tile(ui: &mut egui::Ui, size: egui::Vec2, glyph: &str, titl
     let base = mix(theme::SURFACE_CONTAINER, Color32::from_rgb(40, 52, 60), h * 0.6);
     p.rect_filled(rect, radius, mix(base, Color32::from_rgb(20, 72, 70), 0.55 * lit));
     let rim = mix(alpha(Color32::WHITE, 0.05), alpha(theme::PRIMARY, 0.55), lit);
-    p.rect_stroke(rect, radius, Stroke::new(1.0, rim), StrokeKind::Inside);
+    p.rect_stroke(rect, radius, Stroke::new(1.0f32, rim), StrokeKind::Inside);
     let pad = 16.0;
     let chip = Rect::from_min_size(rect.min + egui::vec2(pad, pad), egui::vec2(40.0, 40.0));
     icon_chip(p, chip, glyph, lit);
@@ -354,7 +354,7 @@ pub(super) fn quick_tile(ui: &mut egui::Ui, size: egui::Vec2, n: usize, glyph: &
     let p = ui.painter();
     let radius = CornerRadius::same(18);
     p.rect_filled(rect, radius, mix(theme::SURFACE_CONTAINER, Color32::from_rgb(40, 52, 60), h * 0.6));
-    p.rect_stroke(rect, radius, Stroke::new(1.0, mix(alpha(Color32::WHITE, 0.05), alpha(theme::PRIMARY, 0.5), h)), StrokeKind::Inside);
+    p.rect_stroke(rect, radius, Stroke::new(1.0f32, mix(alpha(Color32::WHITE, 0.05), alpha(theme::PRIMARY, 0.5), h)), StrokeKind::Inside);
     p.text(rect.left_top() + egui::vec2(14.0, 12.0), Align2::LEFT_TOP, format!("{n}"), FontId::proportional(13.0), theme::ON_SURFACE_VAR);
     p.text(rect.right_top() + egui::vec2(-14.0, 12.0), Align2::RIGHT_TOP, icon::ARROWS_CLOCKWISE, FontId::proportional(14.0), alpha(theme::ON_SURFACE_VAR, 0.4 + 0.6 * h));
     p.text(Pos2::new(rect.center().x, rect.top() + 48.0), Align2::CENTER_CENTER, glyph, FontId::proportional(30.0), theme::PRIMARY);
@@ -535,7 +535,7 @@ pub(super) fn button_enabled(ui: &mut egui::Ui, glyph: &str, label: &str, tone: 
     let dim = if enabled { 1.0 } else { 0.45 };
     p.rect_filled(rect, radius, alpha(fill, dim));
     if rim != Color32::TRANSPARENT {
-        p.rect_stroke(rect, radius, Stroke::new(1.0, alpha(rim, dim)), StrokeKind::Inside);
+        p.rect_stroke(rect, radius, Stroke::new(1.0f32, alpha(rim, dim)), StrokeKind::Inside);
     }
     p.text(rect.center(), Align2::CENTER_CENTER, text, FontId::proportional(16.0), alpha(fg, dim));
     resp

@@ -147,7 +147,7 @@ fn own_card(ui: &mut egui::Ui, st: &LibState) -> egui::Response {
     let opening = st.binds.opening.is_some_and(|(t, _)| t == Target::Monadeck);
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(18), kit::mix(theme::SURFACE_CONTAINER, Color32::from_rgb(40, 52, 60), h * 0.6));
-    p.rect_stroke(rect, CornerRadius::same(18), Stroke::new(1.0, kit::mix(kit::alpha(Color32::WHITE, 0.05), kit::alpha(theme::PRIMARY, 0.5), h)), StrokeKind::Inside);
+    p.rect_stroke(rect, CornerRadius::same(18), Stroke::new(1.0f32, kit::mix(kit::alpha(Color32::WHITE, 0.05), kit::alpha(theme::PRIMARY, 0.5), h)), StrokeKind::Inside);
     let chip = Rect::from_center_size(Pos2::new(rect.left() + 46.0, rect.center().y), egui::vec2(52.0, 52.0));
     kit::icon_chip(p, chip, icon::ARROWS_OUT_CARDINAL, 1.0);
     p.text(Pos2::new(rect.left() + 88.0, rect.center().y - 12.0), Align2::LEFT_CENTER, "Monadeck", FontId::proportional(19.0), Color32::WHITE);
@@ -188,12 +188,12 @@ fn bind_tile(ui: &mut egui::Ui, g: &BindableGame, art: &ArtState, running: bool,
     }
     draw_art(ui, cover, art, &g.name, 16.0);
     let p = ui.painter();
-    p.rect_stroke(cover, CornerRadius::same(16), Stroke::new(1.0, kit::mix(Color32::from_white_alpha(14), Color32::from_white_alpha(70), h)), StrokeKind::Inside);
+    p.rect_stroke(cover, CornerRadius::same(16), Stroke::new(1.0f32, kit::mix(Color32::from_white_alpha(14), Color32::from_white_alpha(70), h)), StrokeKind::Inside);
     let pill = |y: f32, text: &str, glyph: &str, fg: Color32| {
         let g = p.layout_no_wrap(format!("{glyph}  {text}"), FontId::proportional(12.5), fg);
         let r = Rect::from_min_size(Pos2::new(cover.left() + 10.0, y), egui::vec2(g.size().x + 20.0, 26.0));
         p.rect_filled(r, CornerRadius::same(13), Color32::from_black_alpha(175));
-        p.rect_stroke(r, CornerRadius::same(13), Stroke::new(1.0, kit::alpha(fg, 0.4)), StrokeKind::Inside);
+        p.rect_stroke(r, CornerRadius::same(13), Stroke::new(1.0f32, kit::alpha(fg, 0.4)), StrokeKind::Inside);
         p.galley(Pos2::new(r.left() + 10.0, r.center().y - g.size().y / 2.0), g, fg);
     };
     if running {
@@ -361,7 +361,7 @@ fn unreadable_banner(ui: &mut egui::Ui, e: &mut Editor, bad: &[(String, usize, S
     let rect = ui.max_rect();
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(16), Color32::from_rgb(52, 30, 32));
-    p.rect_stroke(rect, CornerRadius::same(16), Stroke::new(1.0, kit::alpha(RED, 0.5)), StrokeKind::Inside);
+    p.rect_stroke(rect, CornerRadius::same(16), Stroke::new(1.0f32, kit::alpha(RED, 0.5)), StrokeKind::Inside);
     p.text(Pos2::new(rect.left() + 30.0, rect.center().y), Align2::CENTER_CENTER, icon::WARNING, FontId::proportional(24.0), RED);
     let mut modes: Vec<&str> = bad.iter().map(|b| b.2.as_str()).collect();
     modes.sort_unstable();
@@ -592,7 +592,7 @@ fn source_card(ui: &mut egui::Ui, e: &mut Editor, def: Option<&InputDef>, s: &So
     }
     egui::Frame::default()
         .fill(theme::SURFACE_CONTAINER)
-        .stroke(Stroke::new(1.0, kit::alpha(Color32::WHITE, 0.05)))
+        .stroke(Stroke::new(1.0f32, kit::alpha(Color32::WHITE, 0.05)))
         .corner_radius(14)
         .inner_margin(egui::Margin { left: 14, right: 8, top: 8, bottom: 8 })
         .show(ui, |ui| {
@@ -724,7 +724,7 @@ fn center_column(ui: &mut egui::Ui, e: &mut Editor, st: &mut LibState, fr: &mut 
             let p = ui.painter();
             if lit > 0.01 {
                 p.circle_filled(c, r * 1.5, kit::alpha(theme::PRIMARY, 0.16 * lit));
-                p.circle_stroke(c, r, Stroke::new(2.0, kit::alpha(theme::PRIMARY, lit)));
+                p.circle_stroke(c, r, Stroke::new(2.0f32, kit::alpha(theme::PRIMARY, lit)));
             }
             if ty == "oculus_touch" && matches!(id, "a" | "b" | "x" | "y") {
                 // Touch buttons carry their letter (the drawing has none, as it's mirrored).
@@ -809,7 +809,7 @@ fn leader_line(ui: &egui::Ui, fr: &Frame, body: Rect) {
     let Some((_, spot)) = fr.spots.iter().find(|(k, _)| k == key) else { return };
     let bend = Pos2::new(anchor.x + if key.0 == Hand::Left { 22.0 } else { -22.0 }, anchor.y);
     let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("bind-leader"))).with_clip_rect(body);
-    let stroke = Stroke::new(1.6, kit::alpha(theme::PRIMARY, 0.85));
+    let stroke = Stroke::new(1.6f32, kit::alpha(theme::PRIMARY, 0.85));
     painter.line_segment([*anchor, bend], stroke);
     painter.line_segment([bend, *spot], stroke);
     painter.circle_filled(*anchor, 3.0, theme::PRIMARY);
@@ -818,7 +818,7 @@ fn leader_line(ui: &egui::Ui, fr: &Frame, body: Rect) {
 fn footer_ui(ui: &mut egui::Ui, e: &mut Editor, st: &mut LibState, game: &str, running: bool, cmd: &mut Option<Cmd>) {
     let rect = ui.max_rect();
     let p = ui.painter();
-    p.hline(rect.x_range(), rect.top() - 7.0, Stroke::new(1.0, kit::alpha(Color32::WHITE, 0.06)));
+    p.hline(rect.x_range(), rect.top() - 7.0, Stroke::new(1.0f32, kit::alpha(Color32::WHITE, 0.06)));
     let dirty = e.dirty();
     let blocker = e.save_blocker();
     let (glyph, text, fg) = if let Some(err) = &st.binds.error {
@@ -889,7 +889,7 @@ fn modal(ctx: &egui::Context, width: f32, title: &str, sub: &str, body: impl FnO
     egui::Area::new(egui::Id::new("bind-modal")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
         egui::Frame::default()
             .fill(Color32::from_rgb(28, 33, 40))
-            .stroke(Stroke::new(1.0, kit::alpha(Color32::WHITE, 0.08)))
+            .stroke(Stroke::new(1.0f32, kit::alpha(Color32::WHITE, 0.08)))
             .corner_radius(22)
             .inner_margin(egui::Margin::same(22))
             .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(140) })
@@ -932,7 +932,7 @@ fn pick_row(ui: &mut egui::Ui, glyph: &str, title: &str, sub: &str, badge: Optio
     let fill = if current { Color32::from_rgb(20, 72, 70) } else { kit::alpha(Color32::WHITE, 0.03 + 0.06 * h) };
     p.rect_filled(rect, CornerRadius::same(13), fill);
     if current {
-        p.rect_stroke(rect, CornerRadius::same(13), Stroke::new(1.0, kit::alpha(theme::PRIMARY, 0.6)), StrokeKind::Inside);
+        p.rect_stroke(rect, CornerRadius::same(13), Stroke::new(1.0f32, kit::alpha(theme::PRIMARY, 0.6)), StrokeKind::Inside);
     }
     let chip = Rect::from_center_size(Pos2::new(rect.left() + 30.0, rect.center().y), egui::vec2(36.0, 36.0));
     kit::icon_chip(p, chip, glyph, if current { 1.0 } else { h * 0.5 });
