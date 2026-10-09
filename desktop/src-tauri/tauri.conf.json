@@ -25,7 +25,8 @@
         "transparent": true,
         "resizable": true,
         "maximizable": false,
-        "center": true
+        "center": true,
+        "visible": false
       },
       {
         "label": "settings",
