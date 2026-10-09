@@ -10,7 +10,6 @@
   import ProtonBanner from "$lib/components/ProtonBanner.svelte";
   import UpdateToast from "$lib/components/UpdateToast.svelte";
   import NoRuntimeBanner from "$lib/components/NoRuntimeBanner.svelte";
-  import WelcomeSetup from "$lib/components/WelcomeSetup.svelte";
   import DeviceStrip from "$lib/components/DeviceStrip.svelte";
   import AppsBar from "$lib/components/AppsBar.svelte";
   import {
@@ -46,11 +45,18 @@
   const isWivrn = $derived(app.service.backend === "wivrn");
   const wivrn = $derived(app.service.wivrn);
   // steamvr_lh driver selected but no room setup for the tracking universe →
-  // nudge to set the floor (only when we can offer the fix: natively, or vrcmd).
+  // nudge to set the floor, only once it can be done right away: natively when
+  // VR runs and the headset is up (it reads the headset's pose), through
+  // SteamVR's vrcmd while the service is stopped.
+  const floorCalNow = $derived(
+    app.floorCal?.native
+      ? app.devices.some((d) => d.role === "head" || d.kind === "hmd")
+      : !!app.floorCal?.available && !app.service.running,
+  );
   const showFloorCal = $derived(
     !isWivrn &&
       app.config?.lighthouse_driver === "steamvr" &&
-      !!(app.floorCal?.native || app.floorCal?.available) &&
+      floorCalNow &&
       app.floorCal?.calibrated === false &&
       !floorCalDismissed,
   );
@@ -58,9 +64,6 @@
   const showProton = $derived(!app.importOpenxr && !protonDismissed);
   // A newer release of the built-in Monado fork / xrizer (not put off).
   const showUpdate = $derived(pendingUpdates().length > 0);
-  // First run (no config file existed) → onboarding checklist instead of the
-  // deck + a stack of individual notices.
-  const showWelcome = $derived(!!app.config && app.config.setup_seen === false);
 
   // The HMD only appears in the device snapshot (its icon turns green) once Monado
   // actually has the headset ready — a truer "ready" signal than the raw IPC
@@ -145,15 +148,14 @@
   let contentH = $state(0); // measured deck (+ error) height
   let toastSlotH = $state(0); // measured notice card height
   const toastH = $derived(
-    !showWelcome &&
-      (showToast ||
-        showCrash ||
-        showFreeze ||
-        showPreflight ||
-        showNoRuntime ||
-        showFloorCal ||
-        showProton ||
-        showUpdate)
+    showToast ||
+      showCrash ||
+      showFreeze ||
+      showPreflight ||
+      showNoRuntime ||
+      showFloorCal ||
+      showProton ||
+      showUpdate
       ? toastSlotH
       : 0,
   );
@@ -218,11 +220,6 @@
 </script>
 
 <div class="deck-window">
-  {#if showWelcome}
-    <div class="content" bind:clientHeight={contentH}>
-      <WelcomeSetup />
-    </div>
-  {:else}
   <div class="content" bind:clientHeight={contentH}>
     <div class="deck">
       <TitleBar />
@@ -271,7 +268,6 @@
       {#if showFloorCal}<FloorCalToast bind:dismissed={floorCalDismissed} />{/if}
       {#if showToast}<CapToast bind:dismissed />{/if}
     </div>
-  {/if}
   {/if}
 </div>
 

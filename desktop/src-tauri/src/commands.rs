@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tauri::State;
+use tauri::{Manager, State};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -79,8 +79,11 @@ pub fn get_config(state: State<AppState>) -> MonadeckConfig {
 }
 
 #[tauri::command]
-pub fn set_config(state: State<AppState>, config: MonadeckConfig) -> CmdResult<()> {
+pub fn set_config(state: State<AppState>, mut config: MonadeckConfig) -> CmdResult<()> {
     let previous = state.config.lock().unwrap().backend;
+    // The welcome shows once: a window still holding the config from before it
+    // finished mustn't bring it back.
+    config.setup_seen |= state.config.lock().unwrap().setup_seen;
     if config.backend != previous && state.runner.lock().unwrap().is_running() {
         return Err("stop the service before switching the runtime backend".into());
     }
@@ -94,6 +97,30 @@ pub fn set_config(state: State<AppState>, config: MonadeckConfig) -> CmdResult<(
     // A device picked while VR runs takes over right away.
     if audio_changed && state.runner.lock().unwrap().is_running() {
         crate::vr_audio::start(&state);
+    }
+    Ok(())
+}
+
+/// The welcome is done (finished or skipped): it never shows again, and the
+/// deck takes over from its window.
+#[tauri::command]
+pub fn finish_welcome(app: tauri::AppHandle, state: State<AppState>) -> CmdResult<()> {
+    {
+        let mut config = state.config.lock().unwrap();
+        config.setup_seen = true;
+        config.save().map_err(|e| e.to_string())?;
+    }
+    if let Some(deck) = app.get_webview_window("main") {
+        let _ = deck.show();
+        let _ = deck.set_focus();
+    }
+    // Out of sight now, gone once this call has answered the window asking.
+    if let Some(welcome) = app.get_webview_window("welcome") {
+        let _ = welcome.hide();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = welcome.destroy();
+        });
     }
     Ok(())
 }

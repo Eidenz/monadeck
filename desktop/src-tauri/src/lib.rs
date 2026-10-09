@@ -17,7 +17,7 @@ mod wivrn_watch;
 use state::AppState;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// Cleanly shut down and quit: stop the service (SIGTERM→SIGKILL, so it releases
 /// the HMD/DRM lease), hand the runtime files back, then exit.
@@ -44,15 +44,55 @@ fn cleanup_and_exit(app: &tauri::AppHandle) {
     app.exit(0);
 }
 
+/// The window that stands for the app (tray, close button): the first-run
+/// welcome while it's open, the deck otherwise.
+fn home_label(app: &tauri::AppHandle) -> &'static str {
+    if app.get_webview_window("welcome").is_some() {
+        "welcome"
+    } else {
+        "main"
+    }
+}
+
+fn show_home(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window(home_label(app)) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
 fn toggle_deck(app: &tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
+    if let Some(win) = app.get_webview_window(home_label(app)) {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
         } else {
-            let _ = win.show();
-            let _ = win.unminimize();
-            let _ = win.set_focus();
+            show_home(app);
         }
+    }
+}
+
+/// A first run opens the welcome instead of the deck; it hands over through
+/// `finish_welcome`. The deck starts hidden (tauri.conf.json) either way.
+fn open_first_window(app: &tauri::App) {
+    let seen = app
+        .try_state::<AppState>()
+        .is_none_or(|s| s.config.lock().unwrap().setup_seen);
+    if !seen {
+        let welcome = WebviewWindowBuilder::new(app, "welcome", WebviewUrl::App("welcome".into()))
+            .title("Welcome to Monadeck")
+            .inner_size(720.0, 780.0)
+            .min_inner_size(600.0, 560.0)
+            .decorations(false)
+            .center()
+            .build();
+        match welcome {
+            Ok(_) => return,
+            Err(e) => log::warn!("welcome window: {e}"),
+        }
+    }
+    if let Some(deck) = app.get_webview_window("main") {
+        let _ = deck.show();
     }
 }
 
@@ -82,13 +122,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .tooltip("Monadeck")
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = win.unminimize();
-                            let _ = win.set_focus();
-                        }
-                    }
+                    "show" => show_home(app),
                     "quit" => cleanup_and_exit(app),
                     _ => {}
                 })
@@ -106,13 +140,14 @@ pub fn run() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            open_first_window(app);
             Ok(())
         })
-        // Closing the deck either hides it to the tray (default) or quits. The
-        // settings window only hides on close (it would otherwise keep the
-        // process alive); the deck is what governs quitting.
+        // Closing the deck (or the welcome, before it) either hides it to the
+        // tray (default) or quits. The settings window only hides on close (it
+        // would otherwise keep the process alive); the deck is what governs quitting.
         .on_window_event(|window, event| {
-            if window.label() == "main" {
+            if window.label() == home_label(window.app_handle()) {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     let app = window.app_handle();
                     let to_tray = app
@@ -132,6 +167,7 @@ pub fn run() {
             commands::app_version,
             commands::get_config,
             commands::set_config,
+            commands::finish_welcome,
             commands::autodetect_prefix,
             commands::autodetect_xrizer,
             commands::autodetect_wivrn,

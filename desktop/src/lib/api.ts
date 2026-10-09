@@ -14,6 +14,8 @@ import type {
 export const appVersion = () => invoke<string>("app_version");
 
 export const getConfig = () => invoke<MonadeckConfig>("get_config");
+// The first-run welcome is done: never show it again, hand over to the deck.
+export const finishWelcome = () => invoke<void>("finish_welcome");
 export const setConfig = (config: MonadeckConfig) =>
   invoke<void>("set_config", { config });
 export const autodetectPrefix = () =>

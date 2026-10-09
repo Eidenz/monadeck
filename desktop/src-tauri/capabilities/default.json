@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the deck + settings windows",
-  "windows": ["main", "settings", "bindings", "gamepad"],
+  "description": "Capabilities for the deck, welcome + settings windows",
+  "windows": ["main", "settings", "bindings", "gamepad", "welcome"],
   "permissions": [
     "core:default",
     "dialog:default",
