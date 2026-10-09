@@ -2,9 +2,9 @@
   // Detached card above the deck (SteamVR-style), shown when the steamvr_lh
   // driver is selected but no room setup matches the tracking universe — so the
   // floor and forward direction would be off. Mirrors CapToast/PreflightBanner.
-  // Only rendered (by +page.svelte) when a calibration can run: without SteamVR
-  // (the runtime reports the headset's pose; needs VR running), or through
-  // SteamVR's vrcmd (needs the service stopped).
+  // Only rendered (by +page.svelte) once a calibration can run right away:
+  // without SteamVR once VR runs and the headset is up (it reads the headset's
+  // pose), or through SteamVR's vrcmd while the service is stopped.
   import { app, runFloorCalibration } from "$lib/state.svelte";
 
   let { dismissed = $bindable(false) }: { dismissed?: boolean } = $props();
@@ -17,24 +17,20 @@
   <div class="title">Floor not calibrated</div>
   <div class="desc">
     {#if native}
-      Your play space isn't set, so your floor height and forward direction will
-      be off. With VR running, stand the headset upright on the floor in the middle
-      of your play area, facing your "forward", then set it.
+      Your play space isn't set, so your floor height and forward direction are
+      off. Stand the headset upright on the floor in the middle of your play area,
+      facing your "forward", then set it.
     {:else}
       The SteamVR Lighthouse driver has no play space set, so your floor height and
       forward direction will be off. Put your headset on the floor in the middle of
       your play area (controllers off), facing your "forward", then calibrate.
     {/if}
   </div>
-  {#if blocked}
-    <div class="hint">
-      {native ? "Start VR first, setting it reads where the headset is." : "Stop the service first, calibration needs the headset."}
-    </div>
-  {:else if app.floorCalResult && !app.floorCalResult.ok}
+  {#if app.floorCalResult && !app.floorCalResult.ok}
     <div class="hint err">{app.floorCalResult.msg}</div>
   {/if}
   <div class="acts">
-    <button class="btn ghost" onclick={() => (dismissed = true)}>Dismiss</button>
+    <button class="btn ghost" onclick={() => (dismissed = true)}>Skip</button>
     <button
       class="btn primary"
       onclick={runFloorCalibration}

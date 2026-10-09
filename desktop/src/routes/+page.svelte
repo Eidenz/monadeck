@@ -45,11 +45,18 @@
   const isWivrn = $derived(app.service.backend === "wivrn");
   const wivrn = $derived(app.service.wivrn);
   // steamvr_lh driver selected but no room setup for the tracking universe →
-  // nudge to set the floor (only when we can offer the fix: natively, or vrcmd).
+  // nudge to set the floor, only once it can be done right away: natively when
+  // VR runs and the headset is up (it reads the headset's pose), through
+  // SteamVR's vrcmd while the service is stopped.
+  const floorCalNow = $derived(
+    app.floorCal?.native
+      ? app.devices.some((d) => d.role === "head" || d.kind === "hmd")
+      : !!app.floorCal?.available && !app.service.running,
+  );
   const showFloorCal = $derived(
     !isWivrn &&
       app.config?.lighthouse_driver === "steamvr" &&
-      !!(app.floorCal?.native || app.floorCal?.available) &&
+      floorCalNow &&
       app.floorCal?.calibrated === false &&
       !floorCalDismissed,
   );
