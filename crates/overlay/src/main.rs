@@ -1166,6 +1166,12 @@ fn run() -> Result<()> {
     let mut own_act: monadeck_core::bindings::own::Active;
     // The system buttons as last read (with the settle guard below).
     let mut sys_raw = [false; 2];
+    // Per hand: a system press that began while that hand's trigger was held
+    // is the runtime's screenshot chord (hold the trigger, click the system
+    // button), not a Monadeck input. Latched for the whole press, so letting
+    // go of the trigger first can't turn its tail into a dashboard toggle.
+    let mut sys_chord = [false; 2];
+    let mut sys_raw_prev = [false; 2];
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     let mut kb_hover_prev: [Option<usize>; 2] = [None, None]; // key under each hand (typing haptics)
     // Re-scan to refresh last-played ordering when a game starts/stops.
@@ -1843,6 +1849,18 @@ fn run() -> Result<()> {
                     st.mouse_summary = own::mouse_summary(doc, ctrl);
                 }
             }
+            // The screenshot chord is the runtime's (same trigger threshold as
+            // its detector); keep that system press away from Monadeck's own
+            // bindings so the shot can't also open or close the dashboard. A
+            // glove has no chord: its trigger is a curled finger.
+            for hi in 0..2 {
+                if !sys_raw[hi] {
+                    sys_chord[hi] = false;
+                } else if !sys_raw_prev[hi] && !glove[hi] && raw[hi].trigger >= 0.5 {
+                    sys_chord[hi] = true;
+                }
+            }
+            sys_raw_prev = sys_raw;
             let input = [0, 1].map(|hi| {
                 let r = &raw[hi];
                 own::HandInput {
@@ -1856,7 +1874,7 @@ fn run() -> Result<()> {
                     pad: r.pad,
                     pad_force: r.pad_force,
                     pad_touch: r.pad_touch,
-                    system: sys_raw[hi],
+                    system: sys_raw[hi] && !sys_chord[hi],
                 }
             });
             let docs = [&own_docs[tys[0]], &own_docs[tys[1]]];

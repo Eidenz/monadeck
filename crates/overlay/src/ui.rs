@@ -2509,6 +2509,7 @@ const CONTROLS: &[(&str, &[(&str, &str)])] = &[
     (
         "Photos",
         &[
+            ("Hold trigger, click system", "screenshot (the runtime's chord) · it never opens or closes the dashboard"),
             ("Finger frame (both hands)", "screenshot, if the gesture is enabled in Photos"),
             ("Grip a photo window", "move it"),
             ("Wrist card ‹ ›", "browse new shots · open puts one in a window"),
