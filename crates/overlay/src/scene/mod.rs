@@ -73,8 +73,6 @@ struct GpuPart {
     mesh: Mesh,
     texture: Option<usize>,
     motion: Option<Motion>,
-    /// The part's own frame (tilts a stick about its own axes).
-    frame: Option<[f32; 4]>,
 }
 
 struct GpuModel {
@@ -179,7 +177,6 @@ impl Scene {
                             mesh: self.gpu.mesh(&p.vertices, &p.indices)?,
                             texture: p.texture,
                             motion: p.motion.clone(),
-                            frame: data.frames.get(&p.component).map(|f| f.1),
                         });
                     }
                     let grip = data.frames.get("openxr_grip").or_else(|| data.frames.get("grip")).map(|(p, q)| math::pose(*p, *q));
@@ -417,7 +414,7 @@ impl Scene {
         let base = math::from_pose(pose);
         for part in &m.parts {
             let local = match (&part.motion, buttons) {
-                (Some(motion), Some(b)) => animate(motion, part.frame, b),
+                (Some(motion), Some(b)) => animate(motion, b),
                 _ => math::IDENTITY,
             };
             out.push(Draw {
@@ -530,7 +527,7 @@ fn from_to(a: [f32; 3], b: [f32; 3]) -> [f32; 4] {
 }
 
 /// A moving part's transform in model space.
-fn animate(motion: &Motion, frame: Option<[f32; 4]>, b: &Buttons) -> Mat4 {
+fn animate(motion: &Motion, b: &Buttons) -> Mat4 {
     let pressed = |i: Input| match i {
         Input::Trigger => b.trigger,
         Input::A => b.a as u8 as f32,
@@ -552,11 +549,13 @@ fn animate(motion: &Motion, frame: Option<[f32; 4]>, b: &Buttons) -> Mat4 {
             let s = from + (to - from) * pressed(*input).clamp(0.0, 1.0);
             math::from_trs([axis[0] * s, axis[1] * s, axis[2] * s], [0.0, 0.0, 0.0, 1.0], [1.0; 3])
         }
-        Motion::Joystick { center, tilt, press } => {
-            // Tilt about the stick's own axes: forward pushes its top away.
-            let f = frame.unwrap_or([0.0, 0.0, 0.0, 1.0]);
-            let x_axis = quat_rotate(f, [1.0, 0.0, 0.0]);
-            let z_axis = quat_rotate(f, [0.0, 0.0, 1.0]);
+        Motion::Joystick { center, frame, tilt, press } => {
+            // Forward pushes the top away, right pushes it right. The motion's
+            // frame, not the part's `component_local` one: that one's Z runs up
+            // the stick, so a sideways push would only spin it (or, where the
+            // pivot sits off the stick as on the Quest 3, swing it the wrong way).
+            let x_axis = quat_rotate(*frame, [1.0, 0.0, 0.0]);
+            let z_axis = quat_rotate(*frame, [0.0, 0.0, 1.0]);
             let q = q_mul(
                 quat_from_axis_angle(x_axis, (-b.stick.1 * tilt).to_radians()),
                 quat_from_axis_angle(z_axis, (-b.stick.0 * tilt).to_radians()),
@@ -695,6 +694,19 @@ mod tests {
         let n = crate::mathx::cross([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
         let out = cv[ci[0] as usize].nrm;
         assert!(n[0] * out[0] + n[1] * out[1] + n[2] * out[2] > 0.0);
+    }
+
+    #[test]
+    fn stick_tilts_the_way_it_is_pushed() {
+        // A stick standing up from its pivot, as on every SteamVR controller.
+        let motion = Motion::Joystick { center: [0.0; 3], frame: [0.0, 0.0, 0.0, 1.0], tilt: 20.0, press: [0.0; 3] };
+        let top = |stick: (f32, f32)| {
+            let m = animate(&motion, &Buttons { stick, ..Default::default() });
+            [m[4] * 0.01 + m[12], m[5] * 0.01 + m[13], m[6] * 0.01 + m[14]]
+        };
+        assert!(top((1.0, 0.0))[0] > 0.002, "right goes right");
+        assert!(top((-1.0, 0.0))[0] < -0.002, "left goes left");
+        assert!(top((0.0, 1.0))[2] < -0.002, "forward goes forward (-Z)");
     }
 
     #[test]

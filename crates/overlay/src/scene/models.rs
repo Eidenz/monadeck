@@ -41,8 +41,9 @@ pub enum Motion {
     Rotate { input: Input, pivot: [f32; 3], axis: [f32; 3], from: f32, to: f32 },
     /// Slides `from`..`to` metres along `axis` while pressed.
     Translate { input: Input, axis: [f32; 3], from: f32, to: f32 },
-    /// Tilts about `center` with the stick, and sinks by `press` when clicked.
-    Joystick { center: [f32; 3], tilt: f32, press: [f32; 3] },
+    /// Tilts about `center` with the stick, across the X and Z axes of its own
+    /// `frame` (the motion's `rotate_xyz`), and sinks by `press` when clicked.
+    Joystick { center: [f32; 3], frame: [f32; 4], tilt: f32, press: [f32; 3] },
 }
 
 #[derive(Debug)]
@@ -179,7 +180,8 @@ fn motion_of(m: &Value) -> Option<Motion> {
         }
         "joystick" => {
             let tilt = m["joystick_rotation_x"].as_array().and_then(|a| a.first()).and_then(Value::as_f64).unwrap_or(18.0) as f32;
-            Some(Motion::Joystick { center: v3("center")?, tilt, press: v3("press_translate").unwrap_or([0.0; 3]) })
+            let frame = euler_xyz_deg(v3("rotate_xyz").unwrap_or([0.0; 3]));
+            Some(Motion::Joystick { center: v3("center")?, frame, tilt, press: v3("press_translate").unwrap_or([0.0; 3]) })
         }
         _ => None,
     }
@@ -428,5 +430,7 @@ mod tests {
         // The Index squeeze's degrees in a translate: ignored.
         let squeeze: Value = serde_json::from_str(r#"{"type":"translate","component_path":"/input/grip","value_mapping":[0.0,-18.0],"axis":[0.977,0.119,0.179]}"#).unwrap();
         assert_eq!(motion_of(&squeeze), None);
+        let stick: Value = serde_json::from_str(r#"{"type":"joystick","component_path":"/input/joystick","center":[0.0,-0.008,0.053],"rotate_xyz":[0.0,0.0,0.0],"joystick_rotation_x":[20,-20]}"#).unwrap();
+        assert!(matches!(motion_of(&stick), Some(Motion::Joystick { frame: [0.0, 0.0, 0.0, 1.0], tilt, .. }) if tilt == 20.0));
     }
 }
