@@ -987,6 +987,8 @@ fn run() -> Result<()> {
     st.boundary_trackers = ov_cfg.boundary_trackers;
     st.boundary_floor = ov_cfg.boundary_floor;
     st.boundary_reach = ov_cfg.boundary_reach.clamp(0.2, 1.0);
+    st.boundary_glow_head = ov_cfg.boundary_glow_head.clamp(boundary::GLOW_MIN, boundary::GLOW_MAX);
+    st.boundary_glow_hands = ov_cfg.boundary_glow_hands.clamp(boundary::GLOW_MIN, boundary::GLOW_MAX);
     st.models_available = !scene::models::steamvr_roots().is_empty();
     // Base stations come from SteamVR's calibration, which only places them in
     // the frame devices are tracked in with SteamVR's own Lighthouse driver.
@@ -2265,6 +2267,8 @@ fn run() -> Result<()> {
                 hands: [locate_pose(&aim_left, &space, time), locate_pose(&aim_right, &space, time)],
                 trackers: if st.boundary_trackers && boundary_walls { trackers3d.iter().filter_map(|(_, sp)| locate_pose(sp, &space, time)).collect() } else { Vec::new() },
                 reach: st.boundary_reach,
+                glow_head: st.boundary_glow_head,
+                glow_hands: st.boundary_glow_hands,
                 floor: visible || home || st.boundary_floor,
             };
             // While one's being drawn, it stands in for the kept one (which
@@ -3892,6 +3896,8 @@ fn overlay_config_from(
         boundary_trackers: st.boundary_trackers,
         boundary_floor: st.boundary_floor,
         boundary_reach: st.boundary_reach,
+        boundary_glow_head: st.boundary_glow_head,
+        boundary_glow_hands: st.boundary_glow_hands,
         skybox_path: skybox_path.clone(),
         qr_detect: st.photo_qr_detect,
         qr_autodelete: st.photo_qr_autodelete,

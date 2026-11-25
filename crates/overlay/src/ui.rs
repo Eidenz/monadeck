@@ -169,6 +169,10 @@ pub struct LibState {
     pub boundary_trackers: bool,
     pub boundary_floor: bool,
     pub boundary_reach: f32,
+    /// How far a wall's glow spreads around the headset, and around the
+    /// hands and trackers (1: the usual).
+    pub boundary_glow_head: f32,
+    pub boundary_glow_hands: f32,
     /// A boundary can be drawn here (not on WiVRn: the headset has its own).
     pub boundary_possible: bool,
     /// There's a room setup to draw it in (SteamVR's Lighthouse driver needs one).
@@ -499,6 +503,8 @@ impl LibState {
             boundary_trackers: true,
             boundary_floor: false,
             boundary_reach: 0.4,
+            boundary_glow_head: 1.0,
+            boundary_glow_hands: 1.0,
             boundary_possible: true,
             boundary_ready: true,
             boundary_info: None,

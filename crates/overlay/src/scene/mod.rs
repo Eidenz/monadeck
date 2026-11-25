@@ -20,7 +20,7 @@ use crate::mathx::{pose_compose, pose_invert, quat_from_axis_angle, quat_rotate,
 use gpu::{Draw, Gpu, Mesh, Mode, Target, Texture};
 use math::Mat4;
 use models::{Input, Motion, Vertex};
-pub use walls::Walls;
+pub use walls::{Near, Walls};
 
 /// The rim and grid colour (linear): Monadeck's teal.
 const TEAL: [f32; 3] = [0.05, 0.74, 0.63];

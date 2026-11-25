@@ -439,6 +439,16 @@ fn boundary(ui: &mut egui::Ui, st: &mut LibState) {
         row(ui, "Distance", "How close before a wall shows", SLIDER_W, |ui| {
             slider(ui, &mut st.boundary_reach, 0.2..=1.0, SLIDER_W, |v| format!("{v:.2} m"));
         });
+        let glow = crate::boundary::GLOW_MIN..=crate::boundary::GLOW_MAX;
+        let percent = |v: f32| format!("{:.0}%", v * 100.0);
+        divider(ui);
+        row(ui, "Headset glow", "How far the glow spreads around your head", SLIDER_W, |ui| {
+            slider(ui, &mut st.boundary_glow_head, glow.clone(), SLIDER_W, percent);
+        });
+        divider(ui);
+        row(ui, "Controller glow", "How far the glow spreads around your hands and trackers", SLIDER_W, |ui| {
+            slider(ui, &mut st.boundary_glow_hands, glow, SLIDER_W, percent);
+        });
         divider(ui);
         t |= switch_row(ui, "Trackers bring them up", "Feet and other trackers count, not only your head and hands", &mut st.boundary_trackers);
         divider(ui);

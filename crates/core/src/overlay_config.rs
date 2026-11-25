@@ -142,6 +142,10 @@ pub struct OverlayConfig {
     pub boundary_floor: bool,
     /// How close (metres) to a wall before it shows.
     pub boundary_reach: f32,
+    /// How far a wall's glow spreads around the headset, and around the hands
+    /// and trackers (1 = the usual size).
+    pub boundary_glow_head: f32,
+    pub boundary_glow_hands: f32,
     // Screenshots (from monado-frame).
     pub qr_detect: bool,
     pub qr_autodelete: bool,
@@ -255,6 +259,8 @@ impl Default for OverlayConfig {
             boundary_trackers: true,
             boundary_floor: false,
             boundary_reach: 0.4,
+            boundary_glow_head: 1.0,
+            boundary_glow_hands: 1.0,
             qr_detect: false,
             qr_autodelete: false,
             skip_wrist_photo: false,
