@@ -93,6 +93,8 @@ pub struct ClientInfo {
 struct Status {
     /// Name of the primary (non-overlay) app, i.e. the running game.
     running_app: Option<String>,
+    /// The Steam AppId it was launched under, when its process says.
+    running_steam_id: Option<String>,
     /// Per-device battery levels (controllers/gloves/trackers).
     batteries: Vec<BatteryInfo>,
     /// Freezable app clients (non-overlay sessions) and their freeze state.
@@ -126,6 +128,12 @@ impl MonadoLink {
     /// The running game's name, if any (polled ~2×/s).
     pub fn running_app(&self) -> Option<String> {
         self.status.lock().unwrap().running_app.clone()
+    }
+
+    /// The Steam AppId the running game was launched under, found from its
+    /// process (for when its name doesn't match the library's).
+    pub fn running_steam_id(&self) -> Option<String> {
+        self.status.lock().unwrap().running_steam_id.clone()
     }
 
     /// Current device battery levels.
@@ -213,6 +221,11 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
     let mut lost_since: HashMap<String, Instant> = HashMap::new();
     // The hold-pose-when-off choice, re-applied on every (re)connect.
     let mut desired_hold: Option<bool> = None;
+    // The running app's Steam AppId: looked up when it changes, and again
+    // every few seconds while nothing was found.
+    let mut steam_for: Option<String> = None;
+    let mut steam_id: Option<String> = None;
+    let mut steam_tried: Option<Instant> = None;
     loop {
         let was_connected = mon.is_some();
         if mon.is_none() && service_connected() {
@@ -275,6 +288,15 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
                 if mon.is_none() {
                     frozen_ids.clear();
                 }
+                if running != steam_for {
+                    (steam_for, steam_id, steam_tried) = (running.clone(), None, None);
+                }
+                if let (Some(app), None) = (&running, &steam_id) {
+                    if steam_tried.is_none_or(|t| t.elapsed() >= Duration::from_secs(5)) {
+                        steam_tried = Some(Instant::now());
+                        steam_id = crate::launch::steam_app_of(app);
+                    }
+                }
                 let batteries = poll_batteries(&mon, &mut lost_since);
                 let hold_pose = mon
                     .as_ref()
@@ -287,6 +309,7 @@ fn worker(cmd_rx: Receiver<Cmd>, status: Arc<Mutex<Status>>) {
                 let mut s = status.lock().unwrap();
                 s.origin = origin;
                 s.running_app = running;
+                s.running_steam_id = steam_id.clone();
                 s.batteries = batteries;
                 s.clients = clients;
                 s.freeze_supported = freeze_supported;

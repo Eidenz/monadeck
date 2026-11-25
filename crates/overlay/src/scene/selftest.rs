@@ -132,6 +132,8 @@ pub fn run(dir: &Path) -> Result<()> {
                 hands: [Some(math::pose([-0.9, 1.0, -2.0], tilt(-30.0))), Some(math::pose([-0.3, 0.9, -2.2], tilt(-30.0)))],
                 trackers: Vec::new(),
                 reach: 0.4,
+                glow_head: 1.0,
+                glow_hands: 1.0,
                 floor: true,
             };
             items.extend(crate::boundary::setup_items(&setup, &view));
@@ -231,7 +233,7 @@ fn sample() -> Vec<Item> {
         room: xr::Posef::IDENTITY,
         loops: vec![vec![[-2.1, 1.3], [1.7, 1.5], [1.85, -1.4], [0.6, -1.9], [-0.5, -2.3], [-2.3, -0.9]]],
         open: false,
-        near: vec![[1.5, 1.15, -0.35], [0.0, 1.7, 0.1]],
+        near: vec![super::walls::Near::new([1.5, 1.15, -0.35], 1.0), super::walls::Near::new([0.0, 1.7, 0.1], 1.0)],
         reach: 0.4,
         base: 0.0,
         floor: 0.9,

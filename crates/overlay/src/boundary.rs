@@ -6,7 +6,7 @@
 use openxr as xr;
 
 use crate::mathx::{pose_compose, pose_invert, quat_rotate};
-use crate::scene::{self, math, Item, Walls};
+use crate::scene::{self, math, Item, Near, Walls};
 
 /// A point on the floor: (x, z) in the room setup's frame.
 pub type P2 = [f32; 2];
@@ -21,6 +21,9 @@ const TRACE_MIN: f32 = 0.15;
 const CLOSE_DIST: f32 = 0.3;
 /// Smaller than this (square metres) is a slip, not a room.
 const MIN_AREA: f32 = 0.5;
+/// How far a wall's glow can spread, against the usual size.
+pub const GLOW_MIN: f32 = 0.5;
+pub const GLOW_MAX: f32 = 2.5;
 
 /// What the Boundary page asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,6 +306,10 @@ pub struct View {
     pub hands: [Option<xr::Posef>; 2],
     pub trackers: Vec<xr::Posef>,
     pub reach: f32,
+    /// How far the glow spreads around the headset, and around the hands
+    /// and trackers (1: the usual).
+    pub glow_head: f32,
+    pub glow_hands: f32,
     /// The outline shows on the floor.
     pub floor: bool,
 }
@@ -324,9 +331,10 @@ impl View {
 /// nothing to show (no layer, no cost).
 pub fn walls(loops: &[Vec<P2>], v: &View) -> Option<Item> {
     let head = v.head.as_ref().map(|h| v.in_room(h));
-    let near: Vec<[f32; 3]> = head.into_iter().chain(v.hands.iter().flatten().map(|p| v.in_room(p))).chain(v.trackers.iter().map(|p| v.in_room(p))).collect();
+    let body = v.hands.iter().flatten().chain(v.trackers.iter()).map(|p| Near::new(v.in_room(p), v.glow_hands));
+    let near: Vec<Near> = head.map(|h| Near::new(h, v.glow_head)).into_iter().chain(body).collect();
     let outside = head.is_some_and(|h| !contains(loops, [h[0], h[2]]));
-    let close = near.iter().any(|p| nearest_wall(loops, [p[0], p[2]]) < v.reach);
+    let close = near.iter().any(|n| nearest_wall(loops, [n.at[0], n.at[2]]) < v.reach);
     (outside || close || v.floor).then(|| {
         Item::Walls(Box::new(Walls {
             room: v.room,

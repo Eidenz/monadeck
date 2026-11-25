@@ -13,6 +13,20 @@ const CELL: f32 = 0.1;
 /// The floor lines' width.
 const LINE: f32 = 0.03;
 
+/// Something that brings the walls up: where it is (room frame), and how far
+/// its glow spreads (1: the usual).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Near {
+    pub at: [f32; 3],
+    pub glow: f32,
+}
+
+impl Near {
+    pub fn new(at: [f32; 3], glow: f32) -> Self {
+        Self { at, glow }
+    }
+}
+
 /// The boundary, as the 3D layer draws it.
 pub struct Walls {
     /// The room setup's frame, in the eye views' space.
@@ -21,8 +35,8 @@ pub struct Walls {
     pub loops: Vec<Vec<P2>>,
     /// The last outline is still being drawn: its closing side is only hinted.
     pub open: bool,
-    /// What brings the walls up (room frame), and from how far.
-    pub near: Vec<[f32; 3]>,
+    /// What brings the walls up, and from how far.
+    pub near: Vec<Near>,
     pub reach: f32,
     /// Every wall shows at least this much (fully once you're outside).
     pub base: f32,
@@ -38,6 +52,7 @@ struct Approach {
     k: f32,
     at: P2,
     y: f32,
+    glow: f32,
 }
 
 fn smooth(t: f32) -> f32 {
@@ -45,21 +60,22 @@ fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn approaches(a: P2, b: P2, near: &[[f32; 3]], reach: f32) -> Vec<Approach> {
+fn approaches(a: P2, b: P2, near: &[Near], reach: f32) -> Vec<Approach> {
     near.iter()
-        .filter_map(|p| {
+        .filter_map(|n| {
+            let p = n.at;
             let (d, at) = segment_distance([p[0], p[2]], a, b);
             let k = smooth((reach - d) / (reach * 0.75));
-            (k > 0.0).then_some(Approach { k, at, y: p[1] })
+            (k > 0.0).then_some(Approach { k, at, y: p[1], glow: n.glow })
         })
         .collect()
 }
 
 /// How strongly the wall shows at `(xz, y)`: a patch around each approach
-/// that grows as it gets closer.
+/// that grows as it gets closer (and with its glow).
 fn strength(xz: P2, y: f32, near: &[Approach], base: f32) -> f32 {
     near.iter().fold(base, |s, n| {
-        let radius = 0.45 + 0.6 * n.k;
+        let radius = (0.45 + 0.6 * n.k) * n.glow;
         let r = dist(xz, n.at).hypot(y - n.y);
         s.max(n.k * (1.0 - smooth((r - radius * 0.35) / (radius * 0.65))))
     })
@@ -145,7 +161,7 @@ mod tests {
             room: xr::Posef::IDENTITY,
             loops: vec![vec![[0.0, 0.0], [3.0, 0.0], [3.0, 2.0], [0.0, 2.0]]],
             open: false,
-            near,
+            near: near.into_iter().map(|at| Near::new(at, 1.0)).collect(),
             reach: 0.4,
             base,
             floor: 1.0,
@@ -170,6 +186,21 @@ mod tests {
         // Outside: everything.
         build(&walls(vec![], 1.0), &mut wall, &mut line);
         assert!(wall.0.iter().all(|v| v.nrm[0] == 1.0));
+    }
+
+    #[test]
+    fn a_bigger_glow_spreads_further_along_the_wall() {
+        let (mut wall, mut line) = Default::default();
+        let mut w = walls(vec![[1.5, 1.2, 0.05]], 0.0);
+        let at = |wall: &MeshData, x: f32| wall.0.iter().find(|v| (v.pos[0] - x).abs() < 0.01 && (v.pos[1] - 1.2).abs() < 0.06 && v.pos[2] == 0.0).map(|v| v.nrm[0]).unwrap();
+        build(&w, &mut wall, &mut line);
+        let (usual_near, usual_far) = (at(&wall, 1.0), at(&wall, 0.6));
+        w.near[0].glow = 2.0;
+        build(&w, &mut wall, &mut line);
+        assert!(at(&wall, 1.0) > usual_near, "{} vs {usual_near}", at(&wall, 1.0));
+        assert!(at(&wall, 0.6) > usual_far + 0.3, "{} vs {usual_far}", at(&wall, 0.6));
+        // Right at the hand it's as strong as ever.
+        assert!(at(&wall, 1.5) > 0.9);
     }
 
     #[test]

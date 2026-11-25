@@ -987,6 +987,8 @@ fn run() -> Result<()> {
     st.boundary_trackers = ov_cfg.boundary_trackers;
     st.boundary_floor = ov_cfg.boundary_floor;
     st.boundary_reach = ov_cfg.boundary_reach.clamp(0.2, 1.0);
+    st.boundary_glow_head = ov_cfg.boundary_glow_head.clamp(boundary::GLOW_MIN, boundary::GLOW_MAX);
+    st.boundary_glow_hands = ov_cfg.boundary_glow_hands.clamp(boundary::GLOW_MIN, boundary::GLOW_MAX);
     st.models_available = !scene::models::steamvr_roots().is_empty();
     // Base stations come from SteamVR's calibration, which only places them in
     // the frame devices are tracked in with SteamVR's own Lighthouse driver.
@@ -1175,7 +1177,7 @@ fn run() -> Result<()> {
     let mut hover_prev: Option<usize> = None; // haptic hover edge
     let mut kb_hover_prev: [Option<usize>; 2] = [None, None]; // key under each hand (typing haptics)
     // Re-scan to refresh last-played ordering when a game starts/stops.
-    let mut running_app_prev: Option<String> = None;
+    let mut running_prev: (Option<String>, Option<String>) = (None, None);
     let mut refresh_rx: Option<std::sync::mpsc::Receiver<Vec<monadeck_core::steam::LibraryGame>>> = None;
     let mut manual_refresh = false; // a user-requested "Refresh library" is pending
     // Notifications + timer (run even while the dashboard is hidden).
@@ -1297,7 +1299,15 @@ fn run() -> Result<()> {
 
         // A game started or stopped -> last-played changed -> refresh the order.
         let running = monado.running_app();
-        if running != running_app_prev {
+        let running_id = monado.running_steam_id();
+        if (&running, &running_id) != (&running_prev.0, &running_prev.1) {
+            if let Some(app) = &running {
+                let launched = running_id.as_ref().map(|id| format!(" (Steam AppId {id})")).unwrap_or_default();
+                match running_game(&st.games, Some(app), running_id.as_deref()) {
+                    Some(i) => log::info!("xr: '{app}'{launched} is running: {}", st.games[i].name),
+                    None => log::info!("xr: '{app}'{launched} is running, no library game matches it"),
+                }
+            }
             // Close the previous session into the store (ignore <30 s blips).
             if let (Some(s), Some(key)) = (session_start.take(), session_key.take()) {
                 let secs = s.elapsed().as_secs();
@@ -1309,7 +1319,7 @@ fn run() -> Result<()> {
             // An XR client that matches a library game IS a VR game: remember it,
             // and keep gaming mode's pad away from it from its next launch on.
             if let Some(app) = &running {
-                if let Some(g) = st.games.iter_mut().find(|g| name_matches(&g.name, app)) {
+                if let Some(g) = running_game(&st.games, Some(app), running_id.as_deref()).and_then(|i| st.games.get_mut(i)) {
                     if let Some(id) = g.cover_id.clone() {
                         g.vr = true;
                         if learned_vr.insert(id.clone()) {
@@ -1326,17 +1336,13 @@ fn run() -> Result<()> {
             }
             // Open a new session for the now-running game (if we can key it).
             if let Some(app) = &running {
-                if let Some(key) = st
-                    .games
-                    .iter()
-                    .find(|g| name_matches(&g.name, app))
-                    .and_then(|g| g.cover_id.clone())
+                if let Some(key) = running_game(&st.games, Some(app), running_id.as_deref()).and_then(|i| st.games[i].cover_id.clone())
                 {
                     session_start = Some(Instant::now());
                     session_key = Some(key);
                 }
             }
-            running_app_prev = running.clone();
+            running_prev = (running.clone(), running_id.clone());
             if refresh_rx.is_none() {
                 refresh_rx = Some(games::spawn_scan());
             }
@@ -1578,7 +1584,7 @@ fn run() -> Result<()> {
         // The tracker decides: up (dismiss), died (dismiss + say so, or relaunch
         // once after a Proton prefix upgrade), or still coming.
         if let Some(t) = &mut launch_track {
-            let appeared = running.as_ref().is_some_and(|app| name_matches(&t.name, app));
+            let appeared = running.as_ref().is_some_and(|app| running_id.as_ref() == Some(&t.id) || name_matches(&t.name, app));
             let id = t.id.clone();
             let outcome = t.poll(proc_watch.state(), appeared, now, || monadeck_core::steam::prefix_version(&id));
             let ours = |p: &Option<LaunchPopup>, name: &str| p.as_ref().is_some_and(|p| p.name == name);
@@ -1660,19 +1666,14 @@ fn run() -> Result<()> {
         // Runs even while hidden, so a game's offset is active during play with the
         // dashboard dismissed. Track the running game by cover id; when it changes,
         // load its stored override into the editor's per-game buffer.
-        let running_cover = running
-            .as_ref()
-            .and_then(|app| st.games.iter().find(|g| name_matches(&g.name, app)))
-            .and_then(|g| g.cover_id.clone());
+        let running_cover = running_game(&st.games, running.as_deref(), running_id.as_deref()).and_then(|i| st.games[i].cover_id.clone());
         if running_cover != running_cover_prev {
             running_cover_prev = running_cover.clone();
             match &running_cover {
                 Some(cid) => {
                     st.ps_game_active = true;
-                    st.ps_game_name = running
-                        .as_ref()
-                        .and_then(|app| st.games.iter().find(|g| name_matches(&g.name, app)))
-                        .map(|g| g.name.clone())
+                    st.ps_game_name = running_game(&st.games, running.as_deref(), running_id.as_deref())
+                        .map(|i| st.games[i].name.clone())
                         .unwrap_or_default();
                     if let Some(o) = ps_overrides.get(cid) {
                         st.ps_game_override = true;
@@ -1888,10 +1889,8 @@ fn run() -> Result<()> {
                     recenter = true; // reappear in front of the head
                     summon_at = Some(Instant::now());
                     // Auto-select the running game, if any (SteamVR-style).
-                    if let Some(app) = &running {
-                        if let Some(i) = st.games.iter().position(|g| name_matches(&g.name, app)) {
-                            st.selected = Some(i);
-                        }
+                    if let Some(i) = running_game(&st.games, running.as_deref(), running_id.as_deref()) {
+                        st.selected = Some(i);
                     }
                 }
             }
@@ -2268,6 +2267,8 @@ fn run() -> Result<()> {
                 hands: [locate_pose(&aim_left, &space, time), locate_pose(&aim_right, &space, time)],
                 trackers: if st.boundary_trackers && boundary_walls { trackers3d.iter().filter_map(|(_, sp)| locate_pose(sp, &space, time)).collect() } else { Vec::new() },
                 reach: st.boundary_reach,
+                glow_head: st.boundary_glow_head,
+                glow_hands: st.boundary_glow_hands,
                 floor: visible || home || st.boundary_floor,
             };
             // While one's being drawn, it stands in for the kept one (which
@@ -2942,7 +2943,8 @@ fn run() -> Result<()> {
         }
 
         // Reflect the running game into the UI each frame.
-        st.running_index = running.as_ref().and_then(|app| st.games.iter().position(|g| name_matches(&g.name, app)));
+        st.running_index = running_game(&st.games, running.as_deref(), running_id.as_deref());
+        st.running_name = running.clone();
 
         // Comfort knobs (live): distance, size, curvature. The dashboard is a
         // head-centred cylinder, so distance = anchor placement, the cylinder
@@ -3530,7 +3532,7 @@ fn run() -> Result<()> {
             panel_dist_prev = st.panel_dist;
             recenter = true;
         }
-        if st.stop_request.take().is_some() {
+        if std::mem::take(&mut st.stop_request) {
             if let Some(app) = monado.running_app() {
                 stop_game(&app);
                 st.flash(format!("Stopping {app}…"));
@@ -3894,6 +3896,8 @@ fn overlay_config_from(
         boundary_trackers: st.boundary_trackers,
         boundary_floor: st.boundary_floor,
         boundary_reach: st.boundary_reach,
+        boundary_glow_head: st.boundary_glow_head,
+        boundary_glow_hands: st.boundary_glow_hands,
         skybox_path: skybox_path.clone(),
         qr_detect: st.photo_qr_detect,
         qr_autodelete: st.photo_qr_autodelete,
@@ -4006,10 +4010,21 @@ fn pulse(
 }
 
 /// Whether a catalogue game name and a libmonado client (OpenXR app) name refer
-/// to the same game — loose, since the two don't always match exactly.
+/// to the same game — loose, since the two don't always match exactly: case,
+/// spaces and punctuation don't count ("BeatSaber" is "Beat Saber"), and one
+/// may hold the other, as long as that's more than a few letters.
 fn name_matches(game: &str, app: &str) -> bool {
-    let (g, a) = (game.to_lowercase(), app.to_lowercase());
-    !g.is_empty() && !a.is_empty() && (g == a || g.contains(&a) || a.contains(&g))
+    let (g, a) = (launch::fold(game), launch::fold(app));
+    !g.is_empty() && !a.is_empty() && (g == a || (a.len() >= 4 && g.contains(&a)) || (g.len() >= 4 && a.contains(&g)))
+}
+
+/// The library game an XR client is: the one Steam launched it as (its
+/// process says), else the one named like it.
+fn running_game(games: &[games::LibGame], app: Option<&str>, steam_id: Option<&str>) -> Option<usize> {
+    let app = app?;
+    steam_id
+        .and_then(|id| games.iter().position(|g| g.cover_id.as_deref() == Some(id)))
+        .or_else(|| games.iter().position(|g| name_matches(&g.name, app)))
 }
 
 /// Best-effort "stop the running game". libmonado has no kill API, so we SIGTERM

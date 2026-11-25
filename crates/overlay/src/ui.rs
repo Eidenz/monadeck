@@ -106,10 +106,13 @@ pub struct LibState {
     pub visible_now: Vec<usize>,
     /// Index of the currently-running game in `games`, if it's in the catalogue.
     pub running_index: Option<usize>,
+    /// The running XR app's own name, in the catalogue or not.
+    pub running_name: Option<String>,
     /// Index of the tile under the pointer this frame (drives hover haptics).
     pub hovered_index: Option<usize>,
     pub launch_request: Option<usize>,
-    pub stop_request: Option<usize>,
+    /// Stop the running game.
+    pub stop_request: bool,
     pub favorite_toggle_request: Option<usize>,
     /// Toggle the selected game's UEVR ("VR Mod") flag.
     pub uevr_toggle_request: Option<usize>,
@@ -166,6 +169,10 @@ pub struct LibState {
     pub boundary_trackers: bool,
     pub boundary_floor: bool,
     pub boundary_reach: f32,
+    /// How far a wall's glow spreads around the headset, and around the
+    /// hands and trackers (1: the usual).
+    pub boundary_glow_head: f32,
+    pub boundary_glow_hands: f32,
     /// A boundary can be drawn here (not on WiVRn: the headset has its own).
     pub boundary_possible: bool,
     /// There's a room setup to draw it in (SteamVR's Lighthouse driver needs one).
@@ -445,9 +452,10 @@ impl LibState {
             selected: None,
             visible_now: Vec::new(),
             running_index: None,
+            running_name: None,
             hovered_index: None,
             launch_request: None,
-            stop_request: None,
+            stop_request: false,
             favorite_toggle_request: None,
             uevr_toggle_request: None,
             collections: Vec::new(),
@@ -495,6 +503,8 @@ impl LibState {
             boundary_trackers: true,
             boundary_floor: false,
             boundary_reach: 0.4,
+            boundary_glow_head: 1.0,
+            boundary_glow_hands: 1.0,
             boundary_possible: true,
             boundary_ready: true,
             boundary_info: None,
@@ -1563,9 +1573,11 @@ pub fn build_bottom(ctx: &egui::Context, st: &mut LibState) {
                 st.recenter_playspace_request = true;
                 st.sound_tab = true;
             }
-            // The running game: opens its splash.
-            if let Some(i) = st.running_index {
-                let name = short(&st.games[i].name);
+            // The running game: opens its splash. One the library doesn't
+            // know still shows, under the name it gave the runtime.
+            let running = st.running_index.and_then(|i| st.games.get(i)).map(|g| g.name.clone()).or_else(|| st.running_name.clone());
+            if let Some(name) = running {
+                let name = short(&name);
                 let label = format!("{}  {name}", icon::GAME_CONTROLLER);
                 let g = ui.fonts(|f| f.layout_no_wrap(label.clone(), egui::FontId::proportional(15.0), egui::Color32::WHITE));
                 let (r, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 44.0, 48.0), egui::Sense::click());
@@ -2232,8 +2244,12 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str, 
             st.nav = Nav::Home;
         }
     }
+    // Launching from here lands on Home with that game up: that's where it
+    // shows as running, with its Stop button, when the dashboard comes back.
     if launch.is_some() {
         st.launch_request = launch;
+        st.selected = launch;
+        st.nav = Nav::Home;
     }
 }
 
@@ -2372,20 +2388,22 @@ fn tags_view(ui: &mut egui::Ui, st: &mut LibState) {
 /// it is, and Stop.
 fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
     st.hovered_index = None;
-    let Some(i) = st.running_index.filter(|&i| i < st.games.len()) else {
+    // A game the library doesn't know gets the same page, without its art.
+    let i = st.running_index.filter(|&i| i < st.games.len());
+    let Some(name) = i.map(|i| st.games[i].name.clone()).or_else(|| st.running_name.clone()) else {
         st.visible_now.clear();
         kit::empty_state(ui, icon::GAME_CONTROLLER, "No game is running", "Pick one from Home or the Library");
         return;
     };
     // Keep the running game's cover loaded while the splash is shown.
-    st.visible_now = vec![i];
-    let g = &st.games[i];
+    st.visible_now = i.into_iter().collect();
+    let g = i.map(|i| &st.games[i]);
 
     // Hero art (or its gradient) full-bleed, under a scrim that deepens downward.
     let full = ui.max_rect().expand2(egui::vec2(24.0, 18.0));
-    match &g.hero {
-        ArtState::Ready(tex) => kit::cover_image(ui, full, tex, 0.0),
-        _ => draw_hero_placeholder(ui.painter(), full, &g.name, 0.0),
+    match g.map(|g| &g.hero) {
+        Some(ArtState::Ready(tex)) => kit::cover_image(ui, full, tex, 0.0),
+        _ => draw_hero_placeholder(ui.painter(), full, &name, 0.0),
     }
     kit::gradient_rect(ui.painter(), full, 0.0, egui::Color32::from_black_alpha(120), egui::Color32::from_black_alpha(235));
 
@@ -2394,14 +2412,17 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
         ui.add_space(24.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(290.0, 435.0), egui::Sense::hover());
         ui.painter().rect_filled(rect.translate(egui::vec2(0.0, 8.0)).expand(4.0), egui::CornerRadius::same(24), egui::Color32::from_black_alpha(110));
-        draw_art(ui, rect, &g.cover, &g.name, 20.0);
+        match g {
+            Some(g) => draw_art(ui, rect, &g.cover, &g.name, 20.0),
+            None => draw_art(ui, rect, &ArtState::Missing, &name, 20.0),
+        }
         ui.painter().rect_stroke(rect, egui::CornerRadius::same(20), egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
         ui.add_space(52.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 10.0;
             ui.add_space(26.0);
             ui.label(egui::RichText::new("NOW PLAYING").size(13.5).strong().color(theme::PRIMARY));
-            ui.label(egui::RichText::new(&g.name).size(46.0).strong().color(egui::Color32::WHITE));
+            ui.label(egui::RichText::new(&name).size(46.0).strong().color(egui::Color32::WHITE));
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let live = match st.session_minutes {
@@ -2409,12 +2430,16 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
                     _ => "Running".to_string(),
                 };
                 kit::live_badge(ui, &live, RUNNING_GREEN);
-                kit::badge(ui, &g.source, theme::ON_SURFACE_VAR);
-                if g.vr {
-                    kit::badge(ui, "VR", theme::PRIMARY);
+                if let Some(g) = g {
+                    kit::badge(ui, &g.source, theme::ON_SURFACE_VAR);
+                    if g.vr {
+                        kit::badge(ui, "VR", theme::PRIMARY);
+                    }
                 }
             });
-            ui.label(egui::RichText::new(meta_label(g)).size(16.0).color(theme::ON_SURFACE_VAR));
+            if let Some(g) = g {
+                ui.label(egui::RichText::new(meta_label(g)).size(16.0).color(theme::ON_SURFACE_VAR));
+            }
             ui.add_space(30.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
@@ -2423,7 +2448,7 @@ fn splash_view(ui: &mut egui::Ui, st: &mut LibState) {
                 ui.painter().rect_filled(r, egui::CornerRadius::same(29), kit::mix(STOP_RED, egui::Color32::WHITE, h * 0.12));
                 ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("{}  Stop", icon::STOP), egui::FontId::proportional(21.0), egui::Color32::WHITE);
                 if resp.clicked() {
-                    st.stop_request = Some(i);
+                    st.stop_request = true;
                     st.sound_tab = true;
                 }
                 if kit::button(ui, icon::SQUARES_FOUR, "Library", kit::Tone::Neutral, 150.0).clicked() {
@@ -2618,7 +2643,7 @@ fn hero(ui: &mut egui::Ui, st: &mut LibState) {
     };
     match action {
         HeroAction::Launch => st.launch_request = sel,
-        HeroAction::Stop => st.stop_request = sel,
+        HeroAction::Stop => st.stop_request = true,
         HeroAction::ToggleFavorite => st.favorite_toggle_request = sel,
         HeroAction::ToggleUevr => st.uevr_toggle_request = sel,
         HeroAction::EditBindings => {

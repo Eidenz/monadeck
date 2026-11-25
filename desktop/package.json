@@ -1,6 +1,6 @@
 {
   "name": "monadeck-desktop",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "Monadeck — SteamVR-style launcher for a Monado fork",
   "type": "module",
   "scripts": {
