@@ -45,6 +45,10 @@ deps() {
 # - It carries the build system's libwayland-*, and a newer Mesa can't set up
 #   EGL next to them: WebKit's web process aborts, and the window stays empty
 #   (invisible, being frameless). Every desktop has its own copy, so drop them.
+# - It carries this system's libpipewire too, which looks for its plugins in
+#   Debian's folder: anywhere else (Arch, Fedora) it can't start a PipeWire
+#   loop, so the overlay's screens never get a picture, and the host's ALSA
+#   PipeWire plugin fails against it. PipeWire is on every desktop: use theirs.
 # - Its .DirIcon is an absolute link into the build directory, so it points
 #   nowhere on anyone else's machine and the AppImage shows no icon. Point it
 #   at the biggest of the app's own icons instead (the 256x256 one).
@@ -60,7 +64,7 @@ fix_appimage() {
   work=$(mktemp -d)
   root="$work/squashfs-root"
   (cd "$work" && "$img" --appimage-extract >/dev/null)
-  rm -f "$root"/usr/lib/libwayland-*.so*
+  rm -f "$root"/usr/lib/libwayland-*.so* "$root"/usr/lib/libpipewire-0.3.so*
   cp -L /usr/lib/x86_64-linux-gnu/libharfbuzz.so.0 "$root/usr/lib/"
   # shellcheck disable=SC2012 # by size: the biggest file is the biggest icon
   icon=$(cd "$root" && ls -S usr/share/icons/hicolor/*/apps/*.png 2>/dev/null | head -n1)
