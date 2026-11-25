@@ -2238,8 +2238,12 @@ fn game_grid(ui: &mut egui::Ui, st: &mut LibState, shown: &[usize], salt: &str, 
             st.nav = Nav::Home;
         }
     }
+    // Launching from here lands on Home with that game up: that's where it
+    // shows as running, with its Stop button, when the dashboard comes back.
     if launch.is_some() {
         st.launch_request = launch;
+        st.selected = launch;
+        st.nav = Nav::Home;
     }
 }
 
