@@ -247,6 +247,22 @@ pub fn run(dir: &Path) -> Result<()> {
         rasterise(&prims, &textures, out.pixels_per_point, BOTTOM_PX).save(&path)?;
         println!("{}", path.display());
     }
+    // The running game on the bar's left: a library game, and one the library
+    // doesn't know (under the name it gave the runtime).
+    for (name, listed) in [("bottom-bar-game", true), ("bottom-bar-game-unlisted", false)] {
+        if !wanted(name) {
+            continue;
+        }
+        let mut st = crate::ui::LibState::new();
+        st.clock = "10:45 AM".into();
+        st.games = sample_games(&ctx);
+        (st.running_index, st.running_name) = if listed { (Some(0), Some(st.games[0].name.clone())) } else { (None, Some("BladeAndSorcery".into())) };
+        st.batteries = vec![hand(bat(BatteryKind::Controller, 0.86), Hand::Left), hand(bat(BatteryKind::Controller, 0.83), Hand::Right)];
+        let img = shoot(&ctx, &mut textures, BOTTOM_PX, 3, |ctx| crate::ui::build_bottom(ctx, &mut st));
+        let path = dir.join(format!("{name}.png"));
+        img.save(&path)?;
+        println!("{}", path.display());
+    }
     // The wrist watch with the same devices: live, off and out of sight.
     if wanted("watch-states") {
         let mut st = sample_state();
@@ -518,6 +534,11 @@ fn dashboard(ctx: &egui::Context, textures: &mut HashMap<egui::TextureId, Tex>, 
         })),
         ("dash-favorites", Box::new(|st| st.nav = Nav::Favorites)),
         ("dash-splash", Box::new(|st| st.show_splash = true)),
+        ("dash-splash-unlisted", Box::new(|st| {
+            st.running_index = None;
+            st.running_name = Some("BladeAndSorcery".into());
+            st.show_splash = true;
+        })),
         ("dash-search", Box::new(|st| {
             st.search = "ha".into();
             st.keyboard_open = true;

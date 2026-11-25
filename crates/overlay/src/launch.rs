@@ -64,6 +64,85 @@ fn scan(id: &str) -> bool {
     false
 }
 
+/// The AppId a `reaper SteamLaunch AppId=<id>` command line launches.
+fn launch_app_id(cmdline: &[u8]) -> Option<&str> {
+    let mut prev_was_steamlaunch = false;
+    for arg in cmdline.split(|b| *b == 0) {
+        if prev_was_steamlaunch {
+            return arg.strip_prefix(b"AppId=").and_then(|id| std::str::from_utf8(id).ok()).filter(|id| !id.is_empty());
+        }
+        prev_was_steamlaunch = arg == b"SteamLaunch";
+    }
+    None
+}
+
+/// Lowercase letters and digits only: "Beat Saber" and "BeatSaber" fold alike.
+pub fn fold(name: &str) -> String {
+    name.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// A process's program name, folded: the last piece of its first argument
+/// (a Linux path, or the Windows one Wine shows), without `.exe`.
+fn program(cmdline: &[u8]) -> String {
+    let arg0 = cmdline.split(|b| *b == 0).next().unwrap_or_default();
+    let arg0 = String::from_utf8_lossy(arg0);
+    let base = arg0.rsplit(['/', '\\']).next().unwrap_or_default();
+    let lower = base.to_lowercase();
+    fold(lower.strip_suffix(".exe").unwrap_or(&lower))
+}
+
+/// One process, as far as finding a game's AppId goes.
+struct Proc {
+    pid: u32,
+    ppid: u32,
+    cmdline: Vec<u8>,
+}
+
+fn processes() -> Vec<Proc> {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    dir.flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let cmdline = std::fs::read(e.path().join("cmdline")).ok().filter(|c| !c.is_empty())?;
+            // `pid (comm) state ppid …`: the name can hold spaces and brackets.
+            let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+            let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+            Some(Proc { pid, ppid, cmdline })
+        })
+        .collect()
+}
+
+/// The AppId behind the first process named like `want` (folded) that runs
+/// under a Steam launch.
+fn steam_app_in(procs: &[Proc], want: &str) -> Option<String> {
+    let by_pid: std::collections::HashMap<u32, &Proc> = procs.iter().map(|p| (p.pid, p)).collect();
+    procs.iter().filter(|p| program(&p.cmdline).contains(want)).find_map(|p| {
+        let mut at = Some(p);
+        for _ in 0..64 {
+            let cur = at?;
+            if let Some(id) = launch_app_id(&cur.cmdline) {
+                return Some(id.to_string());
+            }
+            at = by_pid.get(&cur.ppid).copied();
+        }
+        None
+    })
+}
+
+/// The Steam AppId of the game behind an XR client's name, when the name
+/// doesn't say which library game it is. xrizer names an OpenVR game after
+/// its executable ("BladeAndSorcery"), an engine after its project
+/// ("Pavlov" for `Pavlov-Win64-Shipping.exe`): find that process, then the
+/// `reaper SteamLaunch AppId=<id>` it runs under. None for an app Steam
+/// didn't start. Reads all of `/proc`: not for the render thread.
+pub fn steam_app_of(client: &str) -> Option<String> {
+    let want = fold(client);
+    if want.len() < 3 {
+        return None;
+    }
+    steam_app_in(&processes(), &want)
+}
+
 impl ProcWatch {
     pub fn new() -> Self {
         let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -273,6 +352,21 @@ pub fn selftest() -> anyhow::Result<()> {
     if saw_alive.is_none() || saw_gone.is_none() {
         anyhow::bail!("the /proc watch did not follow the stand-in process");
     }
+
+    // A game Steam started, found from the name an XR client gives: a
+    // stand-in reaper with a stand-in Windows game under it.
+    let id = "4343434343";
+    let mut reaper = host::command("bash")
+        .args(["-c", r#"(exec -a 'Z:\games\Fake Game\FakeGame.exe' sleep 3); true"#, "bash", "SteamLaunch", &format!("AppId={id}")])
+        .spawn()?;
+    std::thread::sleep(Duration::from_millis(400));
+    let found = steam_app_of("Fake Game");
+    let stray = steam_app_of("No Such Game Here");
+    let _ = reaper.wait();
+    println!("client 'Fake Game' -> Steam AppId {found:?}; an unknown client -> {stray:?}");
+    if found.as_deref() != Some(id) || stray.is_some() {
+        anyhow::bail!("the client-to-AppId lookup did not find the stand-in game");
+    }
     println!("launch selftest OK");
     Ok(())
 }
@@ -293,6 +387,48 @@ mod tests {
         assert!(!cmdline_is_launch(cmd, "438100"));
         // The id elsewhere on a command line isn't a launch.
         assert!(!cmdline_is_launch(b"cat\0AppId=438100\0", "438100"));
+    }
+
+    fn proc(pid: u32, ppid: u32, cmdline: &[u8]) -> Proc {
+        Proc { pid, ppid, cmdline: cmdline.to_vec() }
+    }
+
+    /// A Proton game's tree as /proc shows it, plus a flat game and a stray.
+    fn tree() -> Vec<Proc> {
+        vec![
+            proc(1, 0, b"/sbin/init\0"),
+            proc(100, 1, b"/home/u/.local/share/Steam/ubuntu12_32/steam\0"),
+            proc(200, 100, b"/home/u/.local/share/Steam/ubuntu12_32/reaper\0SteamLaunch\0AppId=1069740\0--\0/x/_v2-entry-point\0"),
+            proc(210, 200, b"/x/pv-adverb\0--\0python3\0proton\0waitforexitandrun\0"),
+            // Its parent isn't in the table (a real orphan goes to the reaper).
+            proc(230, 777, b"Z:\\home\\u\\Games\\Blade & Sorcery\\BladeAndSorcery.exe\0"),
+            proc(220, 210, b"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Pavlov\\Pavlov-Win64-Shipping.exe\0-vr\0"),
+            proc(300, 100, b"/home/u/.local/share/Steam/ubuntu12_32/reaper\0SteamLaunch\0AppId=620980\0--\0/x/run\0"),
+            proc(310, 300, b"/home/u/Steam/common/Beat Saber/Beat Saber.exe\0"),
+            proc(400, 1, b"/usr/bin/vrchat-helper\0"),
+        ]
+    }
+
+    #[test]
+    fn a_client_name_leads_to_the_steam_launch_it_runs_under() {
+        let t = tree();
+        assert_eq!(steam_app_in(&t, &fold("Pavlov")), Some("1069740".into()));
+        assert_eq!(steam_app_in(&t, &fold("Beat Saber")), Some("620980".into()));
+        assert_eq!(steam_app_in(&t, &fold("BeatSaber")), Some("620980".into()));
+        // Not started by Steam, or no such process, or its parent chain broke.
+        assert_eq!(steam_app_in(&t, &fold("vrchat")), None);
+        assert_eq!(steam_app_in(&t, &fold("Half-Life Alyx")), None);
+        assert_eq!(steam_app_in(&t, &fold("BladeAndSorcery")), None);
+    }
+
+    #[test]
+    fn launch_ids_and_program_names_parse() {
+        assert_eq!(launch_app_id(b"reaper\0SteamLaunch\0AppId=438100\0--\0x\0"), Some("438100"));
+        assert_eq!(launch_app_id(b"reaper\0SteamLaunch\0--\0x\0"), None);
+        assert_eq!(launch_app_id(b"cat\0AppId=438100\0"), None);
+        assert_eq!(program(b"C:\\Games\\Beat Saber.EXE\0-vrmode\0"), "beatsaber");
+        assert_eq!(program(b"/opt/Godot/godot.x86_64\0"), "godotx8664");
+        assert_eq!(fold("Blade & Sorcery: Nomad"), "bladesorcerynomad");
     }
 
     #[test]
