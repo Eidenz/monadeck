@@ -96,6 +96,7 @@ const TOUCH: &[InputDef] = &[
     InputDef { id: "a", label: "A button", side: Side::Right, modes: &[M::Button, M::ToggleButton], touch: false, note: "" },
     InputDef { id: "b", label: "B button", side: Side::Right, modes: &[M::Button, M::ToggleButton], touch: false, note: "" },
     InputDef { id: "grip", label: "Grip", side: Side::Both, modes: &[M::Grab, M::Button, M::ToggleButton], touch: false, note: "" },
+    InputDef { id: "thumbrest", label: "Thumb rest", side: Side::Both, modes: &[M::Button], touch: true, note: "" },
     InputDef { id: "application_menu", label: "Menu button", side: Side::Left, modes: &[M::Button, M::ToggleButton], touch: false, note: "" },
     InputDef { id: "system", label: "System button", side: Side::Right, modes: &[], touch: false, note: "Reserved for the headset" },
 ];
@@ -405,6 +406,8 @@ pub struct HandInput {
     pub pad_touch: bool,
     /// The system button (the menu button on a left Touch controller).
     pub system: bool,
+    /// Thumb rest touch.
+    pub thumbrest: bool,
 }
 
 /// What an input reads: pressed (analog ones past a threshold), touched (if
@@ -486,6 +489,7 @@ impl Evaluator {
             "a" | "x" => Reading { click: inp.a, ..Default::default() },
             "b" | "y" => Reading { click: inp.b, ..Default::default() },
             "system" | "application_menu" => Reading { click: inp.system, ..Default::default() },
+            "thumbrest" => Reading { touch: inp.thumbrest, ..Default::default() },
             _ => Reading::default(),
         }
     }
@@ -681,6 +685,7 @@ mod tests {
         pad_force: 0.0,
         pad_touch: false,
         system: false,
+        thumbrest: false,
     };
 
     #[test]

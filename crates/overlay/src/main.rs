@@ -1876,6 +1876,7 @@ fn run() -> Result<()> {
                     pad_force: r.pad_force,
                     pad_touch: r.pad_touch,
                     system: sys_raw[hi] && !sys_chord[hi],
+                    thumbrest: thumbrest_action.state(&session, if hi == 0 { left_path } else { right_path }).map(|s| s.current_state).unwrap_or(false),
                 }
             });
             let docs = [&own_docs[tys[0]], &own_docs[tys[1]]];
